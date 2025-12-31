@@ -5,19 +5,19 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.IdClass;
 import jakarta.persistence.Table;
 import lombok.Data;
 
 @Entity
 @Table(name = "role_permissions")
+@IdClass(RolePermissionId.class)
 @Data
 public class RolePermissionsEntity {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    private Integer role_id;
 
-    private Long role_id;
-
+    @Id
     private Integer permission_id;
 }

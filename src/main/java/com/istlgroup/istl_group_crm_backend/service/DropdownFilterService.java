@@ -4,13 +4,18 @@ package com.istlgroup.istl_group_crm_backend.service;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.DropdownGroupWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.DropdownProjectWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.DropdownSubGroupWrapper;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadsUserWrapper;
 import com.istlgroup.istl_group_crm_backend.entity.DropdownGroupEntity;
 import com.istlgroup.istl_group_crm_backend.entity.DropdownProjectEntity;
 import com.istlgroup.istl_group_crm_backend.entity.DropdownSubGroupEntity;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownGroupRepository;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownProjectRepository;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownSubGroupRepository;
+import com.istlgroup.istl_group_crm_backend.repo.UsersRepo;
+
 import lombok.RequiredArgsConstructor;
+
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -21,7 +26,8 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 @Transactional(readOnly = true)
 public class DropdownFilterService {
-    
+	@Autowired
+    private UsersRepo usersRepo;
     private final DropdownGroupRepository groupRepository;
     private final DropdownSubGroupRepository subGroupRepository;
     private final DropdownProjectRepository projectRepository;
@@ -55,5 +61,13 @@ public class DropdownFilterService {
     public DropdownProjectEntity getProjectByUniqueId(String projectUniqueId) {
         return projectRepository.findByProjectUniqueId(projectUniqueId)
             .orElseThrow(() -> new RuntimeException("Project not found: " + projectUniqueId));
+    }
+    public List<LeadsUserWrapper> getLeadsUsers() {
+        return usersRepo.findAllActiveUsers().stream()
+            .map(user -> new LeadsUserWrapper(
+                user.getId(),
+                user.getName() != null ? user.getName() : user.getUser_id()
+            ))
+            .collect(Collectors.toList());
     }
 }
