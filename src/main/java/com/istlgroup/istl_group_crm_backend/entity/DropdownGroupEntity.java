@@ -1,6 +1,7 @@
 // DropdownGroupEntity.java
 package com.istlgroup.istl_group_crm_backend.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonManagedReference;
 
 import jakarta.persistence.CascadeType;
@@ -35,7 +36,7 @@ public class DropdownGroupEntity {
     @Column(name = "group_name", nullable = false, unique = true, length = 100)
     private String groupName;
     
-    @Column(name = "group_label", nullable = false, length = 100)
+    @Column(name = "group_label", nullable = false, length = 200)
     private String groupLabel;
     
     @Column(name = "description", columnDefinition = "TEXT")
@@ -53,6 +54,6 @@ public class DropdownGroupEntity {
     private LocalDateTime updatedAt;
     
     @OneToMany(mappedBy = "group", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
-    @JsonManagedReference
+    @JsonIgnoreProperties({"group", "projects"})
     private List<DropdownSubGroupEntity> subGroups;
 }

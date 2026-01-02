@@ -2,6 +2,8 @@
 package com.istlgroup.istl_group_crm_backend.entity;
 
 import com.fasterxml.jackson.annotation.JsonBackReference;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -39,9 +41,9 @@ public class DropdownProjectEntity {
     @Column(name = "project_unique_id", nullable = false, unique = true, length = 50)
     private String projectUniqueId;
     
-    @ManyToOne(fetch = FetchType.LAZY)
+    @ManyToOne(fetch = FetchType.EAGER)
     @JoinColumn(name = "sub_group_id", nullable = false)
-    @JsonBackReference
+    @JsonIgnoreProperties({"projects"})
     private DropdownSubGroupEntity subGroup;
     
     @Column(name = "project_name", nullable = false, length = 200)
