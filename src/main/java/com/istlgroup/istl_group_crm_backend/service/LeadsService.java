@@ -330,8 +330,13 @@ public class LeadsService {
      */
     private String generateLeadCode() {
         String year = String.valueOf(LocalDateTime.now().getYear());
-        long count = leadsRepo.count() + 1;
-        return String.format("LD-%s-%03d", year, count);
+        
+        // Get count of leads with codes starting with "LEAD-2025"
+        long countInYear = leadsRepo.countByLeadCodeStartingWith("LEAD-" + year);
+        long nextSequence = countInYear + 1;
+        
+        // Use 4 digits minimum, expands automatically beyond 9999
+        return String.format("LEAD-%s-%04d", year, nextSequence);
     }
 
     /**

@@ -34,4 +34,5 @@ public class MenuPermissionsEntity {
 	    private Integer procurement_quotations_recived;
 	    private Integer procurement_purchase_orders;
 	    private Integer procurement_bills_received;
+	    private Integer office_use;
 }
