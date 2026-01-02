@@ -111,7 +111,7 @@ public class LoginService {
 	    if (p.getProcurement_quotations_recived() == 1) permissions.add("PROCUREMENT_QUOTATIONS");
 	    if (p.getProcurement_purchase_orders() == 1) permissions.add("PROCUREMENT_PURCHASE_ORDERS");
 	    if (p.getProcurement_bills_received() == 1) permissions.add("PROCUREMENT_BILLS");
-
+	    if (p.getOffice_use() == 1) permissions.add("OFFICE_USE");
 	    return permissions;
 	}
 

@@ -39,7 +39,8 @@ public interface LeadsRepo extends JpaRepository<LeadsEntity, Long> {
 
     // Find by source
     List<LeadsEntity> findBySourceAndDeletedAtIsNull(String source);
-
+//create new lead id
+    long countByLeadCodeStartingWith(String prefix);
     // Complex search query for filters
     @Query("SELECT l FROM LeadsEntity l WHERE l.deletedAt IS NULL " +
            "AND (:searchTerm IS NULL OR LOWER(l.name) LIKE LOWER(CONCAT('%', :searchTerm, '%')) " +
