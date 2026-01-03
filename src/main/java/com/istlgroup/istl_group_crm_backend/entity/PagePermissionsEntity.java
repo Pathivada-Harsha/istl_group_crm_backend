@@ -21,109 +21,109 @@ public class PagePermissionsEntity {
     private Long user_id;
 
     // USERS
-    private Integer users_view;
-    private Integer users_create;
-    private Integer users_edit;
-    private Integer users_delete;
+    private Integer users_view=0;
+    private Integer users_create=0;
+    private Integer users_edit=0;
+    private Integer users_delete=0;
 
     // ROLES
-    private Integer roles_manage;
+    private Integer roles_manage=0;
 
     // CUSTOMERS
-    private Integer customers_view;
-    private Integer customers_create;
-    private Integer customers_edit;
-    private Integer customers_delete;
+    private Integer customers_view=0;
+    private Integer customers_create=0;
+    private Integer customers_edit=0;
+    private Integer customers_delete=0;
 
     // VENDORS
-    private Integer vendors_view;
-    private Integer vendors_create;
-    private Integer vendors_edit;
-    private Integer vendors_delete;
+    private Integer vendors_view=0;
+    private Integer vendors_create=0;
+    private Integer vendors_edit=0;
+    private Integer vendors_delete=0;
 
     // LEADS
-    private Integer leads_view;
-    private Integer leads_create;
-    private Integer leads_edit;
-    private Integer leads_delete;
-    private Integer leads_assign;
+    private Integer leads_view=0;
+    private Integer leads_create=0;
+    private Integer leads_edit=0;
+    private Integer leads_delete=0;
+    private Integer leads_assign=0;
 
     // PROPOSALS
-    private Integer proposals_view;
-    private Integer proposals_create;
-    private Integer proposals_edit;
-    private Integer proposals_delete;
-    private Integer proposals_approve;
+    private Integer proposals_view=0;
+    private Integer proposals_create=0;
+    private Integer proposals_edit=0;
+    private Integer proposals_delete=0;
+    private Integer proposals_approve=0;
 
     // QUOTATIONS SALES
-    private Integer quotations_sales_view;
-    private Integer quotations_sales_create;
-    private Integer quotations_sales_edit;
-    private Integer quotations_sales_delete;
-    private Integer quotations_sales_approve;
+    private Integer quotations_sales_view=0;
+    private Integer quotations_sales_create=0;
+    private Integer quotations_sales_edit=0;
+    private Integer quotations_sales_delete=0;
+    private Integer quotations_sales_approve=0;
 
     // SALES ORDERS
-    private Integer sales_orders_view;
-    private Integer sales_orders_create;
-    private Integer sales_orders_edit;
-    private Integer sales_orders_delete;
-    private Integer sales_orders_approve;
+    private Integer sales_orders_view=0;
+    private Integer sales_orders_create=0;
+    private Integer sales_orders_edit=0;
+    private Integer sales_orders_delete=0;
+    private Integer sales_orders_approve=0;
 
     // INVOICES
-    private Integer invoices_view;
-    private Integer invoices_create;
-    private Integer invoices_edit;
-    private Integer invoices_delete;
-    private Integer invoices_send;
+    private Integer invoices_view=0;
+    private Integer invoices_create=0;
+    private Integer invoices_edit=0;
+    private Integer invoices_delete=0;
+    private Integer invoices_send=0;
 
     // QUOTATIONS PROCUREMENT
-    private Integer quotations_procurement_view;
-    private Integer quotations_procurement_create;
-    private Integer quotations_procurement_edit;
-    private Integer quotations_procurement_delete;
-    private Integer quotations_procurement_approve;
+    private Integer quotations_procurement_view=0;
+    private Integer quotations_procurement_create=0;
+    private Integer quotations_procurement_edit=0;
+    private Integer quotations_procurement_delete=0;
+    private Integer quotations_procurement_approve=0;
 
     // PURCHASE ORDERS
-    private Integer purchase_orders_view;
-    private Integer purchase_orders_create;
-    private Integer purchase_orders_edit;
-    private Integer purchase_orders_delete;
-    private Integer purchase_orders_approve;
+    private Integer purchase_orders_view=0;
+    private Integer purchase_orders_create=0;
+    private Integer purchase_orders_edit=0;
+    private Integer purchase_orders_delete=0;
+    private Integer purchase_orders_approve=0;
 
     // BILLS
-    private Integer bills_view;
-    private Integer bills_create;
-    private Integer bills_edit;
-    private Integer bills_delete;
-    private Integer bills_approve;
+    private Integer bills_view=0;
+    private Integer bills_create=0;
+    private Integer bills_edit=0;
+    private Integer bills_delete=0;
+    private Integer bills_approve=0;
 
     // PAYMENTS
-    private Integer payments_view;
-    private Integer payments_record;
-    private Integer payments_approve;
+    private Integer payments_view=0;
+    private Integer payments_record=0;
+    private Integer payments_approve=0;
 
     // REPORTS
-    private Integer reports_sales;
-    private Integer reports_procurement;
-    private Integer reports_financial;
-    private Integer reports_analytics;
+    private Integer reports_sales=0;
+    private Integer reports_procurement=0;
+    private Integer reports_financial=0;
+    private Integer reports_analytics=0;
 
     // FOLLOWUPS
-    private Integer followups_view;
-    private Integer followups_create;
-    private Integer followups_edit;
-    private Integer followups_delete;
+    private Integer followups_view=0;
+    private Integer followups_create=0;
+    private Integer followups_edit=0;
+    private Integer followups_delete=0;
 
     // SETTINGS
-    private Integer settings_view;
-    private Integer settings_edit;
+    private Integer settings_view=0;
+    private Integer settings_edit=0;
 
     // ACTIVITY LOGS
-    private Integer activity_logs_view;
+    private Integer activity_logs_view=0;
 
     // ATTACHMENTS
-    private Integer attachments_upload;
-    private Integer attachments_delete;
+    private Integer attachments_upload=0;
+    private Integer attachments_delete=0;
 
     // AUDIT
   

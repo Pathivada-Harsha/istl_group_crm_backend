@@ -10,11 +10,101 @@ import org.springframework.stereotype.Repository;
 import com.istlgroup.istl_group_crm_backend.entity.UsersEntity;
 
 @Repository
-public interface UsersRepo extends JpaRepository<UsersEntity,Long> {
-	@Query(value = "SELECT * FROM users WHERE is_active = 1", nativeQuery = true)
-    List<UsersEntity> findAllActiveUsers();
+public interface UsersRepo extends JpaRepository<UsersEntity, Long> {
 	
-	@Query("SELECT c FROM UsersEntity c WHERE c.user_id = :userid ")
-	public UsersEntity isUserIdExist(@Param("userid") String userid);
+	@Query(value = "SELECT * FROM users WHERE is_active = 1", nativeQuery = true)
+	List<UsersEntity> findAllActiveUsers();
 
+	@Query("SELECT c FROM UsersEntity c WHERE c.user_id = :userid")
+	UsersEntity isUserIdExist(@Param("userid") String userid);
+
+	// Get distinct roles
+	@Query("SELECT DISTINCT u.role FROM UsersEntity u ORDER BY u.role")
+	List<String> findDistinctRoles();
+
+	// Count by active status
+	@Query(value = "SELECT COUNT(*) FROM users WHERE is_active = :isActive", nativeQuery = true)
+	long countByIsActive(@Param("isActive") Long isActive);
+
+	// Search by name, email, or user_id with pagination
+	@Query(value = """
+		SELECT * FROM users 
+		WHERE (LOWER(name) LIKE LOWER(CONCAT('%', :searchTerm, '%')) 
+		   OR LOWER(email) LIKE LOWER(CONCAT('%', :searchTerm, '%')) 
+		   OR LOWER(user_id) LIKE LOWER(CONCAT('%', :searchTerm, '%')))
+		ORDER BY id 
+		LIMIT :size OFFSET :offset
+	""", nativeQuery = true)
+	List<UsersEntity> searchByNameOrEmailOrUserId(
+		@Param("searchTerm") String searchTerm,
+		@Param("size") int size,
+		@Param("offset") int offset
+	);
+
+	// Count search results
+	@Query(value = """
+		SELECT COUNT(*) FROM users 
+		WHERE (LOWER(name) LIKE LOWER(CONCAT('%', :searchTerm, '%')) 
+		   OR LOWER(email) LIKE LOWER(CONCAT('%', :searchTerm, '%')) 
+		   OR LOWER(user_id) LIKE LOWER(CONCAT('%', :searchTerm, '%')))
+	""", nativeQuery = true)
+	long countSearchResults(@Param("searchTerm") String searchTerm);
+
+	// Search by name, email, or user_id AND role with pagination
+	@Query(value = """
+		SELECT * FROM users 
+		WHERE (LOWER(name) LIKE LOWER(CONCAT('%', :searchTerm, '%')) 
+		   OR LOWER(email) LIKE LOWER(CONCAT('%', :searchTerm, '%')) 
+		   OR LOWER(user_id) LIKE LOWER(CONCAT('%', :searchTerm, '%')))
+		  AND role = :role
+		ORDER BY id 
+		LIMIT :size OFFSET :offset
+	""", nativeQuery = true)
+	List<UsersEntity> searchByNameOrEmailOrUserIdAndRole(
+		@Param("searchTerm") String searchTerm,
+		@Param("role") String role,
+		@Param("size") int size,
+		@Param("offset") int offset
+	);
+
+	// Count search results with role filter
+	@Query(value = """
+		SELECT COUNT(*) FROM users 
+		WHERE (LOWER(name) LIKE LOWER(CONCAT('%', :searchTerm, '%')) 
+		   OR LOWER(email) LIKE LOWER(CONCAT('%', :searchTerm, '%')) 
+		   OR LOWER(user_id) LIKE LOWER(CONCAT('%', :searchTerm, '%')))
+		  AND role = :role
+	""", nativeQuery = true)
+	long countSearchResultsWithRole(
+		@Param("searchTerm") String searchTerm,
+		@Param("role") String role
+	);
+
+	// Find by role only with pagination
+	@Query(value = """
+		SELECT * FROM users 
+		WHERE role = :role
+		ORDER BY id 
+		LIMIT :size OFFSET :offset
+	""", nativeQuery = true)
+	List<UsersEntity> findByRole(
+		@Param("role") String role,
+		@Param("size") int size,
+		@Param("offset") int offset
+	);
+
+	// Count by role
+	@Query(value = "SELECT COUNT(*) FROM users WHERE role = :role", nativeQuery = true)
+	long countByRole(@Param("role") String role);
+
+	// Get all users with pagination (no filters)
+	@Query(value = """
+		SELECT * FROM users 
+		ORDER BY id 
+		LIMIT :size OFFSET :offset
+	""", nativeQuery = true)
+	List<UsersEntity> findAllWithPagination(
+		@Param("size") int size,
+		@Param("offset") int offset
+	);
 }

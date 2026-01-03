@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
@@ -47,11 +48,23 @@ public class LoginController {
 	}
 	
 	//User Related Data Fetching for Users page in the UI
+//	@GetMapping("/users/{userId}")
+//	public UsersResponseWrapper Users(@PathVariable Long userId)throws CustomException {
+//		return logingService.Users(userId);
+//	}
+
+	// User Related Data Fetching for Users page in the UI (WITH PAGINATION)
 	@GetMapping("/users/{userId}")
-	public UsersResponseWrapper Users(@PathVariable Long userId)throws CustomException {
-		return logingService.Users(userId);
+	public UsersResponseWrapper users( @PathVariable Long userId,@RequestParam int page, @RequestParam int size) throws CustomException {
+	    return logingService.Users(userId, page, size);
 	}
-	
+
+	@GetMapping("/usersPagenation/{loggedInUserId}")
+	public ResponseEntity<?> getUsers(@PathVariable Long loggedInUserId,@RequestParam int page,@RequestParam int size) {
+	    return ResponseEntity.ok(logingService.getUsers(page, size));
+	}
+
+
 	//Get Page Permissions for Users Page
 	@GetMapping("/pagePermissions/{id}")
 	public ResponseEntity<?> GetPagePermissions(@PathVariable Long id)throws CustomException {

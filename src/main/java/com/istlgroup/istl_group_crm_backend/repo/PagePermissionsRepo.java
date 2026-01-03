@@ -12,6 +12,8 @@ public interface PagePermissionsRepo extends JpaRepository<PagePermissionsEntity
 
 	@Query("SELECT c FROM PagePermissionsEntity c WHERE c.user_id = :user_id")
 	Optional<PagePermissionsEntity> findByUserId(Long user_id);
+	
+
 
 
 }

@@ -6,6 +6,7 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,7 +24,7 @@ import com.istlgroup.istl_group_crm_backend.entity.PagePermissionsEntity;
 import com.istlgroup.istl_group_crm_backend.repo.LoginRepo;
 import com.istlgroup.istl_group_crm_backend.repo.MenuPermissionsRepo;
 import com.istlgroup.istl_group_crm_backend.repo.PagePermissionsRepo;
-
+import com.istlgroup.istl_group_crm_backend.repo.RolesRepo;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LoginCredentialsWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LoginResponseWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.UserWrapper;
@@ -42,6 +43,9 @@ public class LoginService {
 //	@Autowired
 //	private PermissionsRepo page_permissions;
 
+	@Autowired
+	private RolesRepo rolesRepo;
+	
 	@Autowired
 	private PagePermissionsRepo pagePermissions;
 	
@@ -94,6 +98,7 @@ public class LoginService {
 //		  System.err.println(pagePermissions.findByUserId(response.getId()));
 		  Optional<PagePermissionsEntity> res=pagePermissions.findByUserId(response.getId());
 		  Map<String, List<String>> PagePermissions =extractPagePermissionsData(res);
+		  
 //		  System.err.println(result);
 //		  Map<String, List<String>> pagesPermissions= extractPagePermissions(p_permissions);
 		  
@@ -108,23 +113,25 @@ public class LoginService {
 
 	    List<String> permissions = new ArrayList<>();
 
-	    if (p.getDashboard() == 1) permissions.add("DASHBOARD");
-	    if (p.getAnalytics() == 1) permissions.add("ANALYTICS");
-	    if (p.getDocuments() == 1) permissions.add("DOCUMENTS");
-	    if (p.getSettings() == 1) permissions.add("SETTINGS");
-	    if (p.getFollow_ups() == 1) permissions.add("FOLLOW_UPS");
-	    if (p.getReports() == 1) permissions.add("REPORTS");
-	    if (p.getInvoices() == 1) permissions.add("INVOICES");
-	    if (p.getSales_clients() == 1) permissions.add("SALES_CLIENTS");
-	    if (p.getSales_leads() == 1) permissions.add("SALES_LEADS");
-	    if (p.getSales_estimation() == 1) permissions.add("SALES_ESTIMATION");
-	    if (p.getProcurement_venders() == 1) permissions.add("PROCUREMENT_VENDERS");
-	    if (p.getProcurement_quotations_recived() == 1) permissions.add("PROCUREMENT_QUOTATIONS");
-	    if (p.getProcurement_purchase_orders() == 1) permissions.add("PROCUREMENT_PURCHASE_ORDERS");
-	    if (p.getProcurement_bills_received() == 1) permissions.add("PROCUREMENT_BILLS");
-	    if (p.getOffice_use() == 1) permissions.add("OFFICE_USE");
+	    if (Integer.valueOf(1).equals(p.getDashboard())) permissions.add("DASHBOARD");
+	    if (Integer.valueOf(1).equals(p.getAnalytics())) permissions.add("ANALYTICS");
+	    if (Integer.valueOf(1).equals(p.getDocuments())) permissions.add("DOCUMENTS");
+	    if (Integer.valueOf(1).equals(p.getSettings())) permissions.add("SETTINGS");
+	    if (Integer.valueOf(1).equals(p.getFollow_ups())) permissions.add("FOLLOW_UPS");
+	    if (Integer.valueOf(1).equals(p.getReports())) permissions.add("REPORTS");
+	    if (Integer.valueOf(1).equals(p.getInvoices())) permissions.add("INVOICES");
+	    if (Integer.valueOf(1).equals(p.getSales_clients())) permissions.add("SALES_CLIENTS");
+	    if (Integer.valueOf(1).equals(p.getSales_leads())) permissions.add("SALES_LEADS");
+	    if (Integer.valueOf(1).equals(p.getSales_estimation())) permissions.add("SALES_ESTIMATION");
+	    if (Integer.valueOf(1).equals(p.getProcurement_venders())) permissions.add("PROCUREMENT_VENDERS");
+	    if (Integer.valueOf(1).equals(p.getProcurement_quotations_recived())) permissions.add("PROCUREMENT_QUOTATIONS");
+	    if (Integer.valueOf(1).equals(p.getProcurement_purchase_orders())) permissions.add("PROCUREMENT_PURCHASE_ORDERS");
+	    if (Integer.valueOf(1).equals(p.getProcurement_bills_received())) permissions.add("PROCUREMENT_BILLS");
+	    if (Integer.valueOf(1).equals(p.getOffice_use())) permissions.add("OFFICE_USE");
+
 	    return permissions;
 	}
+
 
 	public ResponseEntity<?> UpdateUser(LoginEntity newData, Long id) throws CustomException {
 		
@@ -166,18 +173,101 @@ public class LoginService {
 	}
 
 
-	public UsersResponseWrapper Users(Long userId) throws CustomException {
+//	public UsersResponseWrapper Users(Long userId) throws CustomException {
+//
+//	     loginRepo.findById(userId).orElseThrow(() -> new CustomException("Invalid User"));
+//
+//	    List<LoginEntity> users;
+//
+//	    // If SuperAdmin (userId = 1), get ALL users in the system
+//	    if (userId == 1L) {
+//	        users = loginRepo.findAll(); // Get absolutely all users
+//	    } else {
+//	        // For other users, get only users created by them
+//	        users = loginRepo.getAllUsers(userId);
+//	    }
+//
+//	    List<UserWrapper> userWrappers = users.stream()
+//	        .map(user -> {
+//	            UserWrapper wrapper = new UserWrapper();
+//	            wrapper.setId(user.getId());
+//	            wrapper.setUser_id(user.getUser_id());
+//	            wrapper.setEmail(user.getEmail());
+//	            wrapper.setName(user.getName());
+//	            wrapper.setPhone(user.getPhone());
+//	            wrapper.setIs_active(user.getIs_active());
+//	            wrapper.setCreated_at(user.getCreated_at());
+//	            wrapper.setRole(user.getRole());
+//
+////	            List<PermissionsEntity> p_permissions = page_permissions.findPermissionsByRoleId(user.getId());
+//	            Optional<PagePermissionsEntity> p_permissions =pagePermissions.findByUserId(user.getId());
+//
+//	            long totalPermissionCount =countEnabledPagePermissions(p_permissions);
+//
+//	            wrapper.setPagePermissionsCount(totalPermissionCount);
+//
+////	            if (p_permissions == null || p_permissions.isEmpty()) {
+////	                wrapper.setPagePermissionsCount((long) 0);
+////	            } else {
+////	                wrapper.setPagePermissionsCount((long) p_permissions.size());
+////	            }
+//
+//	           
+//	            MenuPermissionsEntity permissions = menu_permissions.findByUsersId(user.getId());
+//	            if (permissions == null) {
+//	                wrapper.setMenuPermissionsCount((long) 0);
+//	            } else {
+//	                List<String> menu_list = extractPermissions(permissions);
+//	                wrapper.setMenuPermissionsCount((long) menu_list.size());
+//	            }
+//
+//	            return wrapper;
+//	        })
+//	        .toList();
+//
+//	    int totalUsers = users.size();
+//	    int activeUsers = (int) users.stream().filter(u -> u.getIs_active() == 1).count();
+//	    int inactiveUsers = (int) users.stream().filter(u -> u.getIs_active() == 0).count();
+//
+//	    
+//	    
+//// this method will show the roles under the user only
+////	    List<String> roles = users.stream()
+////	            .map(LoginEntity::getRole)
+////	            .distinct()
+////	            .toList();
+//	    List<String> roles=rolesRepo.getAllRoles();
+//	    UsersResponseWrapper response = new UsersResponseWrapper();
+//	    response.setUserWrapper(userWrappers);
+//	    response.setTotalUsers(totalUsers);
+//	    response.setActiveUsers(activeUsers);
+//	    response.setInactiveUsers(inactiveUsers);
+//	    response.setRoles(roles);
+//
+//	    return response;
+//	}
 
-	     loginRepo.findById(userId).orElseThrow(() -> new CustomException("Invalid User"));
+	
+	public UsersResponseWrapper Users(Long userId, int page, int size) throws CustomException {
+
+	    // Validate logged-in user
+	    loginRepo.findById(userId)
+	            .orElseThrow(() -> new CustomException("Invalid User"));
+
+	    int offset = (page - 1) * size;
 
 	    List<LoginEntity> users;
+	    long totalUsers;
 
-	    // If SuperAdmin (userId = 1), get ALL users in the system
+	    // SUPER ADMIN
 	    if (userId == 1L) {
-	        users = loginRepo.findAll(); // Get absolutely all users
-	    } else {
-	        // For other users, get only users created by them
-	        users = loginRepo.getAllUsers(userId);
+	        users = loginRepo.findAllUsersWithPagination(size, offset);
+	        totalUsers = loginRepo.count();
+	    }
+	    // NORMAL USER
+	    else {
+	        users = loginRepo.findUsersByCreatedByWithPagination(userId, size, offset);
+	        totalUsers = loginRepo.countUsersByCreatedBy(userId);
 	    }
 
 	    List<UserWrapper> userWrappers = users.stream()
@@ -192,24 +282,19 @@ public class LoginService {
 	            wrapper.setCreated_at(user.getCreated_at());
 	            wrapper.setRole(user.getRole());
 
-//	            List<PermissionsEntity> p_permissions = page_permissions.findPermissionsByRoleId(user.getId());
+	            // Page permissions count
 	            Optional<PagePermissionsEntity> p_permissions =
 	                    pagePermissions.findByUserId(user.getId());
 
-	            long totalPermissionCount =countEnabledPagePermissions(p_permissions);
-
+	            long totalPermissionCount = countEnabledPagePermissions(p_permissions);
 	            wrapper.setPagePermissionsCount(totalPermissionCount);
 
-//	            if (p_permissions == null || p_permissions.isEmpty()) {
-//	                wrapper.setPagePermissionsCount((long) 0);
-//	            } else {
-//	                wrapper.setPagePermissionsCount((long) p_permissions.size());
-//	            }
+	            // Menu permissions count
+	            MenuPermissionsEntity permissions =
+	                    menu_permissions.findByUsersId(user.getId());
 
-	           
-	            MenuPermissionsEntity permissions = menu_permissions.findByUsersId(user.getId());
 	            if (permissions == null) {
-	                wrapper.setMenuPermissionsCount((long) 0);
+	                wrapper.setMenuPermissionsCount(0L);
 	            } else {
 	                List<String> menu_list = extractPermissions(permissions);
 	                wrapper.setMenuPermissionsCount((long) menu_list.size());
@@ -219,26 +304,31 @@ public class LoginService {
 	        })
 	        .toList();
 
-	    int totalUsers = users.size();
-	    int activeUsers = (int) users.stream().filter(u -> u.getIs_active() == 1).count();
-	    int inactiveUsers = (int) users.stream().filter(u -> u.getIs_active() == 0).count();
+	    int activeUsers = (int) users.stream()
+	            .filter(u -> u.getIs_active() == 1)
+	            .count();
 
-	    List<String> roles = users.stream()
-	            .map(LoginEntity::getRole)
-	            .distinct()
-	            .toList();
+	    int inactiveUsers = (int) users.stream()
+	            .filter(u -> u.getIs_active() == 0)
+	            .count();
+
+	    List<String> roles = rolesRepo.getAllRoles();
 
 	    UsersResponseWrapper response = new UsersResponseWrapper();
 	    response.setUserWrapper(userWrappers);
-	    response.setTotalUsers(totalUsers);
+	    response.setTotalUsers((int) totalUsers);
 	    response.setActiveUsers(activeUsers);
 	    response.setInactiveUsers(inactiveUsers);
 	    response.setRoles(roles);
 
+	    // Pagination metadata (VERY IMPORTANT FOR UI)
+	    response.setCurrentPage(page);
+	    response.setPageSize(size);
+	    response.setTotalPages((int) Math.ceil((double) totalUsers / size));
+
 	    return response;
 	}
-	
-	
+
 	public long countEnabledPagePermissions(Optional<PagePermissionsEntity> res) {
 
 	    if (res.isEmpty()) {
@@ -499,4 +589,23 @@ public class LoginService {
 
 	    return result;
 	}
+
+	public Map<String, Object> getUsers(int page, int size) {
+
+	    int offset = (page - 1) * size; // ✅ CORRECT
+
+	    List<LoginEntity> users = loginRepo.findUsersWithPagination(size, offset);
+	    long totalUsers = loginRepo.count();
+
+	    Map<String, Object> response = new HashMap<>();
+	    response.put("userWrapper", users);
+	    response.put("totalUsers", totalUsers);
+	    response.put("currentPage", page);
+	    response.put("pageSize", size);
+	    response.put("totalPages", (int) Math.ceil((double) totalUsers / size));
+
+	    return response;
+	}
+
+
 }
