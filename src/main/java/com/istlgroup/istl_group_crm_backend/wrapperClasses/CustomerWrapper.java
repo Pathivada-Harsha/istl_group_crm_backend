@@ -3,23 +3,27 @@ package com.istlgroup.istl_group_crm_backend.wrapperClasses;
 import lombok.Data;
 
 @Data
-public class LeadWrapper {
+public class CustomerWrapper {
     private Long id;
-    private String leadCode;
-    private Long customerId;
+    private String customerCode;
     private String name;
+    private String companyName;
+    private String groupName;
+    private String contactPerson;
+    private String designation;
     private String email;
     private String phone;
-    private String source;
-    private String priority;
+    private String altPhone;
+    private String website;
+    private String gstNumber;
+    private String pan;
+    private String address;
+    private String city;
+    private String state;
+    private String pincode;
     private String status;
     private Long assignedTo;
     private String assignedToName;
-    private String enquiry;
-    private String groupName;
-    private String subGroupName;
-    private Long createdBy;
-    private String createdByName;
     private String createdAt;
     private String updatedAt;
     

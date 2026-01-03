@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadWrapper;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.CustomerWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadFilterRequestWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadRequestWrapper;
 import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
@@ -24,7 +25,10 @@ public class LeadsService {
 
     @Autowired
     private UsersRepo usersRepo;
-
+    @Autowired
+    private CustomersService customersService;
+    @Autowired
+    private FollowupsService followupsService;
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     /**
@@ -35,7 +39,7 @@ public class LeadsService {
      */
     public List<LeadWrapper> getAllLeads(Long userId, String userRole, String groupName, String subGroupName) {
         List<LeadsEntity> leads;
-
+        System.err.print(userRole);
         if ("SUPERADMIN".equalsIgnoreCase(userRole)) {
             leads = leadsRepo.findByDeletedAtIsNull();
         } else if ("ADMIN".equalsIgnoreCase(userRole)) {
@@ -174,6 +178,9 @@ public class LeadsService {
             throw new CustomException("Access denied to update this lead");
         }
 
+        // Store old status to check if it changed
+        String oldStatus = lead.getStatus();
+
         // Update fields
         if (requestWrapper.getCustomerId() != null) {
             lead.setCustomerId(requestWrapper.getCustomerId());
@@ -210,6 +217,27 @@ public class LeadsService {
         }
 
         LeadsEntity updatedLead = leadsRepo.save(lead);
+        
+        // Check if status changed to "Closed Won"
+        if (!"Closed Won".equalsIgnoreCase(oldStatus) && 
+            "Closed Won".equalsIgnoreCase(updatedLead.getStatus())) {
+            try {
+                // Convert lead to customer
+                CustomerWrapper customer = customersService.convertLeadToCustomer(updatedLead);
+                
+                // Update lead with customer_id
+                updatedLead.setCustomerId(customer.getId());
+                updatedLead = leadsRepo.save(updatedLead);
+                
+                // You can add a success message or log here
+                System.out.println("Lead " + updatedLead.getLeadCode() + 
+                                 " converted to customer " + customer.getCustomerCode());
+            } catch (Exception e) {
+                // Log the error but don't fail the lead update
+                System.err.println("Failed to convert lead to customer: " + e.getMessage());
+            }
+        }
+
         return convertToWrapper(updatedLead);
     }
 
@@ -353,33 +381,38 @@ public class LeadsService {
         wrapper.setSource(entity.getSource());
         wrapper.setPriority(entity.getPriority());
         wrapper.setStatus(entity.getStatus());
-        wrapper.setAssignedTo(entity.getAssignedTo());
         wrapper.setEnquiry(entity.getEnquiry());
         wrapper.setGroupName(entity.getGroupName());
         wrapper.setSubGroupName(entity.getSubGroupName());
+        wrapper.setAssignedTo(entity.getAssignedTo());
         wrapper.setCreatedBy(entity.getCreatedBy());
-
-        // Get user names
+        wrapper.setCreatedAt(entity.getCreatedAt() != null ? entity.getCreatedAt().toString() : null);
+        wrapper.setUpdatedAt(entity.getUpdatedAt() != null ? entity.getUpdatedAt().toString() : null);
+        
+        // Fetch user names
         if (entity.getAssignedTo() != null) {
             usersRepo.findById(entity.getAssignedTo()).ifPresent(user -> 
                 wrapper.setAssignedToName(user.getName())
             );
         }
-
+        
         if (entity.getCreatedBy() != null) {
             usersRepo.findById(entity.getCreatedBy()).ifPresent(user -> 
                 wrapper.setCreatedByName(user.getName())
             );
         }
-
-        if (entity.getCreatedAt() != null) {
-            wrapper.setCreatedAt(entity.getCreatedAt().format(DATE_FORMATTER));
+        
+        // *** ADD THIS: Check for pending followups ***
+        try {
+            boolean hasPending = followupsService.hasLeadPendingFollowups(entity.getId());
+            int count = followupsService.getPendingFollowupsCountForLead(entity.getId());
+            wrapper.setHasPendingFollowups(hasPending);
+            wrapper.setPendingFollowupsCount(count);
+        } catch (Exception e) {
+            wrapper.setHasPendingFollowups(false);
+            wrapper.setPendingFollowupsCount(0);
         }
-
-        if (entity.getUpdatedAt() != null) {
-            wrapper.setUpdatedAt(entity.getUpdatedAt().format(DATE_FORMATTER));
-        }
-
+        
         return wrapper;
     }
 }

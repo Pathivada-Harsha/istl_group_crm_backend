@@ -35,6 +35,7 @@ public class LeadsController {
             @RequestParam(required = false) String groupName,
             @RequestParam(required = false) String subGroupName) {
         try {
+        	
             List<LeadWrapper> leads = leadsService.getAllLeads(userId, userRole, groupName, subGroupName);
             
             Map<String, Object> response = new HashMap<>();
