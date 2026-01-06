@@ -32,34 +32,34 @@ public class CustomersService {
     /**
      * Get all customers based on user role
      */
-    public List<CustomerWrapper> getAllCustomers(Long userId, String userRole, String groupName, String subGroupName) {
-        List<CustomersEntity> customers;
-        
-        if ("SUPERADMIN".equalsIgnoreCase(userRole) || "ADMIN".equalsIgnoreCase(userRole)) {
-            // Admin sees all customers
-            customers = customersRepo.findByDeletedAtIsNull();
-        } else {
-            // Regular users see only customers created by them
-            customers = customersRepo.findByCreatedByAndDeletedAtIsNull(userId);
-        }
-        
-        // Apply group filter if provided
-        if (groupName != null && !groupName.isEmpty()) {
-            try {
-                CustomersEntity.GroupName group = CustomersEntity.GroupName.valueOf(groupName);
-                customers = customers.stream()
-                    .filter(c -> c.getGroupName() == group)
-                    .collect(Collectors.toList());
-            } catch (IllegalArgumentException ignored) {
-                // Invalid group name, return empty list
-                return List.of();
-            }
-        }
-        
-        return customers.stream()
-                .map(this::convertToWrapper)
-                .collect(Collectors.toList());
-    }
+//    public List<CustomerWrapper> getAllCustomers(Long userId, String userRole, String groupName, String subGroupName) {
+//        List<CustomersEntity> customers;
+//        
+//        if ("SUPERADMIN".equalsIgnoreCase(userRole) || "ADMIN".equalsIgnoreCase(userRole)) {
+//            // Admin sees all customers
+//            customers = customersRepo.findByDeletedAtIsNull();
+//        } else {
+//            // Regular users see only customers created by them
+//            customers = customersRepo.findByCreatedByAndDeletedAtIsNull(userId);
+//        }
+//        
+//        // Apply group filter if provided
+//        if (groupName != null && !groupName.isEmpty()) {
+//            try {
+//                CustomersEntity.GroupName group = CustomersEntity.GroupName.valueOf(groupName);
+//                customers = customers.stream()
+//                    .filter(c -> c.getGroupName() == group)
+//                    .collect(Collectors.toList());
+//            } catch (IllegalArgumentException ignored) {
+//                // Invalid group name, return empty list
+//                return List.of();
+//            }
+//        }
+//        
+//        return customers.stream()
+//                .map(this::convertToWrapper)
+//                .collect(Collectors.toList());
+//    }
     
     /**
      * Get filtered customers based on role
@@ -303,7 +303,8 @@ public class CustomersService {
         }
         
         // Regular users can only access customers assigned to them
-        return customer.getAssignedTo() != null && customer.getAssignedTo().equals(userId);
+        return (customer.getAssignedTo() != null && customer.getAssignedTo().equals(userId))
+        	    || (customer.getCreatedBy() != null && customer.getCreatedBy().equals(userId));
     }
     
     /**
@@ -419,16 +420,16 @@ customerPage = customersRepo.findByDeletedAtIsNull(pageable);
 customerPage = customersRepo.findByDeletedAtIsNull(pageable);
 }
 } else {
-// Regular users see only customers created by them
+// Regular users see customers created by them OR assigned to them
 if (groupName != null && !groupName.isEmpty()) {
 try {
 CustomersEntity.GroupName group = CustomersEntity.GroupName.valueOf(groupName);
-customerPage = customersRepo.findByCreatedByAndGroupNameAndDeletedAtIsNull(userId, group, pageable);
+customerPage = customersRepo.findByUserAndGroupNameAndDeletedAtIsNull(userId, group, pageable);
 } catch (IllegalArgumentException e) {
-customerPage = customersRepo.findByCreatedByAndDeletedAtIsNull(userId, pageable);
+customerPage = customersRepo.findByCreatedByOrAssignedToAndDeletedAtIsNull(userId, pageable);
 }
 } else {
-customerPage = customersRepo.findByCreatedByAndDeletedAtIsNull(userId, pageable);
+customerPage = customersRepo.findByCreatedByOrAssignedToAndDeletedAtIsNull(userId, pageable);
 }
 }
 
@@ -480,4 +481,4 @@ pageable
 
 return customerPage.map(this::convertToWrapper);
 }
-}
+	}

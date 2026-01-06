@@ -33,9 +33,33 @@ public interface CustomersRepo extends JpaRepository<CustomersEntity, Long> {
     List<CustomersEntity> findByDeletedAtIsNull();
     
     /**
-     * Find customers created by a specific user
+     * Find customers created by a specific user OR assigned to them
      */
-    List<CustomersEntity> findByCreatedByAndDeletedAtIsNull(Long createdBy);
+    @Query("SELECT c FROM CustomersEntity c WHERE " +
+           "c.deletedAt IS NULL AND " +
+           "(c.createdBy = :userId OR c.assignedTo = :userId)")
+    List<CustomersEntity> findByCreatedByOrAssignedToAndDeletedAtIsNull(@Param("userId") Long userId);
+    
+    /**
+     * Find customers created by a specific user OR assigned to them with pagination
+     */
+    @Query("SELECT c FROM CustomersEntity c WHERE " +
+           "c.deletedAt IS NULL AND " +
+           "(c.createdBy = :userId OR c.assignedTo = :userId)")
+    Page<CustomersEntity> findByCreatedByOrAssignedToAndDeletedAtIsNull(@Param("userId") Long userId, Pageable pageable);
+    
+    /**
+     * Find by group name for specific user (created by OR assigned to) with pagination
+     */
+    @Query("SELECT c FROM CustomersEntity c WHERE " +
+           "c.deletedAt IS NULL AND " +
+           "(c.createdBy = :userId OR c.assignedTo = :userId) AND " +
+           "c.groupName = :groupName")
+    Page<CustomersEntity> findByUserAndGroupNameAndDeletedAtIsNull(
+        @Param("userId") Long userId, 
+        @Param("groupName") CustomersEntity.GroupName groupName, 
+        Pageable pageable
+    );
     
     /**
      * Find customers by status and not deleted
@@ -70,7 +94,7 @@ public interface CustomersRepo extends JpaRepository<CustomersEntity, Long> {
     Page<CustomersEntity> findByGroupNameAndDeletedAtIsNull(CustomersEntity.GroupName groupName, Pageable pageable);
     
     /**
-     * Find by created by and group name with pagination
+     * Find by created by and group name with pagination (deprecated - use findByUserAndGroupNameAndDeletedAtIsNull)
      */
     Page<CustomersEntity> findByCreatedByAndGroupNameAndDeletedAtIsNull(Long createdBy, CustomersEntity.GroupName groupName, Pageable pageable);
     
@@ -107,11 +131,11 @@ public interface CustomersRepo extends JpaRepository<CustomersEntity, Long> {
     );
     
     /**
-     * Search customers for regular users (only created by them)
+     * Search customers for regular users (created by them OR assigned to them)
      */
     @Query("SELECT c FROM CustomersEntity c WHERE " +
            "c.deletedAt IS NULL AND " +
-           "c.createdBy = :userId AND " +
+           "(c.createdBy = :userId OR c.assignedTo = :userId) AND " +
            "(:searchTerm IS NULL OR " +
            "LOWER(c.name) LIKE LOWER(CONCAT('%', :searchTerm, '%')) OR " +
            "LOWER(c.companyName) LIKE LOWER(CONCAT('%', :searchTerm, '%')) OR " +
@@ -170,11 +194,11 @@ public interface CustomersRepo extends JpaRepository<CustomersEntity, Long> {
     );
     
     /**
-     * Search customers for regular users (only created by them) with pagination
+     * Search customers for regular users (created by them OR assigned to them) with pagination
      */
     @Query("SELECT c FROM CustomersEntity c WHERE " +
            "c.deletedAt IS NULL AND " +
-           "c.createdBy = :userId AND " +
+           "(c.createdBy = :userId OR c.assignedTo = :userId) AND " +
            "(:searchTerm IS NULL OR " +
            "LOWER(c.name) LIKE LOWER(CONCAT('%', :searchTerm, '%')) OR " +
            "LOWER(c.companyName) LIKE LOWER(CONCAT('%', :searchTerm, '%')) OR " +
