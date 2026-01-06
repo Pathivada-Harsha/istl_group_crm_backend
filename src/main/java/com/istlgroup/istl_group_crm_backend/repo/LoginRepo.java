@@ -23,31 +23,20 @@ public interface LoginRepo extends JpaRepository<LoginEntity,Long> {
 	@Query(value = "SELECT * FROM users ORDER BY id LIMIT :size OFFSET :offset",nativeQuery = true)
 	public List<LoginEntity> findUsersWithPagination(@Param("size") int size,@Param("offset") int offset);
 
-	@Query(value = """
-		    SELECT * FROM users
-		    ORDER BY id
-		    LIMIT :size OFFSET :offset
-		""", nativeQuery = true)
-		List<LoginEntity> findAllUsersWithPagination(
-		        @Param("size") int size,
-		        @Param("offset") int offset
-		);
+	@Query(value = "SELECT * FROM users ORDER BY id LIMIT :size OFFSET :offset", nativeQuery = true)
+	public List<LoginEntity> findAllUsersWithPagination( @Param("size") int size,@Param("offset") int offset);
+	
 	@Query(value = "SELECT COUNT(*) FROM users WHERE created_by = :userId", nativeQuery = true)
-	long countUsersByCreatedBy(@Param("userId") Long userId);
-	@Query(value = """
-		    SELECT * FROM users
-		    WHERE created_by = :userId
-		    ORDER BY id
-		    LIMIT :size OFFSET :offset
-		""", nativeQuery = true)
-		List<LoginEntity> findUsersByCreatedByWithPagination(
-		        @Param("userId") Long userId,
-		        @Param("size") int size,
-		        @Param("offset") int offset
-		);
+	public long countUsersByCreatedBy(@Param("userId") Long userId);
+	
+	@Query(value = "SELECT * FROM users  WHERE created_by = :userId  ORDER BY id  LIMIT :size OFFSET :offset", nativeQuery = true)
+	public List<LoginEntity> findUsersByCreatedByWithPagination( @Param("userId") Long userId, @Param("size") int size, @Param("offset") int offset);
 
 	
+	@Query(value="SELECT COUNT(*) FROM users WHERE is_active=1 AND created_by=:userId", nativeQuery = true)
+	public long totalActiveUsersById(@Param("userId") Long userId);
 	
-
+	@Query(value="SELECT COUNT(*) FROM users WHERE is_active=1", nativeQuery = true)
+	public long totalActiveUsers(Long userId);
 
 }

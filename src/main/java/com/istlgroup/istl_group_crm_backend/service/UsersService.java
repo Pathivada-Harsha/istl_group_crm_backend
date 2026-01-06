@@ -543,7 +543,7 @@ public class UsersService {
 	public UsersResponseWrapper SearchUsers(Long userId, String searchTerm, String role, int page, int size) throws CustomException {
 	    
 	    // Validate logged-in user
-	    usersRepo.findById(userId)
+	    UsersEntity loggedInUser = usersRepo.findById(userId)
 	            .orElseThrow(() -> new CustomException("Invalid User"));
 
 	    int offset = (page - 1) * size;
@@ -551,28 +551,63 @@ public class UsersService {
 	    List<UsersEntity> users;
 	    long totalUsers;
 
-	    // Determine which query to use based on filters
-	    if (searchTerm == null || searchTerm.trim().isEmpty()) {
-	        // No search term
-	        if (role.equals("all")) {
-	            // No filters at all
-	            users = usersRepo.findAllWithPagination(size, offset);
-	            totalUsers = usersRepo.count();
+	    // Clean up search term
+	    String cleanSearchTerm = (searchTerm == null || searchTerm.trim().isEmpty()) ? null : searchTerm.trim();
+	    
+	    // SUPERADMIN - can see ALL users
+	    if ("SUPERADMIN".equalsIgnoreCase(loggedInUser.getRole())) {
+	        
+	        // Determine which query to use based on filters
+	        if (cleanSearchTerm == null) {
+	            // No search term
+	            if (role.equals("all")) {
+	                // No filters at all
+	                users = usersRepo.findAllWithPagination(size, offset);
+	                totalUsers = usersRepo.count();
+	            } else {
+	                // Only role filter
+	                users = usersRepo.findByRole(role, size, offset);
+	                totalUsers = usersRepo.countByRole(role);
+	            }
 	        } else {
-	            // Only role filter
-	            users = usersRepo.findByRole(role, size, offset);
-	            totalUsers = usersRepo.countByRole(role);
+	            // Has search term
+	            if (role.equals("all")) {
+	                // Only search term filter
+	                users = usersRepo.searchByNameOrEmailOrUserId(cleanSearchTerm, size, offset);
+	                totalUsers = usersRepo.countSearchResults(cleanSearchTerm);
+	            } else {
+	                // Both search term and role filter
+	                users = usersRepo.searchByNameOrEmailOrUserIdAndRole(cleanSearchTerm, role, size, offset);
+	                totalUsers = usersRepo.countSearchResultsWithRole(cleanSearchTerm, role);
+	            }
 	        }
-	    } else {
-	        // Has search term
-	        if (role.equals("all")) {
-	            // Only search term filter
-	            users = usersRepo.searchByNameOrEmailOrUserId(searchTerm, size, offset);
-	            totalUsers = usersRepo.countSearchResults(searchTerm);
+	    } 
+	    // NORMAL USER - can only see users they created
+	    else {
+	        
+	        // Determine which query to use based on filters
+	        if (cleanSearchTerm == null) {
+	            // No search term
+	            if (role.equals("all")) {
+	                // No filters - just created_by
+	                users = usersRepo.findByCreatedBy(userId, size, offset);
+	                totalUsers = usersRepo.countByCreatedBy(userId);
+	            } else {
+	                // created_by + role filter
+	                users = usersRepo.findByCreatedByAndRole(userId, role, size, offset);
+	                totalUsers = usersRepo.countByCreatedByAndRole(userId, role);
+	            }
 	        } else {
-	            // Both search term and role filter
-	            users = usersRepo.searchByNameOrEmailOrUserIdAndRole(searchTerm, role, size, offset);
-	            totalUsers = usersRepo.countSearchResultsWithRole(searchTerm, role);
+	            // Has search term
+	            if (role.equals("all")) {
+	                // created_by + search term
+	                users = usersRepo.searchByCreatedBy(userId, cleanSearchTerm, size, offset);
+	                totalUsers = usersRepo.countSearchByCreatedBy(userId, cleanSearchTerm);
+	            } else {
+	                // created_by + search term + role filter
+	                users = usersRepo.searchByCreatedByAndRole(userId, cleanSearchTerm, role, size, offset);
+	                totalUsers = usersRepo.countSearchByCreatedByAndRole(userId, cleanSearchTerm, role);
+	            }
 	        }
 	    }
 
@@ -611,14 +646,14 @@ public class UsersService {
 	        })
 	        .toList();
 
-	    // Count active/inactive from current result set
-	    int activeUsers = (int) users.stream()
-	            .filter(u -> u.getIs_active() == 1)
-	            .count();
+	    // Count active/inactive from TOTAL results (not just current page)
+	    int activeUsers = (int) (cleanSearchTerm == null && role.equals("all") 
+	        ? usersRepo.countByIsActive(1L) 
+	        : users.stream().filter(u -> u.getIs_active() == 1).count());
 
-	    int inactiveUsers = (int) users.stream()
-	            .filter(u -> u.getIs_active() == 0)
-	            .count();
+	    int inactiveUsers = (int) (cleanSearchTerm == null && role.equals("all")
+	        ? usersRepo.countByIsActive(0L)
+	        : users.stream().filter(u -> u.getIs_active() == 0).count());
 
 	    // Get all unique roles for filter dropdown
 	    List<String> allRoles = usersRepo.findDistinctRoles();
@@ -638,7 +673,9 @@ public class UsersService {
 
 	    return response;
 	}
-
+	
+	
+	
 	// Helper method to count page permissions
 	private long countEnabledPagePermissions(Optional<PagePermissionsEntity> res) {
 	    if (res.isEmpty()) {

@@ -251,23 +251,33 @@ public class LoginService {
 	public UsersResponseWrapper Users(Long userId, int page, int size) throws CustomException {
 
 	    // Validate logged-in user
-	    loginRepo.findById(userId)
+	    LoginEntity existedUser = loginRepo.findById(userId)
 	            .orElseThrow(() -> new CustomException("Invalid User"));
 
 	    int offset = (page - 1) * size;
 
 	    List<LoginEntity> users;
 	    long totalUsers;
-
-	    // SUPER ADMIN
-	    if (userId == 1L) {
+	    
+	    long activeUsers = 0;
+	    long inactiveUsers =0;
+	    
+	    // SUPER ADMIN - FIX: Use .equalsIgnoreCase() instead of ==
+	    if ("SUPERADMIN".equalsIgnoreCase(existedUser.getRole())) {
+	       
 	        users = loginRepo.findAllUsersWithPagination(size, offset);
 	        totalUsers = loginRepo.count();
+	        activeUsers = loginRepo.totalActiveUsers(userId);
+		    inactiveUsers = totalUsers - activeUsers;
 	    }
 	    // NORMAL USER
 	    else {
+	        
 	        users = loginRepo.findUsersByCreatedByWithPagination(userId, size, offset);
 	        totalUsers = loginRepo.countUsersByCreatedBy(userId);
+	        activeUsers = loginRepo.totalActiveUsersById(userId);
+		    inactiveUsers = totalUsers - activeUsers;
+	       
 	    }
 
 	    List<UserWrapper> userWrappers = users.stream()
@@ -304,14 +314,8 @@ public class LoginService {
 	        })
 	        .toList();
 
-	    int activeUsers = (int) users.stream()
-	            .filter(u -> u.getIs_active() == 1)
-	            .count();
-
-	    int inactiveUsers = (int) users.stream()
-	            .filter(u -> u.getIs_active() == 0)
-	            .count();
-
+	    
+	   
 	    List<String> roles = rolesRepo.getAllRoles();
 
 	    UsersResponseWrapper response = new UsersResponseWrapper();

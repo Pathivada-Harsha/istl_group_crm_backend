@@ -10,8 +10,8 @@ public class UsersResponseWrapper {
     private List<UserWrapper> userWrapper;
 
     private int totalUsers;
-    private int activeUsers;
-    private int inactiveUsers;
+    private long activeUsers;
+    private long inactiveUsers;
     private List<String> roles;
     private int currentPage;
     private int totalPages;
