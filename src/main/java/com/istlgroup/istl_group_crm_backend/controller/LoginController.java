@@ -1,20 +1,11 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
-
 import java.util.List;
 import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.CrossOrigin;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.PutMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.LoginEntity;
@@ -22,63 +13,75 @@ import com.istlgroup.istl_group_crm_backend.service.LoginService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LoginResponseWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.UsersResponseWrapper;
 
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpSession;
+
 @RestController
 @RequestMapping("/login")
-@CrossOrigin(origins = "${cros.allowed-origins}")
 public class LoginController {
 
-	@Autowired
-	private LoginService logingService;
-	
-	@PostMapping("/userLogin")
-	public ResponseEntity<LoginResponseWrapper> Login(@RequestBody Map<String, String> credentials) throws CustomException {
-		return logingService.AuthenticateUser(credentials);
-	}
-	
-	//Update User Deatils
-	@PutMapping("/updateUser/{id}")
-	public ResponseEntity<?> UpdateUser(@RequestBody LoginEntity newData,@PathVariable Long id) throws CustomException {
-		return logingService.UpdateUser(newData,id);
-	}
-	
-	//Update User Password
-	@PutMapping("/updatePassword/{id}")
-	public ResponseEntity<String> UpdatePassword(@RequestBody Map<String, String> credentials,@PathVariable Long id) throws CustomException{
-		return  logingService.UpdatePassword(credentials,id);
-	}
-	
-	//User Related Data Fetching for Users page in the UI
-//	@GetMapping("/users/{userId}")
-//	public UsersResponseWrapper Users(@PathVariable Long userId)throws CustomException {
-//		return logingService.Users(userId);
-//	}
+    @Autowired
+    private LoginService logingService;
 
-	// User Related Data Fetching for Users page in the UI (WITH PAGINATION)
-	@GetMapping("/users/{userId}")
-	public UsersResponseWrapper users( @PathVariable Long userId,@RequestParam int page, @RequestParam int size) throws CustomException {
-	    return logingService.Users(userId, page, size);
-	}
+    // ✅ LOGIN
+    @PostMapping("/userLogin")
+    public ResponseEntity<LoginResponseWrapper> login(
+            @RequestBody Map<String, String> credentials,
+            HttpServletRequest request
+    ) throws CustomException {
+        return logingService.AuthenticateUser(credentials, request);
+    }
 
-	@GetMapping("/usersPagenation/{loggedInUserId}")
-	public ResponseEntity<?> getUsers(@PathVariable Long loggedInUserId,@RequestParam int page,@RequestParam int size) {
-	    return ResponseEntity.ok(logingService.getUsers(page, size));
-	}
+    // ✅ LOGOUT
+    @PostMapping("/logout")
+    public ResponseEntity<?> logout(HttpSession session) {
+        session.invalidate();
+        return ResponseEntity.ok("Logged out");
+    }
+    
+    @GetMapping("/ping")
+    public ResponseEntity<String> keepAlive(HttpSession session) {
+        // Just touching session is enough
+        return ResponseEntity.ok("ALIVE");
+    }
 
 
-	//Get Page Permissions for Users Page
-	@GetMapping("/pagePermissions/{id}")
-	public ResponseEntity<?> GetPagePermissions(@PathVariable Long id)throws CustomException {
+    // ------------------ OTHER APIs ------------------
 
-	    Object response = logingService.GetPagePermissions(id);
-	  
-	    return ResponseEntity.ok(response);
-	}
-	
-	@GetMapping("/menuPermissions/{id}")
-	public List<String> GetMenuPermissions(@PathVariable Long id)throws CustomException {
+    @PutMapping("/updateUser/{id}")
+    public ResponseEntity<?> updateUser(
+            @RequestBody LoginEntity newData,
+            @PathVariable Long id
+    ) throws CustomException {
+        return logingService.UpdateUser(newData, id);
+    }
 
-//	    Object response = logingService.GetMenuPermissions(id);
-	    return logingService.GetMenuPermissions(id);
-	}
+    @PutMapping("/updatePassword/{id}")
+    public ResponseEntity<String> updatePassword(
+            @RequestBody Map<String, String> credentials,
+            @PathVariable Long id
+    ) throws CustomException {
+        return logingService.UpdatePassword(credentials, id);
+    }
 
+    @GetMapping("/users/{userId}")
+    public UsersResponseWrapper users(
+            @PathVariable Long userId,
+            @RequestParam int page,
+            @RequestParam int size
+    ) throws CustomException {
+        return logingService.Users(userId, page, size);
+    }
+
+    @GetMapping("/menuPermissions/{id}")
+    public List<String> getMenuPermissions(@PathVariable Long id)
+            throws CustomException {
+        return logingService.GetMenuPermissions(id);
+    }
+
+    @GetMapping("/pagePermissions/{id}")
+    public ResponseEntity<?> getPagePermissions(@PathVariable Long id)
+            throws CustomException {
+        return ResponseEntity.ok(logingService.GetPagePermissions(id));
+    }
 }

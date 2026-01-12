@@ -22,7 +22,7 @@ import com.istlgroup.istl_group_crm_backend.service.UsersService;
 
 @RestController
 @RequestMapping("/users")
-@CrossOrigin(origins = "${cros.allowed-origins}")
+//@CrossOrigin(origins = "${cros.allowed-origins}")
 public class UsersController {
 
 	@Autowired

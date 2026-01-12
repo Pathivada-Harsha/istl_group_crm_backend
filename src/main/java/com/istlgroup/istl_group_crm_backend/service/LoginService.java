@@ -17,6 +17,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.LoginEntity;
@@ -30,6 +33,9 @@ import com.istlgroup.istl_group_crm_backend.wrapperClasses.LoginCredentialsWrapp
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LoginResponseWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.UserWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.UsersResponseWrapper;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpSession;
 
 
 @Service
@@ -50,7 +56,7 @@ public class LoginService {
 	@Autowired
 	private PagePermissionsRepo pagePermissions;
 	
-	public ResponseEntity<LoginResponseWrapper> AuthenticateUser(Map<String, String> credentials) throws CustomException{
+	public ResponseEntity<LoginResponseWrapper> AuthenticateUser(Map<String, String> credentials,HttpServletRequest request) throws CustomException{
 		
 		String username=credentials.get("username");
 		String password=credentials.get("password");
@@ -60,6 +66,24 @@ public class LoginService {
 	        throw new CustomException("Invalid Credentials");
 	    }
 		
+	    UsernamePasswordAuthenticationToken authentication =
+	            new UsernamePasswordAuthenticationToken(
+	                    response.getUser_id(),
+	                    null,
+	                    List.of()
+	            );
+
+	    SecurityContextHolder.getContext().setAuthentication(authentication);
+
+	    request.getSession(true).setAttribute(
+	            HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY,
+	            SecurityContextHolder.getContext()
+	    );
+		
+	    HttpSession session = request.getSession(true);
+	    session.setAttribute("USER_ID", response.getId());
+//	    session.setMaxInactiveInterval(120); 
+
 		Long byId = response.getCreated_by();
 
 		String Name = loginRepo.findRoleByUserId(byId).orElseGet(() -> {if ("SUPERADMIN".equals(response.getRole().toUpperCase())) {return "SUPERADMIN";}
