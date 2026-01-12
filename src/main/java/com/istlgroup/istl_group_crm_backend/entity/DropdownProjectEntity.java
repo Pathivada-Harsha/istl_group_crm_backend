@@ -46,6 +46,15 @@ public class DropdownProjectEntity {
     @JsonIgnoreProperties({"projects"})
     private DropdownSubGroupEntity subGroup;
     
+    @Column(name = "Lead_id")
+    private String lead_id;
+    
+    @Column(name = "group_id")
+    private String group_id;
+    
+    @Column(name = "sub_group_name")
+    private String subGroupName;
+    
     @Column(name = "project_name", nullable = false, length = 200)
     private String projectName;
     
@@ -82,4 +91,6 @@ public class DropdownProjectEntity {
     public enum ProjectStatus {
         PLANNING, IN_PROGRESS, COMPLETED, ON_HOLD, CANCELLED
     }
+
+	
 }

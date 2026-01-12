@@ -3,9 +3,14 @@ package com.istlgroup.istl_group_crm_backend.service;
 
 import com.istlgroup.istl_group_crm_backend.entity.DropdownProjectEntity;
 import com.istlgroup.istl_group_crm_backend.entity.DropdownSubGroupEntity;
+import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownProjectRepository;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownSubGroupRepository;
 import lombok.RequiredArgsConstructor;
+
+import java.time.LocalDateTime;
+import java.util.Optional;
+
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,7 +30,7 @@ public class DropdownProjectService {
         
         // Generate unique project ID if not provided
         if (project.getProjectUniqueId() == null || project.getProjectUniqueId().isEmpty()) {
-            project.setProjectUniqueId(generateUniqueProjectId(subGroup));
+            generateProjectCode();
         }
         
         return projectRepository.save(project);
@@ -88,4 +93,38 @@ public class DropdownProjectService {
         
         return prefix + String.format("%03d", nextNumber);
     }
+    private String generateProjectCode() {
+        String year = String.valueOf(LocalDateTime.now().getYear());
+        
+        // Get count of leads with codes starting with "LEAD-2025"
+        long countInYear = projectRepository.countByProjectUniqueIdStartingWith("PROJ-" + year);
+        long nextSequence = countInYear + 1;
+        
+        // Use 4 digits minimum, expands automatically beyond 9999
+        return String.format("PROJ-%s-%04d", year, nextSequence);
+    }
+    
+    public DropdownProjectEntity createProjectFromLead( LeadsEntity Lead) {
+		// TODO Auto-generated method stub
+		DropdownProjectEntity projectEntity = new DropdownProjectEntity();
+		projectEntity.setLead_id(Lead.getLeadCode());
+		projectEntity.setGroup_id(Lead.getGroupName());
+		projectEntity.setSubGroupName(Lead.getSubGroupName());
+		projectEntity.setProjectName(Lead.getName());
+		projectEntity.setDescription(Lead.getEnquiry());
+		projectEntity.setCreatedAt(Lead.getCreatedAt());
+		DropdownSubGroupEntity subGroup =
+	            subGroupRepository.findBysubGroupName(Lead.getSubGroupName())
+	            .orElseThrow(() -> new RuntimeException("Sub group not found"));
+
+	    // ✅ set relation (FK)
+		projectEntity.setSubGroup(subGroup);
+
+		 if (projectEntity.getProjectUniqueId() == null || projectEntity.getProjectUniqueId().isEmpty()) {
+			 projectEntity.setProjectUniqueId(generateProjectCode());
+	        }
+		 DropdownProjectEntity ent = projectRepository.save(projectEntity);
+		return  ent;
+	}
+    
 }

@@ -13,6 +13,7 @@ import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.CustomerWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadFilterRequestWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadRequestWrapper;
+import com.istlgroup.istl_group_crm_backend.entity.DropdownProjectEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
 import com.istlgroup.istl_group_crm_backend.repo.LeadsRepo;
 import com.istlgroup.istl_group_crm_backend.repo.UsersRepo;
@@ -29,6 +30,9 @@ public class LeadsService {
     private CustomersService customersService;
     @Autowired
     private FollowupsService followupsService;
+    @Autowired
+    private DropdownProjectService projectService;
+   
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     /**
@@ -228,10 +232,11 @@ public class LeadsService {
                 // Update lead with customer_id
                 updatedLead.setCustomerId(customer.getId());
                 updatedLead = leadsRepo.save(updatedLead);
-                
-                // You can add a success message or log here
+                 
+                DropdownProjectEntity projectEntity =
+                        projectService.createProjectFromLead(updatedLead);                // You can add a success message or log here
                 System.out.println("Lead " + updatedLead.getLeadCode() + 
-                                 " converted to customer " + customer.getCustomerCode());
+                                 " converted to customer " + customer.getCustomerCode() + "converted to project"+projectEntity.getProjectUniqueId());
             } catch (Exception e) {
                 // Log the error but don't fail the lead update
                 System.err.println("Failed to convert lead to customer: " + e.getMessage());

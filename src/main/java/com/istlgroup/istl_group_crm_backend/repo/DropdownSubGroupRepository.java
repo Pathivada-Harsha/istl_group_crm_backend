@@ -7,13 +7,16 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Optional;
 
 @Repository
 public interface DropdownSubGroupRepository extends JpaRepository<DropdownSubGroupEntity, Long> {
     
     @Query("SELECT sg FROM DropdownSubGroupEntity sg WHERE sg.group.groupName = :groupName AND sg.isActive = true")
     List<DropdownSubGroupEntity> findByGroupNameAndIsActiveTrue(@Param("groupName") String groupName);
-    List<DropdownSubGroupEntity> findAll(); 
+    List<DropdownSubGroupEntity> findAll();
+    
+    Optional<DropdownSubGroupEntity> findBysubGroupName(String subGroupName); 
 
 }
 

@@ -30,4 +30,6 @@ public interface DropdownProjectRepository extends JpaRepository<DropdownProject
     String findMaxProjectIdByPrefix(@Param("prefix") String prefix);
     
     List<DropdownProjectEntity> findAll(); // Add this for admin page
+
+	long countByProjectUniqueIdStartingWith(String prefix);
 }

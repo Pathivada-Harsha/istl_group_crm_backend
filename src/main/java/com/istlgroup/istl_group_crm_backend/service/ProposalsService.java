@@ -365,9 +365,9 @@ public class ProposalsService {
             return false;
         }
         else 
-        	{
+        {
         	return true;
-        	}
+        }
 
         
     }
