@@ -1,6 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.repo;
 
 import java.util.List;
+import java.util.Optional;
 
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -222,4 +223,9 @@ public interface UsersRepo extends JpaRepository<UsersEntity, Long> {
 		@Param("searchTerm") String searchTerm,
 		@Param("role") String role
 	);
+
+	 Optional<UsersEntity> findByEmail(String email);
+	    Optional<UsersEntity> findByName(String name);
+	    Optional<UsersEntity> findByPhone(String phone);
+	    Optional<UsersEntity> findByRole(String role);
 }
