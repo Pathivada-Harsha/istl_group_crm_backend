@@ -8,3 +8,5 @@ import com.istlgroup.istl_group_crm_backend.entity.BillItemEntity;
 @Repository
 public interface BillItemRepository extends JpaRepository<BillItemEntity, Long> {
 }
+
+

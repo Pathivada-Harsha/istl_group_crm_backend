@@ -3,7 +3,6 @@ package com.istlgroup.istl_group_crm_backend.service;
 import com.istlgroup.istl_group_crm_backend.entity.BillEntity;
 import com.istlgroup.istl_group_crm_backend.entity.BillItemEntity;
 import com.istlgroup.istl_group_crm_backend.entity.BillPaymentEntity;
-import com.istlgroup.istl_group_crm_backend.entity.VendorEntity;
 import com.istlgroup.istl_group_crm_backend.repo.BillItemRepository;
 import com.istlgroup.istl_group_crm_backend.repo.BillPaymentRepository;
 import com.istlgroup.istl_group_crm_backend.repo.BillRepository;
@@ -32,6 +31,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.util.List;
@@ -110,60 +110,75 @@ public class BillService {
     
     @Transactional
     public BillDTO createBill(BillDTO dto, Long userId) {
+        log.info("Creating bill for vendor: {}, user: {}", dto.getVendorId(), userId);
+        
+        // Validate
         if (dto.getVendorId() == null) {
             throw new RuntimeException("Vendor ID is required");
         }
         
+        // Check vendor exists
         vendorRepository.findById(dto.getVendorId())
                 .orElseThrow(() -> new RuntimeException("Vendor not found: " + dto.getVendorId()));
         
+        // Generate bill number if not provided
         if (dto.getBillNo() == null || dto.getBillNo().isEmpty()) {
             dto.setBillNo(generateBillNumber());
         }
         
+        // Check if bill number already exists
         if (billRepository.existsByBillNo(dto.getBillNo())) {
             throw new RuntimeException("Bill number already exists: " + dto.getBillNo());
         }
         
-        BillEntity bill = BillEntity.builder()
-                .billNo(dto.getBillNo())
-                .vendorId(dto.getVendorId())
-                .poId(dto.getPoId())
-                .billDate(dto.getBillDate())
-                .dueDate(dto.getDueDate())
-                .totalAmount(BigDecimal.ZERO)
-                .paidAmount(BigDecimal.ZERO)
-                .status("Pending")
-                .projectId(dto.getProjectId())
-                .groupId(dto.getGroupId())
-                .subGroupId(dto.getSubGroupId())
-                .notes(dto.getNotes())
-                .createdBy(userId)
-                .createdAt(LocalDateTime.now())
-                .uploadedBy(userId)
-                .uploadedOn(LocalDateTime.now())
-                .build();
+        // Create bill entity using new operator (NO Builder)
+        BillEntity bill = new BillEntity();
+        bill.setBillNo(dto.getBillNo());
+        bill.setVendorId(dto.getVendorId());
+        bill.setPoId(dto.getPoId());
+        bill.setBillDate(dto.getBillDate());
+        bill.setDueDate(dto.getDueDate());
+        bill.setTotalAmount(BigDecimal.ZERO);
+        bill.setPaidAmount(BigDecimal.ZERO);
+        bill.setStatus("Pending");
+        bill.setProjectId(dto.getProjectId());
+        bill.setGroupId(dto.getGroupId());
+        bill.setSubGroupId(dto.getSubGroupId());
+        bill.setNotes(dto.getNotes());
+        bill.setCreatedBy(userId);
+        bill.setCreatedAt(LocalDateTime.now());
+        bill.setUploadedBy(userId);
+        bill.setUploadedOn(LocalDateTime.now());
         
+        // IMPORTANT: Save bill FIRST to get ID
         bill = billRepository.save(bill);
+        log.info("Bill saved with ID: {}", bill.getId());
         
+        // Add items if provided
         if (dto.getItems() != null && !dto.getItems().isEmpty()) {
+            log.info("Adding {} items to bill", dto.getItems().size());
+            
             for (BillItemDTO itemDTO : dto.getItems()) {
-                BillItemEntity item = BillItemEntity.builder()
-                        .bill(bill)
-                        .poItemId(itemDTO.getPoItemId())
-                        .description(itemDTO.getDescription())
-                        .quantity(itemDTO.getQuantity())
-                        .unitPrice(itemDTO.getUnitPrice())
-                        .taxPercent(itemDTO.getTaxPercent())
-                        .build();
+                BillItemEntity item = new BillItemEntity();
+                item.setPoItemId(itemDTO.getPoItemId());
+                item.setDescription(itemDTO.getDescription());
+                item.setQuantity(itemDTO.getQuantity() != null ? itemDTO.getQuantity() : BigDecimal.ONE);
+                item.setUnitPrice(itemDTO.getUnitPrice() != null ? itemDTO.getUnitPrice() : BigDecimal.ZERO);
+                item.setTaxPercent(itemDTO.getTaxPercent() != null ? itemDTO.getTaxPercent() : BigDecimal.ZERO);
+                
+                // addItem method initializes list if null
                 bill.addItem(item);
             }
         }
         
+        // Calculate total amount
         recalculateBillTotal(bill);
+        
+        // Save again with items and total
         bill = billRepository.save(bill);
         
-        log.info("Created bill: {} by user: {}", bill.getBillNo(), userId);
+        log.info("Created bill: {} with total: {}", bill.getBillNo(), bill.getTotalAmount());
+        
         return enrichBillEntity(bill);
     }
     
@@ -335,28 +350,61 @@ public class BillService {
         return enrichBillEntity(bill);
     }
     
+    /**
+     * FIXED: Get statistics using LocalDate instead of LocalDateTime
+     */
     @Transactional(readOnly = true)
     public BillStatsDTO getStatistics(String projectId, String groupId, String subGroupId) {
-        long totalBills = billRepository.countBills(projectId, groupId, subGroupId);
-        BigDecimal outstandingAmount = billRepository.sumOutstandingAmount(projectId, groupId, subGroupId);
-        
-        YearMonth currentMonth = YearMonth.now();
-        LocalDateTime startOfMonth = currentMonth.atDay(1).atStartOfDay();
-        LocalDateTime endOfMonth = currentMonth.atEndOfMonth().atTime(23, 59, 59);
-        
-        long billsThisMonth = billRepository.countBillsThisMonth(projectId, groupId, subGroupId, startOfMonth, endOfMonth);
-        long paidBills = billRepository.countPaidBills(projectId, groupId, subGroupId);
-        long linkedToPO = billRepository.countLinkedToPO(projectId, groupId, subGroupId);
-        
-        int linkedToPOPercentage = totalBills > 0 ? (int) Math.round((linkedToPO * 100.0) / totalBills) : 0;
-        
-        return BillStatsDTO.builder()
-                .totalBills(totalBills)
-                .outstandingAmount(outstandingAmount)
-                .billsThisMonth(billsThisMonth)
-                .paidBills(paidBills)
-                .linkedToPOPercentage(linkedToPOPercentage)
-                .build();
+        try {
+            log.info("Calculating bill statistics for projectId: {}, groupId: {}, subGroupId: {}", 
+                     projectId, groupId, subGroupId);
+            
+            long totalBills = billRepository.countBills(projectId, groupId, subGroupId);
+            
+            // Handle null outstanding amount
+            BigDecimal outstandingAmount = billRepository.sumOutstandingAmount(projectId, groupId, subGroupId);
+            if (outstandingAmount == null) {
+                outstandingAmount = BigDecimal.ZERO;
+            }
+            
+            // CRITICAL FIX: Use LocalDate instead of LocalDateTime
+            YearMonth currentMonth = YearMonth.now();
+            LocalDate startOfMonth = currentMonth.atDay(1);
+            LocalDate endOfMonth = currentMonth.atEndOfMonth();
+            
+            log.debug("Counting bills between {} and {}", startOfMonth, endOfMonth);
+            
+            long billsThisMonth = billRepository.countBillsThisMonth(
+                projectId, groupId, subGroupId, startOfMonth, endOfMonth
+            );
+            
+            long paidBills = billRepository.countPaidBills(projectId, groupId, subGroupId);
+            long linkedToPO = billRepository.countLinkedToPO(projectId, groupId, subGroupId);
+            
+            int linkedToPOPercentage = totalBills > 0 ? (int) Math.round((linkedToPO * 100.0) / totalBills) : 0;
+            
+            log.info("Bill stats calculated - total: {}, outstanding: {}, thisMonth: {}, paid: {}, linkedPO: {}%", 
+                     totalBills, outstandingAmount, billsThisMonth, paidBills, linkedToPOPercentage);
+            
+            return BillStatsDTO.builder()
+                    .totalBills(totalBills)
+                    .outstandingAmount(outstandingAmount)
+                    .billsThisMonth(billsThisMonth)
+                    .paidBills(paidBills)
+                    .linkedToPOPercentage(linkedToPOPercentage)
+                    .build();
+                    
+        } catch (Exception e) {
+            log.error("Error calculating bill statistics", e);
+            // Return zeros on error instead of throwing
+            return BillStatsDTO.builder()
+                    .totalBills(0)
+                    .outstandingAmount(BigDecimal.ZERO)
+                    .billsThisMonth(0)
+                    .paidBills(0)
+                    .linkedToPOPercentage(0)
+                    .build();
+        }
     }
     
     // ========== HELPER METHODS ==========
@@ -397,12 +445,10 @@ public class BillService {
             });
         }
         
-        // Get uploader name - use your actual UsersEntity field name
+        // Get uploader name
         if (bill.getUploadedBy() != null) {
             usersRepo.findById(bill.getUploadedBy()).ifPresent(user -> {
-                // Change 'getName()' to match your UsersEntity getter
-                // For example: user.getName() or user.getFullName() or user.getEmail()
-                dto.setUploadedByName(user.getName()); 
+                dto.setUploadedByName(user.getName());
             });
         }
         
@@ -481,60 +527,3 @@ public class BillService {
         );
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

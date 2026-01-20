@@ -9,6 +9,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @Repository
@@ -213,4 +214,35 @@ public interface VendorRepository extends JpaRepository<VendorEntity, Long> {
         @Param("subGroupName") String subGroupName,
         @Param("projectId") String projectId
     );
+    
+    
+    
+    /**
+     * Find vendors by created_by and assigned_to for dropdown
+     * Returns id, name, and phone for dropdown selection
+     */
+    @Query("SELECT new map(v.id as id, v.name as name, v.phone as phone) FROM VendorEntity v " +
+            "WHERE v.deletedAt IS NULL " +
+            "AND (v.createdBy = :userId OR v.assignedTo = :userId) " +
+            "ORDER BY v.name ASC")
+    List<Map<String, Object>> findVendorsByUserIdForDropdown(@Param("userId") Long userId);
+     
+    /**
+     * Find vendors who have submitted quotations for other projects
+     * Useful for suggesting vendors with quotation history
+     * COMMENTED OUT FOR NOW - NOT BEING USED
+     */
+    /*
+    @Query("SELECT DISTINCT new map(v.id as id, v.name as name, v.phone as phone, COUNT(q.id) as quotationCount) " +
+           "FROM VendorEntity v " +
+           "INNER JOIN QuotationEntity q ON q.vendorId = v.id " +
+           "WHERE v.deletedAt IS NULL " +
+           "AND (v.createdBy = :userId OR v.assignedTo = :userId) " +
+           "AND q.projectId != :currentProjectId " +
+           "GROUP BY v.id, v.name, v.phone " +
+           "ORDER BY COUNT(q.id) DESC, v.name ASC")
+    List<Map<String, Object>> findVendorsWithQuotationHistoryForDropdown(
+            @Param("userId") Long userId, 
+            @Param("currentProjectId") String currentProjectId);
+    */
 }

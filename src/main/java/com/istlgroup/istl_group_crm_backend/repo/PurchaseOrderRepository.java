@@ -97,4 +97,34 @@ public interface PurchaseOrderRepository extends JpaRepository<PurchaseOrderEnti
     
     @Query("SELECT SUM(po.totalValue) FROM PurchaseOrderEntity po WHERE po.deletedAt IS NULL")
     Double getTotalPOValue();
+    
+    
+    
+    
+    /**
+     * Get dropdown list of POs with vendor names
+     */
+    @Query("SELECT po FROM PurchaseOrderEntity po WHERE po.deletedAt IS NULL ORDER BY po.orderDate DESC")
+    List<PurchaseOrderEntity> findAllForDropdown();
+    
+    /**
+     * Get POs filtered by group/subgroup/project for dropdown
+     */
+    @Query("SELECT po FROM PurchaseOrderEntity po " +
+           "WHERE po.deletedAt IS NULL " +
+           "AND (:groupName IS NULL OR po.groupName = :groupName) " +
+           "AND (:subGroupName IS NULL OR po.subGroupName = :subGroupName) " +
+           "AND (:projectId IS NULL OR po.projectId = :projectId) " +
+           "ORDER BY po.orderDate DESC")
+    List<PurchaseOrderEntity> findAllForDropdownFiltered(
+        @Param("groupName") String groupName,
+        @Param("subGroupName") String subGroupName,
+        @Param("projectId") String projectId
+    );
+    
+    /**
+     * Find POs by vendor
+     */
+    @Query("SELECT po FROM PurchaseOrderEntity po WHERE po.vendorId = :vendorId AND po.deletedAt IS NULL")
+    List<PurchaseOrderEntity> findByVendorId(@Param("vendorId") Long vendorId);
 }

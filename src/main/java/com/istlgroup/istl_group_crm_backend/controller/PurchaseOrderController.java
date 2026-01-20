@@ -2,6 +2,8 @@ package com.istlgroup.istl_group_crm_backend.controller;
 
 import com.istlgroup.istl_group_crm_backend.entity.PurchaseOrderEntity;
 import com.istlgroup.istl_group_crm_backend.service.PurchaseOrderService;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.PurchaseOrderDropdownWrapper;
+
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -453,5 +455,29 @@ public class PurchaseOrderController {
         response.put("success", false);
         response.put("message", message);
         return response;
+    }
+    
+    
+    
+ // Add this endpoint to your PurchaseOrderController.java
+
+    /**
+     * GET /api/purchase-orders/dropdown - Get POs for dropdown
+     */
+    @GetMapping("/dropdown")
+    public ResponseEntity<List<PurchaseOrderDropdownWrapper>> getPurchaseOrdersForDropdown(
+            @RequestParam(required = false) String groupName,
+            @RequestParam(required = false) String subGroupName,
+            @RequestParam(required = false) String projectId
+    ) {
+        try {
+            List<PurchaseOrderDropdownWrapper> pos = purchaseOrderService.getPurchaseOrdersForDropdown(
+                groupName, subGroupName, projectId
+            );
+            return ResponseEntity.ok(pos);
+        } catch (Exception e) {
+            log.error("Error fetching POs for dropdown", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 }

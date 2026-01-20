@@ -16,6 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
@@ -320,4 +321,32 @@ public class VendorService {
         private long pendingQuotations;
         private LocalDateTime lastUpdated;
     }
+    
+    
+
+    /**
+     * Get vendors accessible by user (created_by or assigned_to)
+     * Returns simplified list for dropdown: [{id: 1, name: "Vendor A", phone: "1234567890"}, ...]
+     */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> getVendorsForDropdown(Long userId) {
+        log.info("Fetching vendors dropdown for userId: {}", userId);
+        return vendorRepository.findVendorsByUserIdForDropdown(userId);
+    }
+    
+    /**
+     * Get vendors who have quotation history in other projects
+     * COMMENTED OUT FOR NOW - NOT BEING USED
+     */
+    /*
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> getVendorsWithQuotationHistory(Long userId, String currentProjectId) {
+        log.info("Fetching vendors with quotation history for userId: {}, projectId: {}", userId, currentProjectId);
+        if (currentProjectId == null || currentProjectId.isEmpty()) {
+            // If no current project, return all vendors
+            return vendorRepository.findVendorsByUserIdForDropdown(userId);
+        }
+        return vendorRepository.findVendorsWithQuotationHistoryForDropdown(userId, currentProjectId);
+    }
+    */
 }
