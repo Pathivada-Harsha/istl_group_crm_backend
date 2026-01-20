@@ -1,6 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
 import java.lang.reflect.Field;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -14,6 +15,7 @@ import java.util.Optional;
 import java.util.stream.Stream;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
@@ -55,6 +57,14 @@ public class LoginService {
 	
 	@Autowired
 	private PagePermissionsRepo pagePermissions;
+	
+	
+	@Value("${server.servlet.session.timeout}")
+	private Duration sessionTimeout;
+
+	@Value("${session.warning.seconds}")
+	private Duration warningTime;
+	
 	
 	public ResponseEntity<LoginResponseWrapper> AuthenticateUser(Map<String, String> credentials,HttpServletRequest request) throws CustomException{
 		
@@ -137,6 +147,11 @@ public class LoginService {
 		loginResponseWrapper.setUser(wrappedData);
 		loginResponseWrapper.setMenuPermissions(permissionsMenu);
 		loginResponseWrapper.setPagePermissions(PagePermissions);
+		
+
+		loginResponseWrapper.setWarningTime(warningTime.getSeconds());
+		loginResponseWrapper.setSessionTimeout(sessionTimeout.getSeconds());
+		
 		return ResponseEntity.status(HttpStatus.OK).body(loginResponseWrapper);
 	}
 

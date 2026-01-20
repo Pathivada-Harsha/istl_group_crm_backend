@@ -3,7 +3,6 @@ package com.istlgroup.istl_group_crm_backend.config;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.HttpMethod;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
@@ -27,24 +26,35 @@ public class SecurityConfig {
         http
             .csrf(csrf -> csrf.disable())
             .cors(Customizer.withDefaults())
-
-            // ❌ Disable default login & basic auth
             .formLogin(form -> form.disable())
             .httpBasic(basic -> basic.disable())
+
+            // ✅ VERY IMPORTANT: return 401 instead of redirect
+            .exceptionHandling(ex -> ex
+                .authenticationEntryPoint((request, response, authException) -> {
+                    response.setStatus(401);
+                    response.setContentType("application/json");
+                    response.getWriter().write("{\"error\":\"SESSION_EXPIRED\"}");
+                })
+            )
 
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers(
                     "/login/userLogin",
                     "/login/logout",
-                    "/login/ping",
                     "/error"
                 ).permitAll()
+                .requestMatchers(
+                    "/login/ping",
+                    "/login/validate-session",
+                    "/login/session-config"
+                ).authenticated()
                 .anyRequest().authenticated()
             );
 
         return http.build();
     }
-    
+
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
@@ -53,8 +63,7 @@ public class SecurityConfig {
         config.setAllowedHeaders(List.of("*"));
         config.setAllowCredentials(true);
 
-        UrlBasedCorsConfigurationSource source =
-                new UrlBasedCorsConfigurationSource();
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);
         return source;
     }
