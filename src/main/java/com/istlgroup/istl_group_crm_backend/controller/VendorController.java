@@ -11,6 +11,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -270,4 +271,47 @@ public class VendorController {
         response.put("message", message);
         return response;
     }
+    
+    
+    /**
+     * GET /api/vendors/dropdown
+     * Fetch vendors for dropdown (id, name, and phone)
+     * Filters by created_by or assigned_to based on current user
+     */
+    @GetMapping("/dropdown")
+    public ResponseEntity<List<Map<String, Object>>> getVendorsForDropdown(
+            @RequestHeader("X-User-Id") Long userId) {
+        
+        try {
+            log.info("Fetching vendor dropdown for user: {}", userId);
+            List<Map<String, Object>> vendors = vendorService.getVendorsForDropdown(userId);
+            log.info("Found {} vendors for dropdown", vendors.size());
+            return ResponseEntity.ok(vendors);
+        } catch (Exception e) {
+            log.error("Error fetching vendor dropdown for user: {}", userId, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
+        }
+    }
+    
+    /**
+     * GET /api/vendors/dropdown/with-history
+     * COMMENTED OUT FOR NOW - NOT BEING USED
+     */
+    /*
+    @GetMapping("/dropdown/with-history")
+    public ResponseEntity<List<Map<String, Object>>> getVendorsWithHistory(
+            @RequestHeader("X-User-Id") Long userId,
+            @RequestParam(required = false) String projectId) {
+        
+        try {
+            log.info("Fetching vendor dropdown with history for user: {}, project: {}", userId, projectId);
+            List<Map<String, Object>> vendors = vendorService.getVendorsWithQuotationHistory(userId, projectId);
+            log.info("Found {} vendors with history", vendors.size());
+            return ResponseEntity.ok(vendors);
+        } catch (Exception e) {
+            log.error("Error fetching vendor dropdown with history", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(null);
+        }
+    }
+    */
 }

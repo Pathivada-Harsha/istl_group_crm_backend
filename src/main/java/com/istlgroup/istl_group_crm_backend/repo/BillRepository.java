@@ -8,7 +8,8 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
-import java.time.LocalDateTime;
+import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 
@@ -21,7 +22,7 @@ public interface BillRepository extends JpaRepository<BillEntity, Long> {
     Optional<BillEntity> findByIdAndNotDeleted(@Param("id") Long id);
     
     // =========================================
-    // ROLE-BASED QUERIES (String status instead of ENUM)
+    // ROLE-BASED QUERIES
     // =========================================
     
     @Query("SELECT b FROM BillEntity b WHERE " +
@@ -77,7 +78,7 @@ public interface BillRepository extends JpaRepository<BillEntity, Long> {
             Pageable pageable);
     
     // =========================================
-    // STATISTICS QUERIES
+    // STATISTICS QUERIES - FIXED: Use LocalDate
     // =========================================
     
     @Query("SELECT COUNT(b) FROM BillEntity b WHERE " +
@@ -96,11 +97,12 @@ public interface BillRepository extends JpaRepository<BillEntity, Long> {
            "(:subGroupId IS NULL OR b.subGroupId = :subGroupId) AND " +
            "b.status != 'Paid' AND " +
            "b.deletedAt IS NULL")
-    java.math.BigDecimal sumOutstandingAmount(
+    BigDecimal sumOutstandingAmount(
             @Param("projectId") String projectId,
             @Param("groupId") String groupId,
             @Param("subGroupId") String subGroupId);
     
+    // CRITICAL FIX: Changed from LocalDateTime to LocalDate
     @Query("SELECT COUNT(b) FROM BillEntity b WHERE " +
            "(:projectId IS NULL OR b.projectId = :projectId) AND " +
            "(:groupId IS NULL OR b.groupId = :groupId) AND " +
@@ -112,8 +114,8 @@ public interface BillRepository extends JpaRepository<BillEntity, Long> {
             @Param("projectId") String projectId,
             @Param("groupId") String groupId,
             @Param("subGroupId") String subGroupId,
-            @Param("startOfMonth") LocalDateTime startOfMonth,
-            @Param("endOfMonth") LocalDateTime endOfMonth);
+            @Param("startOfMonth") LocalDate startOfMonth,
+            @Param("endOfMonth") LocalDate endOfMonth);
     
     @Query("SELECT COUNT(b) FROM BillEntity b WHERE " +
            "(:projectId IS NULL OR b.projectId = :projectId) AND " +

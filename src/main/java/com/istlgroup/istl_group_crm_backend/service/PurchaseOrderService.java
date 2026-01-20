@@ -2,6 +2,8 @@ package com.istlgroup.istl_group_crm_backend.service;
 
 import com.istlgroup.istl_group_crm_backend.entity.*;
 import com.istlgroup.istl_group_crm_backend.repo.*;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.PurchaseOrderDropdownWrapper;
+
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -18,6 +20,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -618,5 +621,70 @@ public class PurchaseOrderService {
         private long delivered;
         private long cancelled;
         private Double totalValue;
+    }
+    
+    
+    
+    
+    
+    
+    /**
+     * Get POs for dropdown with filters
+     */
+    @Transactional(readOnly = true)
+    public List<PurchaseOrderDropdownWrapper> getPurchaseOrdersForDropdown(
+            String groupName, 
+            String subGroupName, 
+            String projectId
+    ) {
+        List<PurchaseOrderEntity> pos;
+        
+        // Fetch filtered or all POs
+        if (groupName != null || subGroupName != null || projectId != null) {
+            pos = purchaseOrderRepository.findAllForDropdownFiltered(groupName, subGroupName, projectId);
+        } else {
+            pos = purchaseOrderRepository.findAllForDropdown();
+        }
+        
+        // Convert to dropdown wrapper
+        return pos.stream()
+                .map(this::convertToDropdownWrapper)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Convert PO entity to dropdown wrapper
+     */
+    private PurchaseOrderDropdownWrapper convertToDropdownWrapper(PurchaseOrderEntity po) {
+        String vendorName = "Unknown Vendor";
+        
+        // Get vendor name if vendor exists
+        if (po.getVendorId() != null) {
+            vendorName = vendorRepository.findById(po.getVendorId())
+                    .map(VendorEntity::getName)
+                    .orElse("Unknown Vendor");
+        }
+        
+        return PurchaseOrderDropdownWrapper.builder()
+                .id(po.getId())
+                .poNo(po.getPoNo())
+                .vendorName(vendorName)
+                .status(po.getStatus())
+                .projectId(po.getProjectId())
+                .groupName(po.getGroupName())
+                .subGroupName(po.getSubGroupName())
+                .build();
+    }
+
+    /**
+     * Get POs by vendor for dropdown
+     */
+    @Transactional(readOnly = true)
+    public List<PurchaseOrderDropdownWrapper> getPurchaseOrdersByVendor1(Long vendorId) {
+        List<PurchaseOrderEntity> pos = purchaseOrderRepository.findByVendorId(vendorId);
+        
+        return pos.stream()
+                .map(this::convertToDropdownWrapper)
+                .collect(Collectors.toList());
     }
 }
