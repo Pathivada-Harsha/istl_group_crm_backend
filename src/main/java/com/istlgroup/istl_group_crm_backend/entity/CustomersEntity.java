@@ -22,9 +22,11 @@ public class CustomersEntity {
     @Column(name = "company_name")
     private String companyName;
     
-    @Enumerated(EnumType.STRING)
-    @Column(name = "group_name")
-    private GroupName groupName;
+    @Column(name = "group_name", length = 100)
+    private String groupName;  // Changed from ENUM to VARCHAR
+    
+    @Column(name = "sub_group_name", length = 100)
+    private String subGroupName;
     
     @Column(name = "contact_person", length = 200)
     private String contactPerson;
@@ -62,9 +64,8 @@ public class CustomersEntity {
     @Column(name = "pincode", length = 20)
     private String pincode;
     
-    @Enumerated(EnumType.STRING)
-    @Column(name = "status")
-    private CustomerStatus status;
+    @Column(name = "status", length = 50)
+    private String status;  // Changed from ENUM to VARCHAR
     
     @Column(name = "assigned_to")
     private Long assignedTo;
@@ -85,11 +86,11 @@ public class CustomersEntity {
     protected void onCreate() {
         createdAt = LocalDateTime.now();
         updatedAt = LocalDateTime.now();
-        if (status == null) {
-            status = CustomerStatus.Active;
+        if (status == null || status.isEmpty()) {
+            status = "Active";
         }
-        if (groupName == null) {
-            groupName = GroupName.Others;
+        if (groupName == null || groupName.isEmpty()) {
+            groupName = "Others";
         }
     }
     
@@ -98,11 +99,20 @@ public class CustomersEntity {
         updatedAt = LocalDateTime.now();
     }
     
-    public enum GroupName {
-        CCMS, Solar, EPC, IoT, Hybrid, Others
+    // Optional: Constants for reference (not enums)
+    public static class GroupNames {
+        public static final String CCMS = "CCMS";
+        public static final String SOLAR = "Solar";
+        public static final String EPC = "EPC";
+        public static final String IOT = "IoT";
+        public static final String HYBRID = "Hybrid";
+        public static final String OTHERS = "Others";
     }
     
-    public enum CustomerStatus {
-        Active, Inactive, Lead, Prospect
+    public static class CustomerStatuses {
+        public static final String ACTIVE = "Active";
+        public static final String INACTIVE = "Inactive";
+        public static final String LEAD = "Lead";
+        public static final String PROSPECT = "Prospect";
     }
 }

@@ -1,180 +1,231 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
-import com.istlgroup.istl_group_crm_backend.customException.CustomException;
-import com.istlgroup.istl_group_crm_backend.service.FollowupsService;
-import com.istlgroup.istl_group_crm_backend.wrapperClasses.FollowupRequestWrapper;
-import com.istlgroup.istl_group_crm_backend.wrapperClasses.FollowupWrapper;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.service.FollowupsService;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.FollowupWrapper;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.FollowupRequestWrapper;
+
 @RestController
 @RequestMapping("/followups")
-//@CrossOrigin(origins = "${cros.allowed-origins}")
 public class FollowupsController {
     
     @Autowired
     private FollowupsService followupsService;
     
+    
     /**
-     * Get followups for a specific entity (Lead/Customer)
+     * Get all follow-ups (for Admin/SuperAdmin)
      */
-    @GetMapping("/entity/{relatedType}/{relatedId}")
-    public ResponseEntity<Map<String, Object>> getFollowupsForEntity(
-            @PathVariable String relatedType,
-            @PathVariable Long relatedId,
+    @GetMapping("/all")
+    public ResponseEntity<Map<String, Object>> getAllFollowups(
             @RequestHeader("User-Id") Long userId,
             @RequestHeader("User-Role") String userRole) {
-        
-        Map<String, Object> response = new HashMap<>();
         try {
-            List<FollowupWrapper> followups = followupsService.getFollowupsForEntity(relatedType, relatedId);
+            // Only allow SuperAdmin and Admin
+            if (!"SUPERADMIN".equalsIgnoreCase(userRole) && !"ADMIN".equalsIgnoreCase(userRole)) {
+                Map<String, Object> errorResponse = new HashMap<>();
+                errorResponse.put("success", false);
+                errorResponse.put("message", "Access denied");
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).body(errorResponse);
+            }
+
+            List<FollowupWrapper> followups = followupsService.getAllFollowups();
+            
+            Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("data", followups);
+            response.put("count", followups.size());
+            
             return ResponseEntity.ok(response);
         } catch (Exception e) {
-            response.put("success", false);
-            response.put("message", e.getMessage());
-            return ResponseEntity.badRequest().body(response);
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
         }
     }
     
     /**
-     * Get all followups created by user
-     */
-    @GetMapping("/my-followups")
-    public ResponseEntity<Map<String, Object>> getMyFollowups(
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
-        
-        Map<String, Object> response = new HashMap<>();
-        try {
-            List<FollowupWrapper> followups = followupsService.getFollowupsByCreator(userId);
-            response.put("success", true);
-            response.put("data", followups);
-            return ResponseEntity.ok(response);
-        } catch (Exception e) {
-            response.put("success", false);
-            response.put("message", e.getMessage());
-            return ResponseEntity.badRequest().body(response);
-        }
-    }
-    
-    /**
-     * Get all followups assigned to user
-     */
-    @GetMapping("/assigned-to-me")
-    public ResponseEntity<Map<String, Object>> getAssignedFollowups(
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
-        
-        Map<String, Object> response = new HashMap<>();
-        try {
-            List<FollowupWrapper> followups = followupsService.getFollowupsByAssignee(userId);
-            response.put("success", true);
-            response.put("data", followups);
-            return ResponseEntity.ok(response);
-        } catch (Exception e) {
-            response.put("success", false);
-            response.put("message", e.getMessage());
-            return ResponseEntity.badRequest().body(response);
-        }
-    }
-    
-    /**
-     * Create a new followup
+     * Create a new follow-up
      */
     @PostMapping("/create")
     public ResponseEntity<Map<String, Object>> createFollowup(
-            @RequestBody FollowupRequestWrapper requestWrapper,
             @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
-        
-        Map<String, Object> response = new HashMap<>();
+            @RequestBody FollowupRequestWrapper request) {
         try {
-            FollowupWrapper followup = followupsService.createFollowup(requestWrapper, userId);
+            FollowupWrapper created = followupsService.createFollowup(request, userId);
+            
+            Map<String, Object> response = new HashMap<>();
             response.put("success", true);
-            response.put("data", followup);
-            response.put("message", "Followup created successfully");
-            return ResponseEntity.ok(response);
+            response.put("message", "Follow-up created successfully");
+            response.put("data", created);
+            
+            return ResponseEntity.status(HttpStatus.CREATED).body(response);
         } catch (CustomException e) {
-            response.put("success", false);
-            response.put("message", e.getMessage());
-            return ResponseEntity.badRequest().body(response);
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to create follow-up: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
         }
     }
     
     /**
-     * Update a followup
+     * Update a follow-up
      */
-    @PutMapping("/update/{id}")
+    @PutMapping("/update/{followupId}")
     public ResponseEntity<Map<String, Object>> updateFollowup(
-            @PathVariable Long id,
-            @RequestBody FollowupRequestWrapper requestWrapper,
+            @PathVariable Long followupId,
             @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
-        
-        Map<String, Object> response = new HashMap<>();
+            @RequestBody FollowupRequestWrapper request) {
         try {
-            FollowupWrapper followup = followupsService.updateFollowup(id, requestWrapper);
+            FollowupWrapper updated = followupsService.updateFollowup(followupId, request, userId);
+            
+            Map<String, Object> response = new HashMap<>();
             response.put("success", true);
-            response.put("data", followup);
-            response.put("message", "Followup updated successfully");
+            response.put("message", "Follow-up updated successfully");
+            response.put("data", updated);
+            
             return ResponseEntity.ok(response);
         } catch (CustomException e) {
-            response.put("success", false);
-            response.put("message", e.getMessage());
-            return ResponseEntity.badRequest().body(response);
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to update follow-up");
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
         }
     }
     
     /**
-     * Delete a followup
+     * Get follow-ups for a lead
      */
-    @DeleteMapping("/delete/{id}")
-    public ResponseEntity<Map<String, Object>> deleteFollowup(
-            @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
-        
-        Map<String, Object> response = new HashMap<>();
+    @GetMapping("/lead/{leadId}")
+    public ResponseEntity<Map<String, Object>> getFollowupsForLead(@PathVariable Long leadId) {
         try {
-            followupsService.deleteFollowup(id);
+            List<FollowupWrapper> followups = followupsService.getFollowupsForLead(leadId);
+            
+            Map<String, Object> response = new HashMap<>();
             response.put("success", true);
-            response.put("message", "Followup deleted successfully");
-            return ResponseEntity.ok(response);
-        } catch (CustomException e) {
-            response.put("success", false);
-            response.put("message", e.getMessage());
-            return ResponseEntity.badRequest().body(response);
-        }
-    }
-    
-    /**
-     * Check if lead has pending followups
-     */
-    @GetMapping("/has-pending/lead/{leadId}")
-    public ResponseEntity<Map<String, Object>> checkLeadPendingFollowups(
-            @PathVariable Long leadId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
-        
-        Map<String, Object> response = new HashMap<>();
-        try {
-            boolean hasPending = followupsService.hasLeadPendingFollowups(leadId);
-            int count = followupsService.getPendingFollowupsCountForLead(leadId);
-            response.put("success", true);
-            response.put("hasPending", hasPending);
-            response.put("count", count);
+            response.put("data", followups);
+            response.put("count", followups.size());
+            
             return ResponseEntity.ok(response);
         } catch (Exception e) {
-            response.put("success", false);
-            response.put("message", e.getMessage());
-            return ResponseEntity.badRequest().body(response);
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+    
+    /**
+     * Get follow-ups assigned to current user
+     */
+    @GetMapping("/my-followups")
+    public ResponseEntity<Map<String, Object>> getMyFollowups(@RequestHeader("User-Id") Long userId) {
+        try {
+            List<FollowupWrapper> followups = followupsService.getFollowupsForUser(userId);
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("data", followups);
+            response.put("count", followups.size());
+            
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+    
+    /**
+     * Get overdue follow-ups
+     */
+    @GetMapping("/overdue")
+    public ResponseEntity<Map<String, Object>> getOverdueFollowups() {
+        try {
+            List<FollowupWrapper> followups = followupsService.getOverdueFollowups();
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("data", followups);
+            response.put("count", followups.size());
+            
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+    
+    /**
+     * Get today's follow-ups
+     */
+    @GetMapping("/today")
+    public ResponseEntity<Map<String, Object>> getTodaysFollowups() {
+        try {
+            List<FollowupWrapper> followups = followupsService.getTodaysFollowups();
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("data", followups);
+            response.put("count", followups.size());
+            
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+    
+    /**
+     * Delete a follow-up
+     */
+    @DeleteMapping("/delete/{followupId}")
+    public ResponseEntity<Map<String, Object>> deleteFollowup(
+            @PathVariable Long followupId,
+            @RequestHeader("User-Id") Long userId) {
+        try {
+            followupsService.deleteFollowup(followupId, userId);
+            
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Follow-up deleted successfully");
+            
+            return ResponseEntity.ok(response);
+        } catch (CustomException e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
+        } catch (Exception e) {
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("success", false);
+            errorResponse.put("message", "Failed to delete follow-up");
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
         }
     }
 }

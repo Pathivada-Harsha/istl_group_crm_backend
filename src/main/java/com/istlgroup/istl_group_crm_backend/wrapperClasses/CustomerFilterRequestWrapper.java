@@ -6,6 +6,7 @@ import lombok.Data;
 public class CustomerFilterRequestWrapper {
     private String searchTerm;
     private String groupName;
+    private String subGroupName;
     private String status;
     private String city;
     private String state;

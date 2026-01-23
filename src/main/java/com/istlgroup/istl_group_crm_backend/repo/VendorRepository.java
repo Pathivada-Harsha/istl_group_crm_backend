@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -245,4 +246,46 @@ public interface VendorRepository extends JpaRepository<VendorEntity, Long> {
             @Param("userId") Long userId, 
             @Param("currentProjectId") String currentProjectId);
     */
+    
+    
+    
+    
+   
+
+    @Query("SELECT COUNT(v) FROM VendorEntity v WHERE v.projectId = :projectId AND v.status = :status AND v.deletedAt IS NULL")
+    Long countByProjectIdAndStatus(@Param("projectId") String projectId, @Param("status") String status);
+
+    @Query("SELECT COALESCE(SUM(v.totalPurchaseValue), 0) FROM VendorEntity v WHERE v.projectId = :projectId AND v.deletedAt IS NULL")
+    Optional<BigDecimal> sumTotalPurchaseValueByProjectId(@Param("projectId") String projectId);
+
+    @Query("SELECT AVG(v.rating) FROM VendorEntity v WHERE v.projectId = :projectId AND v.rating IS NOT NULL AND v.rating > 0 AND v.deletedAt IS NULL")
+    Optional<Double> avgRatingByProjectId(@Param("projectId") String projectId);
+
+    @Query("SELECT COALESCE(SUM(v.totalOrders), 0) FROM VendorEntity v WHERE v.projectId = :projectId AND v.deletedAt IS NULL")
+    Optional<Integer> sumTotalOrdersByProjectId(@Param("projectId") String projectId);
+    
+    /**
+     * Count vendors by project
+     */
+    @Query("SELECT COUNT(v) FROM VendorEntity v " +
+           "WHERE v.projectId = :projectId AND v.deletedAt IS NULL")
+    Long countByProjectId(@Param("projectId") String projectId);
+    
+    /**
+     * Get average vendor rating for a project
+     */
+    @Query("SELECT AVG(v.rating) FROM VendorEntity v " +
+           "WHERE v.projectId = :projectId AND v.rating IS NOT NULL " +
+           "AND v.deletedAt IS NULL")
+    Double getAverageRatingByProjectId(@Param("projectId") String projectId);
+    
+    /**
+     * Find top 5 vendors by total purchase value
+     */
+    @Query("SELECT v FROM VendorEntity v " +
+           "WHERE v.projectId = :projectId AND v.deletedAt IS NULL " +
+           "ORDER BY v.lastPurchaseAmount DESC")
+    List<VendorEntity> findTop5ByProjectIdOrderByTotalPurchaseValueDesc(@Param("projectId") String projectId);
+    
+
 }

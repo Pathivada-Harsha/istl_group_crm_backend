@@ -45,6 +45,9 @@ public class DropdownProjectEntity {
     @JsonIgnoreProperties({"projects"})
     private DropdownSubGroupEntity subGroup;
     
+    @Column(name = "customer_id")
+    private String customerCode;
+    
     @Column(name = "Lead_id")
     private String lead_id;
     

@@ -44,7 +44,7 @@ public class ProposalsPDFService {
     private CustomersRepo customersRepo;
     
     @Autowired
-    private UsersRepo usersRepo;
+    private UsersRepo usersRepo; 
     
     private static final DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("dd-MM-yyyy");
     private final ObjectMapper objectMapper = new ObjectMapper();

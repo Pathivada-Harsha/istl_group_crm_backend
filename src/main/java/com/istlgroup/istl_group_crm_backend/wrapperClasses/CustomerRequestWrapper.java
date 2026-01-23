@@ -7,6 +7,7 @@ public class CustomerRequestWrapper {
     private String name;
     private String companyName;
     private String groupName;
+    private String subGroupName;
     private String contactPerson;
     private String designation;
     private String email;

@@ -153,4 +153,36 @@ public interface BillRepository extends JpaRepository<BillEntity, Long> {
     
     @Query("SELECT MAX(b.billNo) FROM BillEntity b WHERE b.billNo LIKE :prefix")
     String findMaxBillNoWithPrefix(@Param("prefix") String prefix);
+    
+    @Query("SELECT COUNT(b) FROM BillEntity b WHERE b.projectId = :projectId AND b.deletedAt IS NULL")
+    Long countByProjectId(@Param("projectId") String projectId);
+
+    @Query("SELECT COUNT(b) FROM BillEntity b WHERE b.projectId = :projectId AND b.status = :status AND b.deletedAt IS NULL")
+    Long countByProjectIdAndStatus(@Param("projectId") String projectId, @Param("status") String status);
+
+    @Query("SELECT COALESCE(SUM(b.totalAmount), 0) FROM BillEntity b WHERE b.projectId = :projectId AND b.deletedAt IS NULL")
+    Optional<BigDecimal> sumTotalAmountByProjectId(@Param("projectId") String projectId);
+
+    @Query("SELECT COALESCE(SUM(b.paidAmount), 0) FROM BillEntity b WHERE b.projectId = :projectId AND b.deletedAt IS NULL")
+    Optional<BigDecimal> sumPaidAmountByProjectId(@Param("projectId") String projectId);
+
+    @Query("SELECT COALESCE(SUM(b.balanceAmount), 0) FROM BillEntity b WHERE b.projectId = :projectId AND b.deletedAt IS NULL")
+    Optional<BigDecimal> sumBalanceAmountByProjectId(@Param("projectId") String projectId);
+
+    // Overdue bills
+    @Query("SELECT COUNT(b) FROM BillEntity b WHERE b.projectId = :projectId AND b.dueDate < CURRENT_DATE AND b.status != 'Paid' AND b.deletedAt IS NULL")
+    Long countOverdueBillsByProjectId(@Param("projectId") String projectId);
+
+    @Query("SELECT COALESCE(SUM(b.balanceAmount), 0) FROM BillEntity b WHERE b.projectId = :projectId AND b.dueDate < CURRENT_DATE AND b.status != 'Paid' AND b.deletedAt IS NULL")
+    Optional<BigDecimal> sumOverdueAmountByProjectId(@Param("projectId") String projectId);
+
+    @Query("SELECT b FROM BillEntity b " +
+    	       "WHERE b.projectId = :projectId " +
+    	       "AND b.status != :status " +
+    	       "AND b.deletedAt IS NULL " +
+    	       "ORDER BY b.billDate DESC")
+    	List<BillEntity> findByProjectIdAndStatusNot(
+    	    @Param("projectId") String projectId, 
+    	    @Param("status") String status
+    	);
 }
