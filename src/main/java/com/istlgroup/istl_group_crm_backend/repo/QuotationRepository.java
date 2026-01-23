@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
@@ -103,6 +104,39 @@ public interface QuotationRepository extends JpaRepository<QuotationEntity, Long
     long countByStatus(@Param("status") String status);
     
     
+    @Query("SELECT COUNT(q) FROM QuotationEntity q WHERE q.projectId = :projectId AND q.deletedAt IS NULL")
+    Long countByProjectId(@Param("projectId") String projectId);
 
+    @Query("SELECT COUNT(q) FROM QuotationEntity q WHERE q.projectId = :projectId AND q.status = :status AND q.deletedAt IS NULL")
+    Long countByProjectIdAndStatus(@Param("projectId") String projectId, @Param("status") String status);
 
+    @Query("SELECT COALESCE(SUM(q.totalValue), 0) FROM QuotationEntity q WHERE q.projectId = :projectId AND q.deletedAt IS NULL")
+    Optional<BigDecimal> sumTotalValueByProjectId(@Param("projectId") String projectId);
+
+    @Query("SELECT COALESCE(SUM(q.totalValue), 0) FROM QuotationEntity q WHERE q.projectId = :projectId AND q.status = :status AND q.deletedAt IS NULL")
+    Optional<BigDecimal> sumTotalValueByProjectIdAndStatus(@Param("projectId") String projectId, @Param("status") String status);
+
+    @Query("SELECT AVG(q.totalValue) FROM QuotationEntity q WHERE q.projectId = :projectId AND q.deletedAt IS NULL")
+    Optional<BigDecimal> avgTotalValueByProjectId(@Param("projectId") String projectId);
+    
+    /**
+     * Count quotations by project and group by status
+     */
+    @Query("SELECT q.status, COUNT(q) FROM QuotationEntity q " +
+           "WHERE q.projectId = :projectId AND q.deletedAt IS NULL " +
+           "GROUP BY q.status")
+    List<Object[]> countByProjectIdAndGroupByStatus(@Param("projectId") String projectId);
+    
+    /**
+     * Find top 5 recent quotations for a project
+     */
+    @Query("SELECT q FROM QuotationEntity q " +
+           "WHERE q.projectId = :projectId AND q.deletedAt IS NULL " +
+           "ORDER BY q.uploadedAt DESC")
+    List<QuotationEntity> findTop5ByProjectIdOrderByUploadedAtDesc(@Param("projectId") String projectId);
+    
 }
+
+    
+
+

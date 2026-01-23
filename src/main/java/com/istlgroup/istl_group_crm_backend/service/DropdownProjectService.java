@@ -1,9 +1,11 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
 
+import com.istlgroup.istl_group_crm_backend.entity.CustomersEntity;
 import com.istlgroup.istl_group_crm_backend.entity.DropdownProjectEntity;
 import com.istlgroup.istl_group_crm_backend.entity.DropdownSubGroupEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
+import com.istlgroup.istl_group_crm_backend.repo.CustomersRepo;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownProjectRepository;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownSubGroupRepository;
 import lombok.RequiredArgsConstructor;
@@ -11,6 +13,7 @@ import lombok.RequiredArgsConstructor;
 import java.time.LocalDateTime;
 import java.util.Optional;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -20,6 +23,9 @@ public class DropdownProjectService {
     
     private final DropdownProjectRepository projectRepository;
     private final DropdownSubGroupRepository subGroupRepository;
+    @Autowired
+    private CustomersRepo customersRepo;
+    
     
     @Transactional
     public DropdownProjectEntity createProject(DropdownProjectEntity project, Long subGroupId, Long userId) {
@@ -42,7 +48,10 @@ public class DropdownProjectService {
             System.err.println("Generated project code: " + generatedCode);
         }
         
-        return projectRepository.save(project);
+        DropdownProjectEntity projectEntity = projectRepository.save(project);
+        CustomersEntity customerEntity =
+        		createCustomerFromProject(projectEntity);
+        return projectEntity;
     }
     
     @Transactional
@@ -114,10 +123,11 @@ public class DropdownProjectService {
         return String.format("PROJ-%s-%04d", year, nextSequence);
     }
     
-    public DropdownProjectEntity createProjectFromLead(LeadsEntity Lead) {
+    public DropdownProjectEntity createProjectFromLead(LeadsEntity Lead, String customerCode) {
         // TODO Auto-generated method stub
         DropdownProjectEntity projectEntity = new DropdownProjectEntity();
         projectEntity.setLead_id(Lead.getLeadCode());
+        projectEntity.setCustomerCode(customerCode);
         projectEntity.setGroup_id(Lead.getGroupName());
         projectEntity.setSubGroupName(Lead.getSubGroupName());
         projectEntity.setProjectName(Lead.getName());
@@ -136,5 +146,65 @@ public class DropdownProjectService {
         DropdownProjectEntity ent = projectRepository.save(projectEntity);
         return  ent;
     }
+    public DropdownProjectEntity createProjectFromCustomers(CustomersEntity customers) {
+        // TODO Auto-generated method stub
+        DropdownProjectEntity projectEntity = new DropdownProjectEntity();
+        projectEntity.setCustomerCode(customers.getCustomerCode());
+        projectEntity.setGroup_id(customers.getGroupName());
+        projectEntity.setSubGroupName(customers.getSubGroupName());
+        projectEntity.setProjectName(customers.getName());
+        projectEntity.setDescription("Directly Created");
+        projectEntity.setCreatedAt(customers.getCreatedAt());
+        DropdownSubGroupEntity subGroup =
+                subGroupRepository.findBysubGroupName(customers.getSubGroupName())
+                .orElseThrow(() -> new RuntimeException("Sub group not found"));
+
+        // ✅ set relation (FK)
+        projectEntity.setSubGroup(subGroup);
+
+        if (projectEntity.getProjectUniqueId() == null || projectEntity.getProjectUniqueId().isEmpty()) {
+            projectEntity.setProjectUniqueId(generateProjectCode());
+        }
+        DropdownProjectEntity ent = projectRepository.save(projectEntity);
+        return  ent;
+    }
+    private String generateCustomerCode() {
+        String year = String.valueOf(LocalDateTime.now().getYear());
+        long countInYear = customersRepo.countByCustomerCodeStartingWith("CUST-" + year);
+        long nextSequence = countInYear + 1;
+        return String.format("CUST-%s-%04d", year, nextSequence);
+    }
     
+    public  CustomersEntity createCustomerFromProject(DropdownProjectEntity projectEntity) {
+    	// Create new customer from lead
+        String customerCode = generateCustomerCode(); 
+        
+        CustomersEntity customer = new CustomersEntity();
+        
+        customer.setCustomerCode(customerCode);
+        customer.setName(projectEntity.getProjectName());
+//        customer.setCompanyName(requestWrapper.getCompanyName());
+        customer.setGroupName(projectEntity.getGroup_id());
+        customer.setSubGroupName(projectEntity.getSubGroupName());
+//        customer.setContactPerson(requestWrapper.getContactPerson());
+//        customer.setDesignation(requestWrapper.getDesignation());
+//        customer.setEmail(requestWrapper.getEmail());
+//        customer.setPhone(requestWrapper.getPhone());
+//        customer.setAltPhone(requestWrapper.getAltPhone());
+//        customer.setWebsite(requestWrapper.getWebsite());
+//        customer.setGstNumber(requestWrapper.getGstNumber());
+//        customer.setPan(requestWrapper.getPan());
+//        customer.setAddress(requestWrapper.getAddress());
+//        customer.setCity(requestWrapper.getCity());
+//        customer.setState(requestWrapper.getState());
+//        customer.setPincode(requestWrapper.getPincode());
+//        customer.setStatus(requestWrapper.getStatus());
+        customer.setAssignedTo(projectEntity.getAssignedTo());
+        customer.setCreatedBy(projectEntity.getCreatedBy()); // Set created by user
+        
+        CustomersEntity savedCustomer = customersRepo.save(customer);
+       
+        return savedCustomer;
+    }
+
 }

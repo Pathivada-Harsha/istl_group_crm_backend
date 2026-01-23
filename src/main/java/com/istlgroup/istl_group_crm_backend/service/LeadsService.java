@@ -32,6 +32,9 @@ public class LeadsService {
     private FollowupsService followupsService;
     @Autowired
     private DropdownProjectService projectService;
+    
+    @Autowired 
+    private LeadHistoryService leadHistoryService;
    
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
@@ -143,108 +146,231 @@ public class LeadsService {
     /**
      * Create a new lead
      */
-    public LeadWrapper createLead(LeadRequestWrapper requestWrapper, Long createdBy) throws CustomException {
-        // Generate lead code
-        String leadCode = generateLeadCode();
+   /**
+ * Create a new lead
+ */
+public LeadWrapper createLead(LeadRequestWrapper requestWrapper, Long createdBy) throws CustomException {
+    // Generate lead code
+    String leadCode = generateLeadCode();
 
-        LeadsEntity lead = new LeadsEntity();
-        lead.setLeadCode(leadCode);
-        lead.setCustomerId(requestWrapper.getCustomerId());
-        lead.setName(requestWrapper.getName());
-        lead.setEmail(requestWrapper.getEmail());
-        lead.setPhone(requestWrapper.getPhone());
-        lead.setSource(requestWrapper.getSource());
-        lead.setPriority(requestWrapper.getPriority());
-        lead.setStatus(requestWrapper.getStatus() != null ? requestWrapper.getStatus() : "New");
-        lead.setAssignedTo(requestWrapper.getAssignedTo());
-        lead.setEnquiry(requestWrapper.getEnquiry());
-        lead.setGroupName(requestWrapper.getGroupName());
-        lead.setSubGroupName(requestWrapper.getSubGroupName());
-        lead.setCreatedBy(createdBy);
+    LeadsEntity lead = new LeadsEntity();
+    lead.setLeadCode(leadCode);
+    lead.setCustomerId(requestWrapper.getCustomerId());
+    lead.setName(requestWrapper.getName());
+    lead.setEmail(requestWrapper.getEmail());
+    lead.setPhone(requestWrapper.getPhone());
+    lead.setSource(requestWrapper.getSource());
+    lead.setPriority(requestWrapper.getPriority());
+    lead.setStatus(requestWrapper.getStatus() != null ? requestWrapper.getStatus() : "New");
+    lead.setAssignedTo(requestWrapper.getAssignedTo());
+    lead.setEnquiry(requestWrapper.getEnquiry());
+    lead.setGroupName(requestWrapper.getGroupName());
+    lead.setSubGroupName(requestWrapper.getSubGroupName());
+    lead.setCreatedBy(createdBy);
 
-        LeadsEntity savedLead = leadsRepo.save(lead);
-        return convertToWrapper(savedLead);
+    LeadsEntity savedLead = leadsRepo.save(lead);
+    
+    // *** ADD HISTORY - Lead Creation ***
+    try {
+        String description = "Lead created";
+        if (requestWrapper.getSource() != null) {
+            description += " from " + requestWrapper.getSource();
+        }
+        
+        leadHistoryService.addHistory(
+            savedLead.getId(),
+            "CREATED",
+            null,
+            null,
+            null,
+            description,
+            createdBy
+        );
+        
+        // If assigned during creation, add assignment history
+        if (requestWrapper.getAssignedTo() != null) {
+            String assignedToName = usersRepo.findById(requestWrapper.getAssignedTo())
+                .map(u -> u.getName())
+                .orElse("Unknown");
+            
+            leadHistoryService.addHistory(
+                savedLead.getId(),
+                "ASSIGNED",
+                "assignedTo",
+                "Unassigned",
+                assignedToName,
+                "Lead assigned to " + assignedToName,
+                createdBy
+            );
+        }
+    } catch (Exception e) {
+        System.err.println("Failed to add creation history: " + e.getMessage());
     }
+    
+    return convertToWrapper(savedLead);
+}
 
     /**
      * Update an existing lead
      */
-    public LeadWrapper updateLead(Long leadId, LeadRequestWrapper requestWrapper, Long userId, String userRole) throws CustomException {
-        LeadsEntity lead = leadsRepo.findById(leadId)
-                .orElseThrow(() -> new CustomException("Lead not found with ID: " + leadId));
+    /**
+ * Update an existing lead
+ */
+public LeadWrapper updateLead(Long leadId, LeadRequestWrapper requestWrapper, Long userId, String userRole) throws CustomException {
+    LeadsEntity lead = leadsRepo.findById(leadId)
+            .orElseThrow(() -> new CustomException("Lead not found with ID: " + leadId));
 
-        if (lead.getDeletedAt() != null) {
-            throw new CustomException("Cannot update deleted lead");
-        }
-
-        // Check access permissions
-        if (!hasAccessToLead(lead, userId, userRole)) {
-            throw new CustomException("Access denied to update this lead");
-        }
-
-        // Store old status to check if it changed
-        String oldStatus = lead.getStatus();
-
-        // Update fields
-        if (requestWrapper.getCustomerId() != null) {
-            lead.setCustomerId(requestWrapper.getCustomerId());
-        }
-        if (requestWrapper.getName() != null) {
-            lead.setName(requestWrapper.getName());
-        }
-        if (requestWrapper.getEmail() != null) {
-            lead.setEmail(requestWrapper.getEmail());
-        }
-        if (requestWrapper.getPhone() != null) {
-            lead.setPhone(requestWrapper.getPhone());
-        }
-        if (requestWrapper.getSource() != null) {
-            lead.setSource(requestWrapper.getSource());
-        }
-        if (requestWrapper.getPriority() != null) {
-            lead.setPriority(requestWrapper.getPriority());
-        }
-        if (requestWrapper.getStatus() != null) {
-            lead.setStatus(requestWrapper.getStatus());
-        }
-        if (requestWrapper.getAssignedTo() != null) {
-            lead.setAssignedTo(requestWrapper.getAssignedTo());
-        }
-        if (requestWrapper.getEnquiry() != null) {
-            lead.setEnquiry(requestWrapper.getEnquiry());
-        }
-        if (requestWrapper.getGroupName() != null) {
-            lead.setGroupName(requestWrapper.getGroupName());
-        }
-        if (requestWrapper.getSubGroupName() != null) {
-            lead.setSubGroupName(requestWrapper.getSubGroupName());
-        }
-
-        LeadsEntity updatedLead = leadsRepo.save(lead);
-        
-        // Check if status changed to "Closed Won"
-        if (!"Closed Won".equalsIgnoreCase(oldStatus) && 
-            "Closed Won".equalsIgnoreCase(updatedLead.getStatus())) {
-            try {
-                // Convert lead to customer
-                CustomerWrapper customer = customersService.convertLeadToCustomer(updatedLead);
-                
-                // Update lead with customer_id
-                updatedLead.setCustomerId(customer.getId());
-                updatedLead = leadsRepo.save(updatedLead);
-                 
-                DropdownProjectEntity projectEntity =
-                        projectService.createProjectFromLead(updatedLead);                // You can add a success message or log here
-                System.out.println("Lead " + updatedLead.getLeadCode() + 
-                                 " converted to customer " + customer.getCustomerCode() + "converted to project"+projectEntity.getProjectUniqueId());
-            } catch (Exception e) {
-                // Log the error but don't fail the lead update
-                System.err.println("Failed to convert lead to customer: " + e.getMessage());
-            }
-        }
-
-        return convertToWrapper(updatedLead);
+    if (lead.getDeletedAt() != null) {
+        throw new CustomException("Cannot update deleted lead");
     }
+
+    // Check access permissions
+    if (!hasAccessToLead(lead, userId, userRole)) {
+        throw new CustomException("Access denied to update this lead");
+    }
+
+    // Store old values BEFORE updating - for history tracking
+    String oldStatus = lead.getStatus();
+    Long oldAssignedTo = lead.getAssignedTo();
+    String oldPriority = lead.getPriority();
+
+    // Update fields
+    if (requestWrapper.getCustomerId() != null) {
+        lead.setCustomerId(requestWrapper.getCustomerId());
+    }
+    if (requestWrapper.getName() != null) {
+        lead.setName(requestWrapper.getName());
+    }
+    if (requestWrapper.getEmail() != null) {
+        lead.setEmail(requestWrapper.getEmail());
+    }
+    if (requestWrapper.getPhone() != null) {
+        lead.setPhone(requestWrapper.getPhone());
+    }
+    if (requestWrapper.getSource() != null) {
+        lead.setSource(requestWrapper.getSource());
+    }
+    if (requestWrapper.getPriority() != null) {
+        lead.setPriority(requestWrapper.getPriority());
+    }
+    if (requestWrapper.getStatus() != null) {
+        lead.setStatus(requestWrapper.getStatus());
+    }
+    if (requestWrapper.getAssignedTo() != null) {
+        lead.setAssignedTo(requestWrapper.getAssignedTo());
+    }
+    if (requestWrapper.getEnquiry() != null) {
+        lead.setEnquiry(requestWrapper.getEnquiry());
+    }
+    if (requestWrapper.getGroupName() != null) {
+        lead.setGroupName(requestWrapper.getGroupName());
+    }
+    if (requestWrapper.getSubGroupName() != null) {
+        lead.setSubGroupName(requestWrapper.getSubGroupName());
+    }
+
+    LeadsEntity updatedLead = leadsRepo.save(lead);
+    
+    // *** ADD HISTORY TRACKING - Status Change ***
+    if (requestWrapper.getStatus() != null && !requestWrapper.getStatus().equals(oldStatus)) {
+        try {
+            leadHistoryService.addHistory(
+                leadId, 
+                "STATUS_CHANGED", 
+                "status", 
+                oldStatus, 
+                requestWrapper.getStatus(), 
+                "Lead status changed from " + oldStatus + " to " + requestWrapper.getStatus(),
+                userId
+            );
+        } catch (Exception e) {
+            System.err.println("Failed to add history: " + e.getMessage());
+        }
+    }
+    
+    // *** ADD HISTORY TRACKING - Assignment Change ***
+    if (requestWrapper.getAssignedTo() != null && !requestWrapper.getAssignedTo().equals(oldAssignedTo)) {
+        try {
+            String oldAssignedName = "Unassigned";
+            String newAssignedName = "Unknown";
+            
+            if (oldAssignedTo != null) {
+                oldAssignedName = usersRepo.findById(oldAssignedTo)
+                    .map(u -> u.getName())
+                    .orElse("Unknown");
+            }
+            
+            newAssignedName = usersRepo.findById(requestWrapper.getAssignedTo())
+                .map(u -> u.getName())
+                .orElse("Unknown");
+            
+            leadHistoryService.addHistory(
+                leadId,
+                "ASSIGNED",
+                "assignedTo",
+                oldAssignedName,
+                newAssignedName,
+                "Lead reassigned from " + oldAssignedName + " to " + newAssignedName,
+                userId
+            );
+        } catch (Exception e) {
+            System.err.println("Failed to add history: " + e.getMessage());
+        }
+    }
+    
+    // *** ADD HISTORY TRACKING - Priority Change ***
+    if (requestWrapper.getPriority() != null && !requestWrapper.getPriority().equals(oldPriority)) {
+        try {
+            leadHistoryService.addHistory(
+                leadId,
+                "PRIORITY_CHANGED",
+                "priority",
+                oldPriority,
+                requestWrapper.getPriority(),
+                "Lead priority changed from " + oldPriority + " to " + requestWrapper.getPriority(),
+                userId
+            );
+        } catch (Exception e) {
+            System.err.println("Failed to add history: " + e.getMessage());
+        }
+    }
+    
+    // Check if status changed to "Closed Won"
+    if (!"Closed Won".equalsIgnoreCase(oldStatus) && 
+        "Closed Won".equalsIgnoreCase(updatedLead.getStatus())) {
+        try {
+            // Convert lead to customer
+            CustomerWrapper customer = customersService.convertLeadToCustomer(updatedLead);
+            
+            // Update lead with customer_id
+            updatedLead.setCustomerId(customer.getId());
+            updatedLead = leadsRepo.save(updatedLead);
+            String customerCode = customer.getCustomerCode();
+            DropdownProjectEntity projectEntity =
+                    projectService.createProjectFromLead(updatedLead, customerCode);
+            
+            // Add history for conversion
+            leadHistoryService.addHistory(
+                leadId,
+                "CONVERTED_TO_CUSTOMER",
+                null,
+                null,
+                customer.getCustomerCode(),
+                "Lead converted to customer: " + customer.getCustomerCode(),
+                userId
+            );
+            
+            System.out.println("Lead " + updatedLead.getLeadCode() + 
+                             " converted to customer " + customer.getCustomerCode() + 
+                             " and project " + projectEntity.getProjectUniqueId());
+        } catch (Exception e) {
+            // Log the error but don't fail the lead update
+            System.err.println("Failed to convert lead to customer: " + e.getMessage());
+        }
+    }
+
+    return convertToWrapper(updatedLead);
+}
 
     /**
      * Soft delete a lead

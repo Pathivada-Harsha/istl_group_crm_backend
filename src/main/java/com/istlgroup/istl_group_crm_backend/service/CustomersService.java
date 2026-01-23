@@ -2,6 +2,7 @@ package com.istlgroup.istl_group_crm_backend.service;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.CustomersEntity;
+import com.istlgroup.istl_group_crm_backend.entity.DropdownProjectEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
 import com.istlgroup.istl_group_crm_backend.repo.CustomersRepo;
 import com.istlgroup.istl_group_crm_backend.repo.UsersRepo;
@@ -26,7 +27,8 @@ public class CustomersService {
     
     @Autowired
     private UsersRepo usersRepo;
-    
+    @Autowired
+    private DropdownProjectService projectService;
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     
     /**
@@ -64,43 +66,38 @@ public class CustomersService {
     /**
      * Get filtered customers based on role
      */
-    public List<CustomerWrapper> getFilteredCustomers(Long userId, String userRole, CustomerFilterRequestWrapper filterRequest) {
-        List<CustomersEntity> customers;
-        
-        // Parse enum values
-        CustomersEntity.GroupName groupName = parseGroupName(filterRequest.getGroupName());
-        CustomersEntity.CustomerStatus status = parseStatus(filterRequest.getStatus());
-        LocalDateTime fromDate = parseDate(filterRequest.getFromDate());
-        LocalDateTime toDate = parseDate(filterRequest.getToDate());
-        
-        if ("SUPERADMIN".equalsIgnoreCase(userRole) || "ADMIN".equalsIgnoreCase(userRole)) {
-            customers = customersRepo.searchCustomers(
-                filterRequest.getSearchTerm(),
-                groupName,
-                status,
-                filterRequest.getCity(),
-                filterRequest.getState(),
-                filterRequest.getAssignedTo(),
-                fromDate,
-                toDate
-            );
-        } else {
-            customers = customersRepo.searchCustomersForUser(
-                userId,
-                filterRequest.getSearchTerm(),
-                groupName,
-                status,
-                filterRequest.getCity(),
-                filterRequest.getState(),
-                fromDate,
-                toDate
-            );
-        }
-        
-        return customers.stream()
-                .map(this::convertToWrapper)
-                .collect(Collectors.toList());
-    }
+//   public List<CustomerWrapper> getFilteredCustomers(Long userId, String userRole, CustomerFilterRequestWrapper filterRequest) {
+//    List<CustomersEntity> customers;
+//    
+//    // Just get String values - no parsing needed
+//    String groupName = filterRequest.getGroupName();
+//    String status = filterRequest.getStatus();
+//    LocalDateTime fromDate = parseDate(filterRequest.getFromDate());
+//    LocalDateTime toDate = parseDate(filterRequest.getToDate());
+//    
+//    if ("SUPERADMIN".equalsIgnoreCase(userRole) || "ADMIN".equalsIgnoreCase(userRole)) {
+//        customers = customersRepo.searchCustomers(
+//            filterRequest.getSearchTerm(),
+//            groupName,
+//            status,
+//            filterRequest.getCity(),
+//            filterRequest.getState(),
+//            filterRequest.getAssignedTo(),
+//            fromDate,
+//            toDate
+//        );
+//    } else {
+//        customers = customersRepo.searchCustomersForUser(
+//            userId,
+//            filterRequest.getSearchTerm(),
+//            groupName,
+//            status,
+//            filterRequest.getCity(),
+//            filterRequest.getState(),
+//            fromDate,
+//            toDate
+//        );
+//    }
     
     /**
      * Get customer by ID with role-based access control
@@ -132,7 +129,8 @@ public class CustomersService {
         customer.setCustomerCode(customerCode);
         customer.setName(requestWrapper.getName());
         customer.setCompanyName(requestWrapper.getCompanyName());
-        customer.setGroupName(parseGroupName(requestWrapper.getGroupName()));
+        customer.setGroupName(requestWrapper.getGroupName());
+        customer.setSubGroupName(requestWrapper.getSubGroupName());
         customer.setContactPerson(requestWrapper.getContactPerson());
         customer.setDesignation(requestWrapper.getDesignation());
         customer.setEmail(requestWrapper.getEmail());
@@ -145,11 +143,13 @@ public class CustomersService {
         customer.setCity(requestWrapper.getCity());
         customer.setState(requestWrapper.getState());
         customer.setPincode(requestWrapper.getPincode());
-        customer.setStatus(parseStatus(requestWrapper.getStatus()));
+        customer.setStatus(requestWrapper.getStatus());
         customer.setAssignedTo(requestWrapper.getAssignedTo());
         customer.setCreatedBy(createdBy); // Set created by user
         
         CustomersEntity savedCustomer = customersRepo.save(customer);
+        DropdownProjectEntity projectEntity =
+                projectService.createProjectFromCustomers(savedCustomer); 
         return convertToWrapper(savedCustomer);
     }
     
@@ -186,17 +186,15 @@ public class CustomersService {
         customer.setPhone(lead.getPhone());
         customer.setAssignedTo(lead.getAssignedTo());
         customer.setCreatedBy(lead.getCreatedBy()); // Set created by from lead
-        customer.setStatus(CustomersEntity.CustomerStatus.Active);
+        customer.setStatus("Active");
         
         // Map group name if available
-        if (lead.getGroupName() != null) {
-            try {
-                customer.setGroupName(CustomersEntity.GroupName.valueOf(lead.getGroupName()));
-            } catch (IllegalArgumentException e) {
-                customer.setGroupName(CustomersEntity.GroupName.Others);
-            }
+        if (lead.getGroupName() != null && !lead.getGroupName().isEmpty()) {
+            customer.setGroupName(lead.getGroupName());
+        } else {
+            customer.setGroupName("Others");
         }
-        
+        customer.setSubGroupName(lead.getSubGroupName());
         CustomersEntity savedCustomer = customersRepo.save(customer);
         return convertToWrapper(savedCustomer);
     }
@@ -225,7 +223,10 @@ public class CustomersService {
             customer.setCompanyName(requestWrapper.getCompanyName());
         }
         if (requestWrapper.getGroupName() != null) {
-            customer.setGroupName(parseGroupName(requestWrapper.getGroupName()));
+            customer.setGroupName(requestWrapper.getGroupName());
+        }
+        if (requestWrapper.getSubGroupName() != null) {           // ADD THIS BLOCK
+            customer.setSubGroupName(requestWrapper.getSubGroupName());
         }
         if (requestWrapper.getContactPerson() != null) {
             customer.setContactPerson(requestWrapper.getContactPerson());
@@ -264,7 +265,7 @@ public class CustomersService {
             customer.setPincode(requestWrapper.getPincode());
         }
         if (requestWrapper.getStatus() != null) {
-            customer.setStatus(parseStatus(requestWrapper.getStatus()));
+            customer.setStatus(requestWrapper.getStatus());
         }
         if (requestWrapper.getAssignedTo() != null) {
             customer.setAssignedTo(requestWrapper.getAssignedTo());
@@ -320,30 +321,7 @@ public class CustomersService {
     /**
      * Parse group name string to enum
      */
-    private CustomersEntity.GroupName parseGroupName(String groupName) {
-        if (groupName == null || groupName.isEmpty()) {
-            return null;
-        }
-        try {
-            return CustomersEntity.GroupName.valueOf(groupName);
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
-    }
     
-    /**
-     * Parse status string to enum
-     */
-    private CustomersEntity.CustomerStatus parseStatus(String status) {
-        if (status == null || status.isEmpty()) {
-            return null;
-        }
-        try {
-            return CustomersEntity.CustomerStatus.valueOf(status);
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
-    }
     
     /**
      * Parse date string to LocalDateTime
@@ -368,7 +346,8 @@ public class CustomersService {
         wrapper.setCustomerCode(entity.getCustomerCode());
         wrapper.setName(entity.getName());
         wrapper.setCompanyName(entity.getCompanyName());
-        wrapper.setGroupName(entity.getGroupName() != null ? entity.getGroupName().name() : null);
+        wrapper.setGroupName(entity.getGroupName());
+        wrapper.setSubGroupName(entity.getSubGroupName());
         wrapper.setContactPerson(entity.getContactPerson());
         wrapper.setDesignation(entity.getDesignation());
         wrapper.setEmail(entity.getEmail());
@@ -381,7 +360,7 @@ public class CustomersService {
         wrapper.setCity(entity.getCity());
         wrapper.setState(entity.getState());
         wrapper.setPincode(entity.getPincode());
-        wrapper.setStatus(entity.getStatus() != null ? entity.getStatus().name() : null);
+        wrapper.setStatus(entity.getStatus());
         wrapper.setAssignedTo(entity.getAssignedTo());
         
         // Get assigned user name
@@ -401,84 +380,121 @@ public class CustomersService {
         
         return wrapper;
     }
-    public Page<CustomerWrapper> getAllCustomersPaginated(Long userId, String userRole, 
-            String groupName, String subGroupName,
-            int page, int size) {
-Pageable pageable = PageRequest.of(page, size);
-Page<CustomersEntity> customerPage;
-
-if ("SUPERADMIN".equalsIgnoreCase(userRole) || "ADMIN".equalsIgnoreCase(userRole)) {
-// Admin sees all customers
-if (groupName != null && !groupName.isEmpty()) {
-try {
-CustomersEntity.GroupName group = CustomersEntity.GroupName.valueOf(groupName);
-customerPage = customersRepo.findByGroupNameAndDeletedAtIsNull(group, pageable);
-} catch (IllegalArgumentException e) {
-customerPage = customersRepo.findByDeletedAtIsNull(pageable);
-}
-} else {
-customerPage = customersRepo.findByDeletedAtIsNull(pageable);
-}
-} else {
-// Regular users see customers created by them OR assigned to them
-if (groupName != null && !groupName.isEmpty()) {
-try {
-CustomersEntity.GroupName group = CustomersEntity.GroupName.valueOf(groupName);
-customerPage = customersRepo.findByUserAndGroupNameAndDeletedAtIsNull(userId, group, pageable);
-} catch (IllegalArgumentException e) {
-customerPage = customersRepo.findByCreatedByOrAssignedToAndDeletedAtIsNull(userId, pageable);
-}
-} else {
-customerPage = customersRepo.findByCreatedByOrAssignedToAndDeletedAtIsNull(userId, pageable);
-}
-}
-
-return customerPage.map(this::convertToWrapper);
+public Page<CustomerWrapper> getAllCustomersPaginated(Long userId, String userRole, 
+                                                       String groupName, String subGroupName,
+                                                       int page, int size) {
+    Pageable pageable = PageRequest.of(page, size);
+    Page<CustomersEntity> customerPage;
+    
+    if ("SUPERADMIN".equalsIgnoreCase(userRole) || "ADMIN".equalsIgnoreCase(userRole)) {
+        // ADMIN/SUPERADMIN sees all customers with group/subgroup filtering
+        if (groupName != null && !groupName.isEmpty() && subGroupName != null && !subGroupName.isEmpty()) {
+            // Filter by both group and sub-group
+            try {
+                String group = groupName;
+                customerPage = customersRepo.findByGroupNameAndSubGroupNameAndDeletedAtIsNull(
+                    group, subGroupName, pageable);
+            } catch (IllegalArgumentException e) {
+                customerPage = customersRepo.findByDeletedAtIsNull(pageable);
+            }
+        } else if (groupName != null && !groupName.isEmpty()) {
+            // Filter by group only
+            try {
+                String group = groupName;
+                customerPage = customersRepo.findByGroupNameAndDeletedAtIsNull(group, pageable);
+            } catch (IllegalArgumentException e) {
+                customerPage = customersRepo.findByDeletedAtIsNull(pageable);
+            }
+        } else {
+            // No filter - get all
+            customerPage = customersRepo.findByDeletedAtIsNull(pageable);
+        }
+    } else {
+        // REGULAR USERS see only customers created by OR assigned to them
+        if (groupName != null && !groupName.isEmpty() && subGroupName != null && !subGroupName.isEmpty()) {
+            // Filter by both group and sub-group for user
+            try {
+                String group = groupName;
+                customerPage = customersRepo.findByUserAndGroupNameAndSubGroupNameAndDeletedAtIsNull(
+                    userId, group, subGroupName, pageable);
+            } catch (IllegalArgumentException e) {
+                customerPage = customersRepo.findByCreatedByOrAssignedToAndDeletedAtIsNull(userId, pageable);
+            }
+        } else if (groupName != null && !groupName.isEmpty()) {
+            // Filter by group only for user
+            try {
+            	String group = groupName;
+                customerPage = customersRepo.findByUserAndGroupNameAndDeletedAtIsNull(userId, group, pageable);
+            } catch (IllegalArgumentException e) {
+                customerPage = customersRepo.findByCreatedByOrAssignedToAndDeletedAtIsNull(userId, pageable);
+            }
+        } else {
+            // No filter - get user's customers
+            customerPage = customersRepo.findByCreatedByOrAssignedToAndDeletedAtIsNull(userId, pageable);
+        }
+    }
+    
+    return customerPage.map(this::convertToWrapper);
 }
 
 /**
 * Get filtered customers with pagination
 */
 public Page<CustomerWrapper> getFilteredCustomersPaginated(Long userId, String userRole,
-                 CustomerFilterRequestWrapper filterRequest,
-                 int page, int size) {
-Pageable pageable = PageRequest.of(page, size);
-Page<CustomersEntity> customerPage;
-
-// Parse filter parameters
-CustomersEntity.GroupName groupName = parseGroupName(filterRequest.getGroupName());
-CustomersEntity.CustomerStatus status = parseStatus(filterRequest.getStatus());
-LocalDateTime fromDate = parseDate(filterRequest.getFromDate());
-LocalDateTime toDate = parseDate(filterRequest.getToDate());
-
-if ("SUPERADMIN".equalsIgnoreCase(userRole) || "ADMIN".equalsIgnoreCase(userRole)) {
-// Admin searches all customers
-customerPage = customersRepo.searchCustomersPaginated(
-filterRequest.getSearchTerm(),
-groupName,
-status,
-filterRequest.getCity(),
-filterRequest.getState(),
-filterRequest.getAssignedTo(),
-fromDate,
-toDate,
-pageable
-);
-} else {
-// Regular users search only their created customers
-customerPage = customersRepo.searchCustomersForUserPaginated(
-userId,
-filterRequest.getSearchTerm(),
-groupName,
-status,
-filterRequest.getCity(),
-filterRequest.getState(),
-fromDate,
-toDate,
-pageable
-);
+                                                           CustomerFilterRequestWrapper filterRequest,
+                                                           int page, int size) {
+    Pageable pageable = PageRequest.of(page, size);
+    Page<CustomersEntity> customerPage;
+    
+    // Parse filter parameters
+    String groupName = filterRequest.getGroupName();
+    String status = filterRequest.getStatus();
+    LocalDateTime fromDate = parseDate(filterRequest.getFromDate());
+    LocalDateTime toDate = parseDate(filterRequest.getToDate());
+    String subGroupName = filterRequest.getSubGroupName(); // Get sub-group from filter
+    
+    if ("SUPERADMIN".equalsIgnoreCase(userRole) || "ADMIN".equalsIgnoreCase(userRole)) {
+        // Admin searches all customers
+        customerPage = customersRepo.searchCustomersPaginated(
+            filterRequest.getSearchTerm(),
+            groupName,
+            subGroupName,  // Pass sub-group
+            status,
+            filterRequest.getCity(),
+            filterRequest.getState(),
+            filterRequest.getAssignedTo(),
+            fromDate,
+            toDate,
+            pageable
+        );
+    } else {
+        // Regular users search only their customers
+        customerPage = customersRepo.searchCustomersForUserPaginated(
+            userId,
+            filterRequest.getSearchTerm(),
+            groupName,
+            subGroupName,  // Pass sub-group
+            status,
+            filterRequest.getCity(),
+            filterRequest.getState(),
+            fromDate,
+            toDate,
+            pageable
+        );
+    }
+    
+    return customerPage.map(this::convertToWrapper);
 }
 
-return customerPage.map(this::convertToWrapper);
+//Add this method to CustomerService.java
+
+/**
+* Get customer by project ID
+*/
+@Transactional(readOnly = true)
+public CustomersEntity getCustomerByProjectId(String projectId) {
+ return customersRepo.findByProjectId(projectId)
+         .orElseThrow(() -> new RuntimeException("Customer not found for project: " + projectId));
 }
+
 	}

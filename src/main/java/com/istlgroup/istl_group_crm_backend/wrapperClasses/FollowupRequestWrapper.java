@@ -4,13 +4,18 @@ import lombok.Data;
 
 @Data
 public class FollowupRequestWrapper {
-    private String relatedType;  // Lead, Customer, etc.
+    private String relatedType; // "LEAD", "CUSTOMER", "PROJECT"
     private Long relatedId;
-    private String followupType;  // Call, Email, Meeting, Site Visit, Reminder, Note
-    private String scheduledAt;   // ISO datetime string
+    private Long leadId;
+    private Long customerId;
+    private Long projectId;
+    private String groupName;
+    private String subGroupName;
+    private String followupType;
+    private String scheduledAt; // Format: "yyyy-MM-dd HH:mm:ss"
     private Long assignedTo;
-    private String status;        // Pending, Completed, Cancelled
-    private String completedAt;   // ISO datetime string
+    private String status;
+    private String priority;
     private String notes;
-    private String priority;      // High, Medium, Low
+    private String outcome;
 }

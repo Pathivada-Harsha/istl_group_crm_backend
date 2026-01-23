@@ -8,6 +8,8 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -127,4 +129,98 @@ public interface PurchaseOrderRepository extends JpaRepository<PurchaseOrderEnti
      */
     @Query("SELECT po FROM PurchaseOrderEntity po WHERE po.vendorId = :vendorId AND po.deletedAt IS NULL")
     List<PurchaseOrderEntity> findByVendorId(@Param("vendorId") Long vendorId);
-}
+    
+    
+    
+    @Query("SELECT COUNT(po) FROM PurchaseOrderEntity po WHERE po.projectId = :projectId AND po.deletedAt IS NULL")
+    Long countByProjectId(@Param("projectId") String projectId);
+
+    @Query("SELECT COUNT(po) FROM PurchaseOrderEntity po WHERE po.projectId = :projectId AND po.status = :status AND po.deletedAt IS NULL")
+    Long countByProjectIdAndStatus(@Param("projectId") String projectId, @Param("status") String status);
+
+    @Query("SELECT COALESCE(SUM(po.totalValue), 0) FROM PurchaseOrderEntity po WHERE po.projectId = :projectId AND po.deletedAt IS NULL")
+    Optional<BigDecimal> sumTotalValueByProjectId(@Param("projectId") String projectId);
+
+    @Query("SELECT COALESCE(SUM(po.totalValue), 0) FROM PurchaseOrderEntity po WHERE po.projectId = :projectId AND po.status = :status AND po.deletedAt IS NULL")
+    Optional<BigDecimal> sumTotalValueByProjectIdAndStatus(@Param("projectId") String projectId, @Param("status") String status);
+
+
+
+    @Query("SELECT COUNT(po) FROM PurchaseOrderEntity po WHERE po.projectId = :projectId AND po.paymentStatus = :paymentStatus AND po.deletedAt IS NULL")
+    Long countByProjectIdAndPaymentStatus(@Param("projectId") String projectId, @Param("paymentStatus") String paymentStatus);
+    /**
+     * Count POs by project and group by status
+     */
+    @Query("SELECT po.status, COUNT(po) FROM PurchaseOrderEntity po " +
+           "WHERE po.projectId = :projectId AND po.deletedAt IS NULL " +
+           "GROUP BY po.status")
+    List<Object[]> countByProjectIdAndGroupByStatus(@Param("projectId") String projectId);
+    @Query("SELECT po.category, SUM(po.totalValue) FROM PurchaseOrderEntity po " +
+            "WHERE po.projectId = :projectId AND po.deletedAt IS NULL " +
+            "GROUP BY po.category " +
+            "ORDER BY SUM(po.totalValue) DESC")
+     List<Object[]> sumTotalValueByProjectIdGroupByCategory(@Param("projectId") String projectId);
+     
+     /**
+      * Sum total items ordered
+      */
+     @Query("SELECT COALESCE(SUM(po.totalItemsOrdered), 0) FROM PurchaseOrderEntity po " +
+            "WHERE po.projectId = :projectId AND po.deletedAt IS NULL")
+     Integer sumTotalItemsOrderedByProjectId(@Param("projectId") String projectId);
+     
+     /**
+      * Sum total items delivered
+      */
+     @Query("SELECT COALESCE(SUM(po.totalItemsDelivered), 0) FROM PurchaseOrderEntity po " +
+            "WHERE po.projectId = :projectId AND po.deletedAt IS NULL")
+     Integer sumTotalItemsDeliveredByProjectId(@Param("projectId") String projectId);
+     
+     /**
+      * Find top 5 recent POs for a project
+      */
+     @Query("SELECT po FROM PurchaseOrderEntity po " +
+            "WHERE po.projectId = :projectId AND po.deletedAt IS NULL " +
+            "ORDER BY po.createdAt DESC")
+     List<PurchaseOrderEntity> findTop5ByProjectIdOrderByCreatedAtDesc(@Param("projectId") String projectId);
+     
+     /**
+      * Sum total value by project and date range
+      */
+     @Query("SELECT COALESCE(SUM(po.totalValue), 0) FROM PurchaseOrderEntity po " +
+            "WHERE po.projectId = :projectId " +
+            "AND po.orderDate BETWEEN :startDate AND :endDate " +
+            "AND po.deletedAt IS NULL")
+     BigDecimal sumTotalValueByProjectIdAndDateRange(
+         @Param("projectId") String projectId,
+         @Param("startDate") LocalDateTime startDate,
+         @Param("endDate") LocalDateTime endDate
+     );
+     
+     /**
+      * Count POs by project and date range
+      */
+     @Query("SELECT COUNT(po) FROM PurchaseOrderEntity po " +
+            "WHERE po.projectId = :projectId " +
+            "AND po.orderDate BETWEEN :startDate AND :endDate " +
+            "AND po.deletedAt IS NULL")
+     Long countByProjectIdAndDateRange(
+         @Param("projectId") String projectId,
+         @Param("startDate") LocalDateTime startDate,
+         @Param("endDate") LocalDateTime endDate
+     );
+     
+     /**
+      * Count POs by vendor
+      */
+     @Query("SELECT COUNT(po) FROM PurchaseOrderEntity po " +
+            "WHERE po.vendorId = :vendorId AND po.deletedAt IS NULL")
+     Long countByVendorId(@Param("vendorId") Long vendorId);
+
+     @Query("SELECT po FROM PurchaseOrderEntity po " +
+    	       "WHERE po.projectId = :projectId " +
+    	       "AND po.status = :status " +
+    	       "AND po.deletedAt IS NULL")
+    	List<PurchaseOrderEntity> findByProjectIdAndStatus(
+    	    @Param("projectId") String projectId, 
+    	    @Param("status") String status
+    	);}
