@@ -321,7 +321,22 @@ public class TelecallerLeadService {
             if (req.getSubsidyRequired() != null)
                 lead.setSubsidyRequired(req.getSubsidyRequired().isBlank() ? null : req.getSubsidyRequired().trim());
 
-            Long bdUserId = roundRobinService.getNextBD(lead.getGroupName(), lead.getSubGroupName());
+            // Skip the automatic BD round-robin if:
+            //   (a) a BD has already been assigned directly (bdAssignedTo set), or
+            //   (b) the lead is owned directly by a senior, non-telecaller user
+            //       (assignedTo points to a non-TELECALLER role).
+            boolean bdAlreadyAssigned = lead.getBdAssignedTo() != null;
+            boolean seniorOwner = false;
+            if (lead.getAssignedTo() != null) {
+                String ownerRole = usersRepo.findById(lead.getAssignedTo())
+                        .map(u -> u.getRole()).orElse("");
+                seniorOwner = ownerRole != null
+                        && !"TELECALLER".equalsIgnoreCase(ownerRole);
+            }
+
+            Long bdUserId = (bdAlreadyAssigned || seniorOwner)
+                    ? null
+                    : roundRobinService.getNextBD(lead.getGroupName(), lead.getSubGroupName());
             if (bdUserId != null) {
                 lead.setBdAssignedTo(bdUserId);
                 lead.setBdAssignedAt(LocalDateTime.now());

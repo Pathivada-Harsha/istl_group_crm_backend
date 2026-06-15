@@ -1,11 +1,18 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
@@ -48,6 +55,99 @@ public class FollowupsService {
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     // ─────────────────────────────────────────────────────────────────────────
+    // SERVER-SIDE PAGINATED FETCH (main Follow-ups page)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Returns a page of follow-ups + KPI counts, all filtered server-side.
+     *
+     * @param userId          null for admin/superadmin (no user restriction)
+     * @param groupName       optional group filter
+     * @param subGroupName    optional sub-group filter
+     * @param status          optional status filter
+     * @param priority        optional priority filter
+     * @param followupType    optional type filter
+     * @param assignedToFilter optional assignee ID filter
+     * @param fromDate        optional start of date range (scheduledAt)
+     * @param toDate          optional end of date range (scheduledAt)
+     * @param searchTerm      optional search string
+     * @param page            0-based page number
+     * @param pageSize        records per page
+     * @return Map with keys: data (List<FollowupWrapper>), totalCount (long), kpis (Map)
+     */
+    public Map<String, Object> getFollowupsPaged(
+            Long userId,
+            String groupName,
+            String subGroupName,
+            String status,
+            String priority,
+            String followupType,
+            Long assignedToFilter,
+            String fromDateStr,
+            String toDateStr,
+            String searchTerm,
+            int page,
+            int pageSize) {
+
+        // ── Parse date range ────────────────────────────────────────────────
+        LocalDateTime fromDate = null;
+        LocalDateTime toDate   = null;
+        if (fromDateStr != null && !fromDateStr.isBlank()) {
+            fromDate = LocalDate.parse(fromDateStr).atStartOfDay();
+        }
+        if (toDateStr != null && !toDateStr.isBlank()) {
+            toDate = LocalDate.parse(toDateStr).atTime(LocalTime.MAX);
+        }
+
+        // ── Normalise search term for LIKE query ────────────────────────────
+        String likeSearch = (searchTerm != null && !searchTerm.isBlank())
+                ? "%" + searchTerm.toLowerCase() + "%" : null;
+
+        // ── Pageable: newest records first (by id DESC) ─────────────────────
+        PageRequest pageable = PageRequest.of(
+                Math.max(0, page - 1),   // frontend sends 1-based page
+                pageSize > 0 ? pageSize : 10,
+                Sort.by("id").descending()
+        );
+
+        // ── Data page ───────────────────────────────────────────────────────
+        Page<FollowupsEntity> resultPage = followupsRepo.findPagedByFilters(
+                userId, groupName, subGroupName,
+                status, priority, followupType, assignedToFilter,
+                fromDate, toDate, likeSearch,
+                pageable
+        );
+
+        List<FollowupWrapper> data = resultPage.getContent()
+                .stream().map(this::convertToWrapper).collect(Collectors.toList());
+
+        // ── KPIs (always based on full scope — no active filter applied) ────
+        LocalDateTime now   = LocalDateTime.now();
+        long totalKpi       = followupsRepo.countTotal(userId, groupName, subGroupName);
+        long pendingKpi     = followupsRepo.countByStatus(userId, groupName, subGroupName, "Pending");
+        long completedKpi   = followupsRepo.countByStatus(userId, groupName, subGroupName, "Completed");
+        long overdueKpi     = followupsRepo.countOverdue(userId, groupName, subGroupName, now);
+        long todayKpi       = followupsRepo.countDueToday(userId, groupName, subGroupName, now);
+
+        Map<String, Long> kpis = new HashMap<>();
+        kpis.put("total",     totalKpi);
+        kpis.put("pending",   pendingKpi);
+        kpis.put("completed", completedKpi);
+        kpis.put("overdue",   overdueKpi);
+        kpis.put("today",     todayKpi);
+
+        // ── Result map ──────────────────────────────────────────────────────
+        Map<String, Object> result = new HashMap<>();
+        result.put("data",        data);
+        result.put("totalCount",  resultPage.getTotalElements());
+        result.put("totalPages",  resultPage.getTotalPages());
+        result.put("currentPage", page);
+        result.put("pageSize",    pageSize);
+        result.put("kpis",        kpis);
+        return result;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // CREATE
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -80,17 +180,17 @@ public class FollowupsService {
         followup.setPriority(request.getPriority() != null ? request.getPriority() : "Medium");
         followup.setNotes(request.getNotes());
 
-        // FIX 1: Store outcome on create (direct interactions are created as Completed with outcome)
+        // Store outcome on create (direct interactions are created as Completed with outcome)
         followup.setOutcome(request.getOutcome());
 
-        // FIX 2: If status is already Completed at create time (direct interaction), set completedAt
+        // If status is already Completed at create time (direct interaction), set completedAt
         if ("Completed".equals(followup.getStatus())) {
-            followup.setCompletedAt(scheduledAt); // use the actual visit/call time, not now
+            followup.setCompletedAt(scheduledAt);
         }
 
         FollowupsEntity saved = followupsRepo.save(followup);
 
-        // ── NOTIFICATION: new follow-up assigned (skip self-assignment) ──
+        // NOTIFICATION: new follow-up assigned (skip self-assignment)
         try {
             if (saved.getAssignedTo() != null && !saved.getAssignedTo().equals(createdBy)) {
                 notificationService.createNotification(
@@ -104,7 +204,7 @@ public class FollowupsService {
             System.err.println("[FollowupsService] notification error on create: " + e.getMessage());
         }
 
-        // FIX 3: Write the correct history entry
+        // History entry
         if (request.getLeadId() != null) {
             try {
                 boolean isDirect = "Completed".equals(request.getStatus())
@@ -112,7 +212,6 @@ public class FollowupsService {
                         && !request.getOutcome().isBlank();
 
                 if (isDirect) {
-                    // Direct / unscheduled interaction — recorded immediately as completed
                     String description = String.format(
                             "Direct %s recorded on %s — %s",
                             followup.getFollowupType(),
@@ -121,15 +220,13 @@ public class FollowupsService {
                     );
                     leadHistoryService.addHistory(
                             request.getLeadId(),
-                            "DIRECT_INTERACTION",   // new action type — handled in frontend
-                            null,
-                            null,
+                            "DIRECT_INTERACTION",
+                            null, null,
                             request.getNotes() != null ? request.getNotes().trim() : null,
                             description,
                             createdBy
                     );
                 } else {
-                    // Normal scheduled follow-up
                     String description = String.format(
                             "Follow-up scheduled: %s on %s",
                             followup.getFollowupType(),
@@ -162,7 +259,7 @@ public class FollowupsService {
         FollowupsEntity followup = followupsRepo.findById(followupId)
                 .orElseThrow(() -> new CustomException("Follow-up not found"));
 
-        Long previousAssignee = followup.getAssignedTo(); // captured before changes (reassign notification)
+        Long previousAssignee = followup.getAssignedTo();
 
         try {
             Long newAssignedTo     = request.getAssignedTo();
@@ -196,7 +293,7 @@ public class FollowupsService {
 
         FollowupsEntity updated = followupsRepo.save(followup);
 
-        // ── NOTIFICATION: follow-up reassigned to a different user ──
+        // NOTIFICATION: follow-up reassigned
         try {
             Long newAssignee = updated.getAssignedTo();
             boolean changed   = newAssignee != null && !newAssignee.equals(previousAssignee);
@@ -410,7 +507,7 @@ public class FollowupsService {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // QUERY METHODS
+    // QUERY METHODS (kept for other modules / tabs)
     // ─────────────────────────────────────────────────────────────────────────
 
     public List<FollowupWrapper> getFollowupsForLead(Long leadId) {

@@ -403,8 +403,34 @@ public class LeadsService {
                         .contains(requestWrapper.getStatus());
 
         if (assignedTo != null && !isClosedWon && !isReferral) {
-            // Explicit assignment selected in the form → honour it (not for Closed Won or Referral)
-            lead.setAssignedTo(assignedTo);
+            // Explicit assignment selected in the form.
+            // Branch on the ASSIGNEE's role so that a direct assignment to a
+            // BD or a senior user is NOT mistaken for a telecaller assignment.
+            String assigneeRole = usersRepo.findById(assignedTo)
+                    .map(u -> u.getRole())
+                    .orElse("");
+
+            if ("TELECALLER".equalsIgnoreCase(assigneeRole)) {
+                // Direct assignment to a telecaller → normal telecaller slot.
+                lead.setAssignedTo(assignedTo);
+
+            } else if (assigneeRole != null
+                    && assigneeRole.toUpperCase().contains("BD")) {
+                // Direct assignment to a BD user → put them in the BD slot,
+                // leave the telecaller slot empty (no telecaller, no TC email),
+                // and mark so the later Interested→BD round-robin is skipped.
+                lead.setAssignedTo(null);
+                lead.setBdAssignedTo(assignedTo);
+                lead.setBdAssignedAt(java.time.LocalDateTime.now());
+
+            } else {
+                // Direct assignment to a senior user (MANAGER / ADMIN / Sales …)
+                // → senior owner. Keep them in assignedTo as the owner, but DO
+                // NOT trigger the telecaller round-robin or the telecaller email.
+                // bdAssignedTo stays null; the Interested→BD round-robin is
+                // skipped because a senior owner already exists.
+                lead.setAssignedTo(assignedTo);
+            }
 
         } else if (isClosedWon) {
             // Closed Won on creation → no telecaller needed, leave assignedTo null
@@ -524,7 +550,12 @@ public class LeadsService {
         if (!suppressEmail && finalSavedLead.getAssignedTo() != null) {
             try {
                 usersRepo.findById(finalSavedLead.getAssignedTo()).ifPresent(telecaller -> {
-                    if (telecaller.getEmail() != null && !telecaller.getEmail().isBlank()) {
+                    // Only send the "New Lead Assigned" telecaller email when the
+                    // assignee is actually a TELECALLER. Senior owners directly
+                    // assigned at creation must NOT receive the telecaller email.
+                    boolean isTelecaller = "TELECALLER".equalsIgnoreCase(telecaller.getRole());
+                    if (isTelecaller
+                            && telecaller.getEmail() != null && !telecaller.getEmail().isBlank()) {
                         String subject = "New Lead Assigned to You – " + finalSavedLead.getLeadCode();
                         String body = buildSingleLeadEmailBody(telecaller.getName(), finalSavedLead);
                         mailService.sendEmail(telecaller.getEmail(), subject, body);
@@ -1261,11 +1292,15 @@ public class LeadsService {
         wrapper.setTcBillFileType(entity.getTcBillFileType());
         wrapper.setTcHasBillFile(entity.isTcHasBillFile());
 
-        // Telecaller name (assignedTo = telecaller until INTERESTED, then BD takes assignedTo)
+        // assignedToName = generic owner label (telecaller OR senior owner).
+        // telecallerName = ONLY set when the assignee is actually a TELECALLER,
+        // so the UI never mislabels a senior owner / BD as a telecaller.
         if (entity.getAssignedTo() != null) {
             usersRepo.findById(entity.getAssignedTo()).ifPresent(user -> {
                 wrapper.setAssignedToName(user.getName());
-                wrapper.setTelecallerName(user.getName());
+                if ("TELECALLER".equalsIgnoreCase(user.getRole())) {
+                    wrapper.setTelecallerName(user.getName());
+                }
             });
         }
 

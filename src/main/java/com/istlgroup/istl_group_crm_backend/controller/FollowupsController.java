@@ -17,11 +17,11 @@ import com.istlgroup.istl_group_crm_backend.wrapperClasses.FollowupRequestWrappe
 @RestController
 @RequestMapping("/followups")
 public class FollowupsController {
-    
+
     @Autowired
     private FollowupsService followupsService;
-    
-    
+
+
     /**
      * Get all follow-ups (Admin/SuperAdmin only).
      * Regular users should use /my-followups instead.
@@ -55,47 +55,69 @@ public class FollowupsController {
     }
 
     /**
-     * Get follow-ups for the requesting user, with optional group/subGroup filters.
+     * Get follow-ups with server-side pagination and filtering.
      *
-     * Query params (all optional):
-     *   groupName    — restrict to this group  (null = no restriction)
-     *   subGroupName — restrict to this subGroup (null = no restriction)
+     * Query params:
+     *   groupName       — group filter
+     *   subGroupName    — sub-group filter
+     *   status          — Pending | Completed | Cancelled | Rescheduled
+     *   priority        — High | Medium | Low
+     *   followupType    — Call | Email | Meeting | Visit | Demo | Proposal | Other
+     *   assignedTo      — user ID to filter by assignee
+     *   fromDate        — yyyy-MM-dd start of scheduled date range
+     *   toDate          — yyyy-MM-dd end of scheduled date range
+     *   search          — free text search
+     *   page            — 1-based page number (default 1)
+     *   pageSize        — rows per page (default 10)
      *
-     * Role logic (handled server-side — frontend always calls this single endpoint):
-     *   SUPERADMIN / ADMIN  → userId filter is removed; they see all matching records
+     * Response:
+     *   { success, data, totalCount, totalPages, currentPage, pageSize, kpis }
+     *
+     * Role logic:
+     *   SUPERADMIN / ADMIN  → see all records (no userId restriction)
      *   Everyone else       → only records where assigned_to = me OR created_by = me
-     *
-     * When groupName is null AND subGroupName is null, customer followups
-     * (which have no groupName) are included naturally.
-     * When groupName is set, only lead/project followups with that group are returned
-     * (customer followups with null groupName are excluded — correct behaviour).
      */
     @GetMapping("/my-followups")
     public ResponseEntity<Map<String, Object>> getMyFollowups(
             @RequestHeader("User-Id") Long userId,
             @RequestHeader("User-Role") String userRole,
             @RequestParam(value = "groupName",    required = false) String groupName,
-            @RequestParam(value = "subGroupName", required = false) String subGroupName) {
+            @RequestParam(value = "subGroupName", required = false) String subGroupName,
+            @RequestParam(value = "status",       required = false) String status,
+            @RequestParam(value = "priority",     required = false) String priority,
+            @RequestParam(value = "followupType", required = false) String followupType,
+            @RequestParam(value = "assignedTo",   required = false) Long assignedToFilter,
+            @RequestParam(value = "fromDate",     required = false) String fromDate,
+            @RequestParam(value = "toDate",       required = false) String toDate,
+            @RequestParam(value = "search",       required = false) String search,
+            @RequestParam(value = "page",         defaultValue = "1") int page,
+            @RequestParam(value = "pageSize",     defaultValue = "10") int pageSize) {
         try {
             boolean isAdmin = "SUPERADMIN".equalsIgnoreCase(userRole) || "ADMIN".equalsIgnoreCase(userRole);
 
-            // Admins have no userId restriction (pass null so the JPQL skips that condition).
-            // Regular users are restricted to rows they own (assigned or created).
+            // Admins have no userId restriction; regular users are scoped to their own records.
             Long effectiveUserId = isAdmin ? null : userId;
 
-            // Normalise empty strings from query params to null so JPQL treats them as "no filter"
-            String grp    = (groupName    != null && !groupName.isBlank())    ? groupName    : null;
-            String subGrp = (subGroupName != null && !subGroupName.isBlank()) ? subGroupName : null;
+            // Normalise empty strings to null so queries treat them as "no filter"
+            String grp        = (groupName    != null && !groupName.isBlank())    ? groupName    : null;
+            String subGrp     = (subGroupName != null && !subGroupName.isBlank()) ? subGroupName : null;
+            String sts        = (status       != null && !status.isBlank())       ? status       : null;
+            String pri        = (priority     != null && !priority.isBlank())     ? priority     : null;
+            String fType      = (followupType != null && !followupType.isBlank()) ? followupType : null;
+            String srch       = (search       != null && !search.isBlank())       ? search       : null;
+            String fDate      = (fromDate     != null && !fromDate.isBlank())     ? fromDate     : null;
+            String tDate      = (toDate       != null && !toDate.isBlank())       ? toDate       : null;
 
-            List<FollowupWrapper> followups =
-                    followupsService.getFollowupsByUserAndFilters(effectiveUserId, grp, subGrp);
+            Map<String, Object> result = followupsService.getFollowupsPaged(
+                    effectiveUserId, grp, subGrp,
+                    sts, pri, fType, assignedToFilter,
+                    fDate, tDate, srch,
+                    page, pageSize
+            );
 
-            Map<String, Object> response = new HashMap<>();
-            response.put("success", true);
-            response.put("data", followups);
-            response.put("count", followups.size());
+            result.put("success", true);
+            return ResponseEntity.ok(result);
 
-            return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, Object> errorResponse = new HashMap<>();
             errorResponse.put("success", false);
@@ -103,7 +125,7 @@ public class FollowupsController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
         }
     }
-    
+
     /**
      * Create a new follow-up
      */
@@ -113,12 +135,12 @@ public class FollowupsController {
             @RequestBody FollowupRequestWrapper request) {
         try {
             FollowupWrapper created = followupsService.createFollowup(request, userId);
-            
+
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("message", "Follow-up created successfully");
             response.put("data", created);
-            
+
             return ResponseEntity.status(HttpStatus.CREATED).body(response);
         } catch (CustomException e) {
             Map<String, Object> errorResponse = new HashMap<>();
@@ -132,7 +154,7 @@ public class FollowupsController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
         }
     }
-    
+
     /**
      * Update a follow-up
      */
@@ -143,12 +165,12 @@ public class FollowupsController {
             @RequestBody FollowupRequestWrapper request) {
         try {
             FollowupWrapper updated = followupsService.updateFollowup(followupId, request, userId);
-            
+
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("message", "Follow-up updated successfully");
             response.put("data", updated);
-            
+
             return ResponseEntity.ok(response);
         } catch (CustomException e) {
             Map<String, Object> errorResponse = new HashMap<>();
@@ -162,7 +184,7 @@ public class FollowupsController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
         }
     }
-    
+
     /**
      * Get follow-ups for a lead
      */
@@ -170,12 +192,12 @@ public class FollowupsController {
     public ResponseEntity<Map<String, Object>> getFollowupsForLead(@PathVariable Long leadId) {
         try {
             List<FollowupWrapper> followups = followupsService.getFollowupsForLead(leadId);
-            
+
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("data", followups);
             response.put("count", followups.size());
-            
+
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, Object> errorResponse = new HashMap<>();
@@ -187,9 +209,6 @@ public class FollowupsController {
 
     /**
      * Get follow-ups by entity type and ID.
-     * Supports: Customer, Lead (extensible for future entity types).
-     * Called by: GET /followups/entity/Customer/{id}
-     *            GET /followups/entity/Lead/{id}
      */
     @GetMapping("/entity/{entityType}/{entityId}")
     public ResponseEntity<Map<String, Object>> getFollowupsForEntity(
@@ -203,7 +222,6 @@ public class FollowupsController {
             } else if ("Lead".equalsIgnoreCase(entityType)) {
                 followups = followupsService.getFollowupsForLead(entityId);
             } else {
-                // Generic fallback using relatedType / relatedId columns
                 followups = followupsService.getFollowupsForRelatedEntity(entityType, entityId);
             }
 
@@ -220,7 +238,7 @@ public class FollowupsController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
         }
     }
-    
+
     /**
      * Get overdue follow-ups
      */
@@ -228,12 +246,12 @@ public class FollowupsController {
     public ResponseEntity<Map<String, Object>> getOverdueFollowups() {
         try {
             List<FollowupWrapper> followups = followupsService.getOverdueFollowups();
-            
+
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("data", followups);
             response.put("count", followups.size());
-            
+
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, Object> errorResponse = new HashMap<>();
@@ -242,7 +260,7 @@ public class FollowupsController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
         }
     }
-    
+
     /**
      * Get today's follow-ups
      */
@@ -250,12 +268,12 @@ public class FollowupsController {
     public ResponseEntity<Map<String, Object>> getTodaysFollowups() {
         try {
             List<FollowupWrapper> followups = followupsService.getTodaysFollowups();
-            
+
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("data", followups);
             response.put("count", followups.size());
-            
+
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, Object> errorResponse = new HashMap<>();
@@ -264,7 +282,7 @@ public class FollowupsController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
         }
     }
-    
+
     /**
      * Delete a follow-up
      */
@@ -274,11 +292,11 @@ public class FollowupsController {
             @RequestHeader("User-Id") Long userId) {
         try {
             followupsService.deleteFollowup(followupId, userId);
-            
+
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("message", "Follow-up deleted successfully");
-            
+
             return ResponseEntity.ok(response);
         } catch (CustomException e) {
             Map<String, Object> errorResponse = new HashMap<>();
