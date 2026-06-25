@@ -625,6 +625,12 @@ public class LeadsService {
             throw new CustomException("Access denied to update this lead");
         }
 
+        if ("Not Interested".equalsIgnoreCase(requestWrapper.getStatus())
+                && (requestWrapper.getNotInterestedReason() == null
+                    || requestWrapper.getNotInterestedReason().trim().isEmpty())) {
+            throw new CustomException("Please provide a reason for marking this lead as Not Interested");
+        }
+
         String oldStatus    = lead.getStatus();
         Long   oldAssignedTo = lead.getAssignedTo();
         String oldPriority  = lead.getPriority();
@@ -669,6 +675,16 @@ public class LeadsService {
                 usersRepo.findById(userId).ifPresent(u -> lead.setClosedByName(u.getName()));
             }
         }
+
+        // ── Not Interested reason (set by a non-telecaller user, e.g. BD/Admin) ──
+        // Saved into the same telecallerReason column the telecaller flow uses,
+        // so it shows up consistently wherever telecallerReason is already displayed.
+        if ("Not Interested".equalsIgnoreCase(requestWrapper.getStatus())
+                && requestWrapper.getNotInterestedReason() != null
+                && !requestWrapper.getNotInterestedReason().trim().isEmpty()) {
+            lead.setTelecallerReason(requestWrapper.getNotInterestedReason().trim());
+        }
+
 
         // ── Sync telecallerStatus to mirror main status (single source of truth) ──
         if (requestWrapper.getStatus() != null) {
@@ -740,6 +756,23 @@ public class LeadsService {
                 System.err.println("Failed to add closed-lost-reason history: " + e.getMessage());
             }
         }
+
+        if ("Not Interested".equalsIgnoreCase(requestWrapper.getStatus())
+                && requestWrapper.getNotInterestedReason() != null
+                && !requestWrapper.getNotInterestedReason().trim().isEmpty()) {
+            String trimmedReason = requestWrapper.getNotInterestedReason().trim();
+            try {
+                leadHistoryService.addHistory(
+                    leadId, "NOT_INTERESTED_REASON", "telecallerReason",
+                    null, trimmedReason,
+                    "Reason for marking Not Interested: " + trimmedReason,
+                    userId
+                );
+            } catch (Exception e) {
+                System.err.println("Failed to add not-interested-reason history: " + e.getMessage());
+            }
+        }
+
 
         if (requestWrapper.getAssignedTo() != null && !requestWrapper.getAssignedTo().equals(oldAssignedTo)) {
             try {

@@ -373,22 +373,25 @@ public class ReportService {
         BigDecimal paidBillValue = (paidViaAdvances       != null ? paidViaAdvances       : BigDecimal.ZERO)
                                  .add(paidViaDirectPayments != null ? paidViaDirectPayments : BigDecimal.ZERO);
 
-        // ── Inward Recovery: items returned from site to warehouse ────────────
-        // OUTWARD transactions already created warehouse bills (included in paidBillValue).
-        // When materials come back INWARD, the project gets credit for that value back.
-        // Formula: inwardRecovery = SUM(qty × unitCost) for all INWARD txns on this project.
+        // ── Inward Recovery: SITE RETURNS only (items returned from site to warehouse) ──
+        // Only INWARD txns where poId IS NULL are genuine site returns.
+        // INWARD txns linked to a PO (poId set) are vendor deliveries into the warehouse
+        // and must NOT be counted here — they have nothing to do with project cost recovery.
+        // Unit cost: use the value stored on the transaction itself (cost at time of issue);
+        // fall back to current item unit cost only if the transaction value is zero.
         BigDecimal inwardRecoveryValue = BigDecimal.ZERO;
         try {
-            List<InvTransactionEntity> inwardTxns =
-                invTransactionRepository.findByProjectIdAndType(projectId, "INWARD");
-            for (InvTransactionEntity t : inwardTxns) {
+            List<InvTransactionEntity> siteReturnTxns =
+                invTransactionRepository.findByProjectIdAndTypeAndPoIdIsNull(projectId, "INWARD");
+            for (InvTransactionEntity t : siteReturnTxns) {
                 BigDecimal qty = t.getQty() != null ? t.getQty().abs() : BigDecimal.ZERO;
-                BigDecimal uc  = BigDecimal.ZERO;
-                if (t.getInventoryItemId() != null) {
-                    uc = itemRepository.findById(t.getInventoryItemId())
-                        .map(i -> i.getUnitCost() != null ? i.getUnitCost() : BigDecimal.ZERO)
-                        .orElse(BigDecimal.ZERO);
-                }
+                BigDecimal uc  = t.getUnitCost() != null && t.getUnitCost().compareTo(BigDecimal.ZERO) > 0
+                    ? t.getUnitCost()
+                    : (t.getInventoryItemId() != null
+                        ? itemRepository.findById(t.getInventoryItemId())
+                            .map(i -> i.getUnitCost() != null ? i.getUnitCost() : BigDecimal.ZERO)
+                            .orElse(BigDecimal.ZERO)
+                        : BigDecimal.ZERO);
                 inwardRecoveryValue = inwardRecoveryValue.add(qty.multiply(uc));
             }
         } catch (Exception e) {
@@ -441,8 +444,9 @@ public class ReportService {
         try {
             List<InvTransactionEntity> outwardTxns =
                 invTransactionRepository.findByProjectIdAndType(projectId, "OUTWARD");
+            // Only genuine site returns (poId IS NULL) — not vendor PO deliveries
             List<InvTransactionEntity> inwardTxns =
-                invTransactionRepository.findByProjectIdAndType(projectId, "INWARD");
+                invTransactionRepository.findByProjectIdAndTypeAndPoIdIsNull(projectId, "INWARD");
 
             // Count warehouse bills
             long billCount = billRepository.findAll().stream()
@@ -478,18 +482,21 @@ public class ReportService {
                     .refNo(t.getRefNo()).notes(t.getNotes()).build());
             }
 
-            // Inward transactions
+            // Inward transactions (site returns only — poId IS NULL already filtered above)
             BigDecimal totalReturnValue = BigDecimal.ZERO;
             BigDecimal totalQtyReturned = BigDecimal.ZERO;
             List<ProjectReportDTO.WarehouseTxnRow> inwardRows = new ArrayList<>();
             for (InvTransactionEntity t : inwardTxns) {
                 if (t.getNotes() != null && t.getNotes().startsWith("VOIDED")) continue;
                 BigDecimal qty = t.getQty() != null ? t.getQty().abs() : BigDecimal.ZERO;
-                BigDecimal uc  = t.getInventoryItemId() != null
-                    ? itemRepository.findById(t.getInventoryItemId())
-                        .map(i -> i.getUnitCost() != null ? i.getUnitCost() : BigDecimal.ZERO)
-                        .orElse(BigDecimal.ZERO)
-                    : BigDecimal.ZERO;
+                // Prefer cost stored on transaction; fall back to current item cost
+                BigDecimal uc  = t.getUnitCost() != null && t.getUnitCost().compareTo(BigDecimal.ZERO) > 0
+                    ? t.getUnitCost()
+                    : (t.getInventoryItemId() != null
+                        ? itemRepository.findById(t.getInventoryItemId())
+                            .map(i -> i.getUnitCost() != null ? i.getUnitCost() : BigDecimal.ZERO)
+                            .orElse(BigDecimal.ZERO)
+                        : BigDecimal.ZERO);
                 BigDecimal lineVal = qty.multiply(uc);
                 totalQtyReturned = totalQtyReturned.add(qty);
                 totalReturnValue = totalReturnValue.add(lineVal);

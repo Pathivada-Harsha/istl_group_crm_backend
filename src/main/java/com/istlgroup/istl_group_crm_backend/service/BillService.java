@@ -558,6 +558,11 @@ public class BillService {
             }
 
             recalculateBillTotal(bill);
+            // CRITICAL: recalculate status after total changes.
+            // If quantities / items increased, totalAmount now exceeds paidAmount →
+            // status must flip from "Paid" → "Partially Paid" (or "Pending" if nothing paid).
+            // Without this the bill stays "Paid" with a non-zero balance, which is wrong.
+            bill.recalculateStatus();
         }
 
         bill.setUpdatedBy(userId);

@@ -53,4 +53,27 @@ public interface InvTransactionRepository extends JpaRepository<InvTransactionEn
         @Param("projectId") String projectId,
         @Param("type")      String type
     );
+
+    /**
+     * Returns only SITE RETURN INWARD transactions — i.e. items coming back from
+     * site to warehouse, NOT vendor/PO deliveries into the warehouse.
+     *
+     * Discriminator: po_id IS NULL means it was NOT auto-created from a PO receipt.
+     * PO-linked INWARDs (vendor deliveries) always have po_id populated.
+     * Site returns are recorded manually with no PO reference.
+     *
+     * Used by ProjectDashboardService and ReportService to compute inwardRecoveryValue
+     * so that vendor PO receipts are NOT incorrectly counted as project credits.
+     */
+    @Query(
+        "SELECT t FROM InvTransactionEntity t " +
+        "WHERE t.projectId = :projectId " +
+        "  AND t.type = :type " +
+        "  AND t.poId IS NULL " +
+        "ORDER BY t.transactionDate DESC, t.createdAt DESC"
+    )
+    List<InvTransactionEntity> findByProjectIdAndTypeAndPoIdIsNull(
+        @Param("projectId") String projectId,
+        @Param("type")      String type
+    );
 }

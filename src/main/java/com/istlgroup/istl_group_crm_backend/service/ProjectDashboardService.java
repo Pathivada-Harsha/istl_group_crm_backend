@@ -328,7 +328,7 @@ public class ProjectDashboardService {
         BigDecimal totalProcurementCost = totalBillValue;  // total billed by vendors (matches Reports)
         BigDecimal totalCost = totalProcurementCost.add(totalEmployeeExpenses);
 
-        BigDecimal amountSpent = totalCost; // used for budget utilization
+        BigDecimal amountSpent = totalCost; // used for budget utilization (gross — before site return credit)
 
         Double budgetUtilizationPercent = totalProjectValue.compareTo(BigDecimal.ZERO) > 0
             ? totalCost.multiply(new BigDecimal("100"))
@@ -373,18 +373,27 @@ public class ProjectDashboardService {
         // OUTWARD txns already created warehouse bills (included in paidBillValue via bills table).
         // INWARD txns (site → warehouse) represent material coming back — the project
         // gets credit for that value since it was already charged via an outward warehouse bill.
+        // ── Inward Recovery: SITE RETURNS only (items sent back from site to warehouse) ─
+        // Only INWARD txns with poId IS NULL are site returns.
+        // INWARD txns with a poId are vendor/PO deliveries into the warehouse — they must
+        // NOT be counted here, otherwise vendor replenishments falsely inflate the credit.
+        // Unit cost: prefer the cost stored on the transaction itself (at time of original
+        // OUTWARD); fall back to current item unit cost only if the txn value is zero.
         BigDecimal inwardRecoveryValue = BigDecimal.ZERO;
         try {
-            List<com.istlgroup.istl_group_crm_backend.entity.InvTransactionEntity> inwardTxns =
-                invTransactionRepository.findByProjectIdAndType(projectUniqueId, "INWARD");
-            for (com.istlgroup.istl_group_crm_backend.entity.InvTransactionEntity t : inwardTxns) {
+            List<com.istlgroup.istl_group_crm_backend.entity.InvTransactionEntity> siteReturnTxns =
+                invTransactionRepository.findByProjectIdAndTypeAndPoIdIsNull(projectUniqueId, "INWARD");
+            for (com.istlgroup.istl_group_crm_backend.entity.InvTransactionEntity t : siteReturnTxns) {
                 BigDecimal qty = t.getQty() != null ? t.getQty().abs() : BigDecimal.ZERO;
-                if (t.getInventoryItemId() != null) {
-                    BigDecimal uc = itemRepository.findById(t.getInventoryItemId())
-                        .map(i -> i.getUnitCost() != null ? i.getUnitCost() : BigDecimal.ZERO)
-                        .orElse(BigDecimal.ZERO);
-                    inwardRecoveryValue = inwardRecoveryValue.add(qty.multiply(uc));
-                }
+                // Use unit_cost stored on the transaction (cost at time of issue)
+                BigDecimal uc = t.getUnitCost() != null && t.getUnitCost().compareTo(BigDecimal.ZERO) > 0
+                    ? t.getUnitCost()
+                    : (t.getInventoryItemId() != null
+                        ? itemRepository.findById(t.getInventoryItemId())
+                            .map(i -> i.getUnitCost() != null ? i.getUnitCost() : BigDecimal.ZERO)
+                            .orElse(BigDecimal.ZERO)
+                        : BigDecimal.ZERO);
+                inwardRecoveryValue = inwardRecoveryValue.add(qty.multiply(uc));
             }
         } catch (Exception e) {
             log.warn("Could not compute inward recovery for {}: {}", projectUniqueId, e.getMessage());
@@ -436,9 +445,16 @@ public class ProjectDashboardService {
             log.warn("Could not update project stats", e);
         }
 
+        // Net amount spent = paid to vendors minus materials returned from site.
+        // inwardRecoveryValue is subtracted because those items were already billed
+        // when they left the warehouse (OUTWARD auto-bill), and returning them credits
+        // that cost back to the project.
+        BigDecimal netSpent = paidBillValue.subtract(inwardRecoveryValue).max(BigDecimal.ZERO);
+
         return FinancialData.builder()
             .totalProjectValue(totalProjectValue)
-            .totalSpent(paidBillValue)              // Amount actually paid to vendors
+            .totalSpent(netSpent)                   // Net paid to vendors after site returns
+            .inwardRecoveryValue(inwardRecoveryValue) // Credit for materials returned from site
             .totalCommitted(project.getTotalPoValue())
             .remaining(totalInvoiceValue.subtract(totalCost))  // invoiced minus total cost
             .amountToBeReceived(totalInvoiceValue)
@@ -765,26 +781,32 @@ public class ProjectDashboardService {
                     .build());
             }
 
-            // Inward (items returned from site to warehouse)
+            // Inward: SITE RETURNS only (poId IS NULL).
+            // Vendor/PO deliveries (poId set) are NOT site returns — exclude them.
+            List<com.istlgroup.istl_group_crm_backend.entity.InvTransactionEntity> siteReturnTxns =
+                invTransactionRepository.findByProjectIdAndTypeAndPoIdIsNull(projectId, "INWARD");
+
             BigDecimal totalReturnQty   = BigDecimal.ZERO;
             BigDecimal totalReturnValue = BigDecimal.ZERO;
-            for (com.istlgroup.istl_group_crm_backend.entity.InvTransactionEntity t : inwardTxns) {
+            for (com.istlgroup.istl_group_crm_backend.entity.InvTransactionEntity t : siteReturnTxns) {
                 if (t.getNotes() != null && t.getNotes().startsWith("VOIDED")) continue;
                 BigDecimal qty = t.getQty() != null ? t.getQty().abs() : BigDecimal.ZERO;
                 totalReturnQty = totalReturnQty.add(qty);
-                if (t.getInventoryItemId() != null) {
-                    BigDecimal uc = itemRepository.findById(t.getInventoryItemId())
-                        .map(i -> i.getUnitCost() != null ? i.getUnitCost() : BigDecimal.ZERO)
-                        .orElse(BigDecimal.ZERO);
-                    totalReturnValue = totalReturnValue.add(qty.multiply(uc));
-                }
+                BigDecimal uc = t.getUnitCost() != null && t.getUnitCost().compareTo(BigDecimal.ZERO) > 0
+                    ? t.getUnitCost()
+                    : (t.getInventoryItemId() != null
+                        ? itemRepository.findById(t.getInventoryItemId())
+                            .map(i -> i.getUnitCost() != null ? i.getUnitCost() : BigDecimal.ZERO)
+                            .orElse(BigDecimal.ZERO)
+                        : BigDecimal.ZERO);
+                totalReturnValue = totalReturnValue.add(qty.multiply(uc));
             }
 
             return WarehouseIssuanceData.builder()
                 .totalItemsIssued(outwardTxns.size())
                 .totalQtyIssued(totalQty)
                 .totalIssuanceValue(totalValue)
-                .totalItemsReturned(inwardTxns.size())
+                .totalItemsReturned(siteReturnTxns.size())
                 .totalReturnValue(totalReturnValue)
                 .warehouseBillCount((int) warehouseBillCount)
                 .issuanceLines(lines)
@@ -802,8 +824,9 @@ public class ProjectDashboardService {
     // ── Site Return (INWARD transactions for this project — items from site) ───
     private SiteReturnData buildSiteReturnData(String projectId) {
         try {
+            // Use poId IS NULL to get only genuine site returns, not vendor PO receipts
             List<com.istlgroup.istl_group_crm_backend.entity.InvTransactionEntity> inwardTxns =
-                invTransactionRepository.findByProjectIdAndType(projectId, "INWARD");
+                invTransactionRepository.findByProjectIdAndTypeAndPoIdIsNull(projectId, "INWARD");
 
             BigDecimal totalQty = BigDecimal.ZERO;
             List<SiteReturnData.SiteReturnLine> lines = new ArrayList<>();

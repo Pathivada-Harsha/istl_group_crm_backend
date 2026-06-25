@@ -105,6 +105,13 @@ public class ProjectDashboardDTO {
 	    private BigDecimal cashInHand;
 	    private BigDecimal cashDeficit;
 	    private Double burnRate;
+
+	    // Warehouse site returns
+	    // Value of materials returned from site to warehouse (INWARD txns with no PO link).
+	    // These were already billed when they left (OUTWARD auto-bill), so this is a credit
+	    // against totalSpent. totalSpent is already net of this; field exposed so the
+	    // frontend can show it as a credit line in the Amount Spent breakdown modal.
+	    private BigDecimal inwardRecoveryValue;
 	}
     
     @Data

@@ -18,6 +18,11 @@ public class LeadRequestWrapper {
     private String subGroupName;
     private String closedLostReason;
 
+    // ── Reason captured when a non-telecaller user (BD/Admin/etc.) marks a lead
+    //    "Not Interested" via the general update endpoint. Mirrors the reason
+    //    telecallers must give via /telecaller/lead/{id}/status. ───────────────
+    private String notInterestedReason;
+
     // ── Closed Won attribution ────────────────────────────────────────────────
     private Long   closedByUserId;
     private String closedByName;
