@@ -17,17 +17,19 @@ public interface OrderBookItemRepo extends JpaRepository<OrderBookItemEntity, Lo
 
     /**
      * Per-order-book capacity for the modal detail view.
-     * Returns rows: [projectId, orderBookNo, orderTitle, unit, SUM(quantity)]
+     * Returns rows: [projectId, orderBookNo, orderTitle, unit, SUM(quantity), customerName]
      * One row per order book per unit — so projects with multiple order books show each separately.
      */
     @Query(value =
-        "SELECT ob.project_id, ob.order_book_no, ob.order_title, i.unit, SUM(i.quantity) AS total_qty " +
+        "SELECT ob.project_id, ob.order_book_no, ob.order_title, i.unit, SUM(i.quantity) AS total_qty, " +
+        "       COALESCE(c.company_name, c.name, '') AS customer_name " +
         "FROM order_book_items i " +
         "JOIN order_book ob ON ob.id = i.order_book_id " +
+        "LEFT JOIN customers c ON c.id = ob.customer_id " +
         "WHERE ob.deleted_at IS NULL " +
         "  AND (:groupName IS NULL OR ob.group_name = :groupName) " +
         "  AND ob.sub_group_name = :subGroupName " +
-        "GROUP BY ob.project_id, ob.order_book_no, ob.order_title, i.unit " +
+        "GROUP BY ob.project_id, ob.order_book_no, ob.order_title, i.unit, c.company_name, c.name " +
         "ORDER BY ob.project_id, ob.order_book_no, i.unit",
         nativeQuery = true)
     List<Object[]> findOrderBookCapacityBySubGroup(@Param("groupName") String groupName,

@@ -131,6 +131,14 @@ public interface UsersRepo extends JpaRepository<UsersEntity, Long> {
     List<UsersEntity> findActiveUsersByRolesAndTeam(
         @Param("roles") List<String> roles, @Param("team") String team);
 
+    /**
+     * All active users in the same team, regardless of role.
+     * Used for followup assignment when the caller has no canAssignRoles configured
+     * but belongs to a team — they should be able to assign to any teammate.
+     */
+    @Query(value = "SELECT * FROM users WHERE is_active = 1 AND team = :team ORDER BY name", nativeQuery = true)
+    List<UsersEntity> findActiveUsersByTeam(@Param("team") String team);
+
     // ── Manager-based ─────────────────────────────────────────────────────────
 
     @Query(value = "SELECT * FROM users WHERE manager_id = :managerId ORDER BY name LIMIT :size OFFSET :offset", nativeQuery = true)

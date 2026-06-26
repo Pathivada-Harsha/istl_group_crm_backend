@@ -218,6 +218,8 @@ public class ProjectDashboardService {
                 pm.put("startDate",   p.getStartDate());
                 pm.put("endDate",     p.getEndDate());
                 pm.put("progressPercentage", p.getProgressPercentage() != null ? p.getProgressPercentage().doubleValue() : null);
+                pm.put("capacityValue", p.getCapacityValue() != null ? p.getCapacityValue().doubleValue() : null);
+                pm.put("capacityUnit",  p.getCapacityUnit());
                 return pm;
             }).collect(Collectors.toList());
 

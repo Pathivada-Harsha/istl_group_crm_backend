@@ -166,6 +166,85 @@ public class DropdownFilterService {
         return getLeadsUsers(null, null);
     }
 
+    /**
+     * GET /filters/followup-assignees
+     * ─────────────────────────────────────────────────────────────────────────
+     * Returns users the caller can assign a follow-up to.
+     * Separate from getLeadsUsers() so other dropdowns are unaffected.
+     *
+     * Decision tree:
+     *  1. No role info          → all active users (safe fallback)
+     *  2. SUPERADMIN / ADMIN    → all active users, caller first
+     *  3. Caller HAS a team     → all active users in the same team (any role)
+     *       fallback: if team has no active members → role-scoped list
+     *  4. Caller has NO team:
+     *       canAssignRoles non-empty → users matching those roles (org-wide)
+     *       canAssignRoles empty     → self only
+     *  Caller always pinned to position 0.
+     */
+    public List<LeadsUserWrapper> getFollowupAssignees(Long currentUserId, String currentUserRole) {
+
+        // ── 1. Fallback ───────────────────────────────────────────────────────
+        if (currentUserRole == null || currentUserRole.isBlank()) {
+            return usersRepo.findAllActiveUsers().stream()
+                .map(this::toWrapper).collect(Collectors.toList());
+        }
+
+        String roleUpper = currentUserRole.toUpperCase();
+
+        // ── 2. SUPERADMIN / ADMIN → everyone ─────────────────────────────────
+        if (roleHierarchyService.isTopLevelRole(roleUpper)) {
+            return usersRepo.findAllActiveUsers().stream()
+                .map(this::toWrapper)
+                .sorted(callerFirst(currentUserId))
+                .collect(Collectors.toList());
+        }
+
+        List<String> canAssign = roleHierarchyService.getCanAssignRoles(roleUpper);
+
+        Optional<UsersEntity> callerOpt = currentUserId != null
+            ? usersRepo.findById(currentUserId) : Optional.empty();
+        String callerTeam = callerOpt.map(UsersEntity::getTeam).orElse(null);
+
+        // ── 3. Caller has a team → all teammates (any role) ──────────────────
+        if (callerTeam != null && !callerTeam.isBlank()) {
+            List<UsersEntity> teammates = new ArrayList<>(
+                usersRepo.findActiveUsersByTeam(callerTeam));
+
+            if (!teammates.isEmpty()) {
+                if (currentUserId != null) {
+                    final Long cid = currentUserId;
+                    boolean present = teammates.stream().anyMatch(u -> u.getId().equals(cid));
+                    if (!present) callerOpt.ifPresent(teammates::add);
+                }
+                return teammates.stream()
+                    .map(this::toWrapper)
+                    .sorted(callerFirst(currentUserId))
+                    .collect(Collectors.toList());
+            }
+            // Team configured but no active members found yet → fall through
+        }
+
+        // ── 4. No team ────────────────────────────────────────────────────────
+        if (canAssign.isEmpty()) {
+            if (currentUserId == null) return List.of();
+            return usersRepo.findById(currentUserId)
+                .map(u -> List.of(toWrapper(u)))
+                .orElse(List.of());
+        }
+
+        List<UsersEntity> candidates = new ArrayList<>(usersRepo.findActiveUsersByRoles(canAssign));
+        if (currentUserId != null) {
+            final Long cid = currentUserId;
+            boolean present = candidates.stream().anyMatch(u -> u.getId().equals(cid));
+            if (!present) callerOpt.ifPresent(candidates::add);
+        }
+        return candidates.stream()
+            .map(this::toWrapper)
+            .sorted(callerFirst(currentUserId))
+            .collect(Collectors.toList());
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private LeadsUserWrapper toWrapper(UsersEntity u) {

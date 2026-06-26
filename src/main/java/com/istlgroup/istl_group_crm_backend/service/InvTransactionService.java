@@ -140,6 +140,29 @@ public class InvTransactionService {
         // ── Resolve ref (frontend sends either refNo or ref) ─────────────────
         String refNo = req.getRefNo() != null ? req.getRefNo() : req.getRef();
 
+        // ── Resolve group / subGroupName with warehouse as last-resort fallback ─
+        // Priority: (1) request field  (2) item field  (3) warehouse field
+        // This ensures the value is stored even when the server's warehouse
+        // records are missing group/subGroupName (common in fresh deployments).
+        String resolvedGroupName    = nb(req.getGroupName())    != null ? req.getGroupName()
+                                    : nb(item.getGroupName())   != null ? item.getGroupName()
+                                    : null;
+        String resolvedSubGroupName = nb(req.getSubGroupName()) != null ? req.getSubGroupName()
+                                    : nb(item.getSubGroupName()) != null ? item.getSubGroupName()
+                                    : null;
+
+        // If still null, fall back to the item's warehouse
+        if (resolvedGroupName == null || resolvedSubGroupName == null) {
+            Long whId = item.getWarehouseId();
+            if (whId != null) {
+                WarehouseEntity wh = warehouseRepository.findById(whId).orElse(null);
+                if (wh != null) {
+                    if (resolvedGroupName    == null) resolvedGroupName    = nb(wh.getGroupName());
+                    if (resolvedSubGroupName == null) resolvedSubGroupName = nb(wh.getSubGroupName());
+                }
+            }
+        }
+
         // ── Build entity ─────────────────────────────────────────────────────
         InvTransactionEntity entity = InvTransactionEntity.builder()
             .txnNo("PENDING")
@@ -151,8 +174,8 @@ public class InvTransactionService {
             .qty(delta)
             .warehouseId(item.getWarehouseId())
             .fromWarehouseId(req.getFromWarehouseId())
-            .groupName(nb(req.getGroupName()) != null ? req.getGroupName() : item.getGroupName())
-            .subGroupName(nb(req.getSubGroupName()) != null ? req.getSubGroupName() : item.getSubGroupName())
+            .groupName(resolvedGroupName)
+            .subGroupName(resolvedSubGroupName)
             .projectId(nb(req.getProjectId()))
             .refNo(nb(refNo))
             .notes(req.getNotes() != null ? req.getNotes() : req.getNote())
@@ -449,6 +472,11 @@ public class InvTransactionService {
             if (item == null) {
                 // Generate proper code: {whCode}-{year}-{paddedId}
                 String placeholder = "PENDING-" + System.nanoTime();
+                // Priority: req field → warehouse field — so that the form's
+                // group/subGroupName is honoured even if the warehouse record
+                // on the server lacks those fields.
+                String itemGroupName    = nb(req.getGroupName())    != null ? req.getGroupName()    : wh.getGroupName();
+                String itemSubGroupName = nb(req.getSubGroupName()) != null ? req.getSubGroupName() : wh.getSubGroupName();
                 item = InventoryItemEntity.builder()
                     .warehouseId(req.getWarehouseId())
                     .itemCode(placeholder)
@@ -458,8 +486,8 @@ public class InvTransactionService {
                     .minQty(BigDecimal.ZERO)
                     .maxQty(BigDecimal.ZERO)
                     .unitCost(unitCost)
-                    .groupName(wh.getGroupName())
-                    .subGroupName(wh.getSubGroupName())
+                    .groupName(itemGroupName)
+                    .subGroupName(itemSubGroupName)
                     .projectId(nb(req.getProjectId()))
                     .isActive(Boolean.TRUE)
                     .createdBy(userId)

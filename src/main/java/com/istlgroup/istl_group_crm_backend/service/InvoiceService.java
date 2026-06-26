@@ -13,11 +13,8 @@ import com.istlgroup.istl_group_crm_backend.repo.CustomersRepo;
 import com.istlgroup.istl_group_crm_backend.repo.ProjectRepository;
 import com.istlgroup.istl_group_crm_backend.repo.LoginRepo;
 import com.istlgroup.istl_group_crm_backend.entity.LoginEntity;
-import com.istlgroup.istl_group_crm_backend.repo.ProjectAccessRepository;
+//import com.istlgroup.istl_group_crm_backend.repo.ProjectAccessRepository;
 import com.istlgroup.istl_group_crm_backend.repo.RoleHierarchyRepo;
-import com.istlgroup.istl_group_crm_backend.service.ProjectAccessService;
-import com.istlgroup.istl_group_crm_backend.service.MailService;
-import com.istlgroup.istl_group_crm_backend.service.NotificationService;
 import com.istlgroup.istl_group_crm_backend.constants.NotificationConstants.Module;
 import com.istlgroup.istl_group_crm_backend.constants.NotificationConstants.Type;
 import com.istlgroup.istl_group_crm_backend.util.RoleNormalizer;
@@ -37,12 +34,10 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.Year;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 @Service
 @RequiredArgsConstructor
@@ -61,7 +56,7 @@ public class InvoiceService {
     private final ProjectAccessService projectAccessService;
     private final InvoiceAttachmentRepository attachmentRepository;
     private final LoginRepo loginRepo;
-    private final ProjectAccessRepository projectAccessRepository;
+//    private final ProjectAccessRepository projectAccessRepository;
     private final MailService mailService;
     private final RoleHierarchyRepo roleHierarchyRepo;
     private final NotificationService notificationService;
@@ -1093,7 +1088,7 @@ public class InvoiceService {
                 + "</table>"
                 + "<p style='color:#6b7280;font-size:13px;'>Please log in to the CRM and approve this invoice from the Invoices page.</p>"
                 + "<p style='margin:4px 0 0;'><a href='https://crm.sesolaenergy.com' style='color:#1e40af;font-weight:600;font-size:13px;'>crm.sesolaenergy.com</a></p>"
-                + "<p style='color:#9ca3af;font-size:11px;margin-top:20px;'>ISTL CRM — Automated Notification</p>"
+                + "<p style='color:#9ca3af;font-size:11px;margin-top:20px;'>SESOLA CRM — Automated Notification</p>"
                 + "</div>";
 
             for (String email : ACCOUNTS_NOTIFICATION_EMAILS) {
@@ -1140,7 +1135,7 @@ public class InvoiceService {
                 + "</table>"
                 + "<p style='color:#6b7280;font-size:13px;'>You can log in to the CRM and download the approved invoice file from the Invoices page.</p>"
                 + "<p style='margin:4px 0 0;'><a href='https://crm.sesolaenergy.com' style='color:#1e40af;font-weight:600;font-size:13px;'>crm.sesolaenergy.com</a></p>"
-                + "<p style='color:#9ca3af;font-size:11px;margin-top:20px;'>ISTL CRM — Automated Notification</p>"
+                + "<p style='color:#9ca3af;font-size:11px;margin-top:20px;'>SESOLA CRM — Automated Notification</p>"
                 + "</div>";
 
             mailService.sendEmail(creator.getEmail().trim(), subject, body);
@@ -1251,7 +1246,7 @@ public class InvoiceService {
                 + "<tr><td style='padding:8px;background:#f3f4f6;font-weight:600;'>Total Amount</td><td style='padding:8px;border-bottom:1px solid #e5e7eb;'>" + invoice.getTotalAmount() + "</td></tr>"
                 + "</table>"
                 + "<p style='color:#6b7280;font-size:13px;'>Please review the feedback, make the necessary corrections, and resubmit if required.</p>"
-                + "<p style='color:#9ca3af;font-size:11px;margin-top:20px;'>ISTL CRM — Automated Notification</p>"
+                + "<p style='color:#9ca3af;font-size:11px;margin-top:20px;'>SESOLA CRM — Automated Notification</p>"
                 + "</div>";
 
             mailService.sendEmail(creator.getEmail().trim(), subject, body);
@@ -1267,80 +1262,80 @@ public class InvoiceService {
      * Generate unique invoice number
      * Format: INV-YYYY-NNNN
      */
-    private synchronized String generateInvoiceNumber() {
-        int currentYear = Year.now().getValue();
-        String prefix = "INV-" + currentYear + "-";
-        
-        int maxAttempts = 20;
-        
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            try {
-                String lastInvoiceNo = invoiceRepository.findLastInvoiceNoByPrefix(prefix + "%");
-                
-                int nextNumber = 1;
-                
-                if (lastInvoiceNo != null && !lastInvoiceNo.isEmpty()) {
-                    log.info("Found last invoice: {}", lastInvoiceNo);
-                    
-                    String numericPart = lastInvoiceNo.replace(prefix, "");
-                    
-                    try {
-                        int lastNumber = Integer.parseInt(numericPart);
-                        nextNumber = lastNumber + 1;
-                        log.info("Last number was {}, next will be {}", lastNumber, nextNumber);
-                    } catch (NumberFormatException e) {
-                        log.error("Could not parse number from: {}. Starting from 1", lastInvoiceNo);
-                        nextNumber = 1;
-                    }
-                } else {
-                    log.info("No invoices found for year {}. Starting from 1", currentYear);
-                }
-                
-                String invoiceNo = prefix + String.format("%04d", nextNumber);
-                log.info("Attempting to use invoice number: {}", invoiceNo);
-                
-                Optional<InvoiceEntity> existing = invoiceRepository.findByInvoiceNoIncludingDeleted(invoiceNo);
-                
-                if (existing.isPresent()) {
-                    log.warn("Invoice {} already exists! Trying next number...", invoiceNo);
-                    
-                    nextNumber++;
-                    invoiceNo = prefix + String.format("%04d", nextNumber);
-                    
-                    existing = invoiceRepository.findByInvoiceNoIncludingDeleted(invoiceNo);
-                    
-                    if (existing.isEmpty()) {
-                        log.info("Using incremented invoice number: {}", invoiceNo);
-                        return invoiceNo;
-                    }
-                    
-                    Thread.sleep(50);
-                    continue;
-                }
-                
-                log.info("Invoice number {} is available and confirmed unique", invoiceNo);
-                return invoiceNo;
-                
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("Thread interrupted while generating invoice number");
-            } catch (Exception e) {
-                log.error("Error on attempt {} generating invoice number: {}", attempt + 1, e.getMessage());
-                
-                if (attempt >= maxAttempts - 1) {
-                    throw new RuntimeException("Failed to generate invoice number after " + maxAttempts + " attempts: " + e.getMessage());
-                }
-                
-                try {
-                    Thread.sleep(100);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        }
-        
-        throw new RuntimeException("Failed to generate unique invoice number after " + maxAttempts + " attempts");
-    }
+//    private synchronized String generateInvoiceNumber() {
+//        int currentYear = Year.now().getValue();
+//        String prefix = "INV-" + currentYear + "-";
+//        
+//        int maxAttempts = 20;
+//        
+//        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+//            try {
+//                String lastInvoiceNo = invoiceRepository.findLastInvoiceNoByPrefix(prefix + "%");
+//                
+//                int nextNumber = 1;
+//                
+//                if (lastInvoiceNo != null && !lastInvoiceNo.isEmpty()) {
+//                    log.info("Found last invoice: {}", lastInvoiceNo);
+//                    
+//                    String numericPart = lastInvoiceNo.replace(prefix, "");
+//                    
+//                    try {
+//                        int lastNumber = Integer.parseInt(numericPart);
+//                        nextNumber = lastNumber + 1;
+//                        log.info("Last number was {}, next will be {}", lastNumber, nextNumber);
+//                    } catch (NumberFormatException e) {
+//                        log.error("Could not parse number from: {}. Starting from 1", lastInvoiceNo);
+//                        nextNumber = 1;
+//                    }
+//                } else {
+//                    log.info("No invoices found for year {}. Starting from 1", currentYear);
+//                }
+//                
+//                String invoiceNo = prefix + String.format("%04d", nextNumber);
+//                log.info("Attempting to use invoice number: {}", invoiceNo);
+//                
+//                Optional<InvoiceEntity> existing = invoiceRepository.findByInvoiceNoIncludingDeleted(invoiceNo);
+//                
+//                if (existing.isPresent()) {
+//                    log.warn("Invoice {} already exists! Trying next number...", invoiceNo);
+//                    
+//                    nextNumber++;
+//                    invoiceNo = prefix + String.format("%04d", nextNumber);
+//                    
+//                    existing = invoiceRepository.findByInvoiceNoIncludingDeleted(invoiceNo);
+//                    
+//                    if (existing.isEmpty()) {
+//                        log.info("Using incremented invoice number: {}", invoiceNo);
+//                        return invoiceNo;
+//                    }
+//                    
+//                    Thread.sleep(50);
+//                    continue;
+//                }
+//                
+//                log.info("Invoice number {} is available and confirmed unique", invoiceNo);
+//                return invoiceNo;
+//                
+//            } catch (InterruptedException e) {
+//                Thread.currentThread().interrupt();
+//                throw new RuntimeException("Thread interrupted while generating invoice number");
+//            } catch (Exception e) {
+//                log.error("Error on attempt {} generating invoice number: {}", attempt + 1, e.getMessage());
+//                
+//                if (attempt >= maxAttempts - 1) {
+//                    throw new RuntimeException("Failed to generate invoice number after " + maxAttempts + " attempts: " + e.getMessage());
+//                }
+//                
+//                try {
+//                    Thread.sleep(100);
+//                } catch (InterruptedException ie) {
+//                    Thread.currentThread().interrupt();
+//                }
+//            }
+//        }
+//        
+//        throw new RuntimeException("Failed to generate unique invoice number after " + maxAttempts + " attempts");
+//    }
     
     private BigDecimal calculateTotalAmount(List<InvoiceItemEntity> items) {
         BigDecimal total = BigDecimal.ZERO;

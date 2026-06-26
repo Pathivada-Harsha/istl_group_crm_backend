@@ -109,7 +109,7 @@ public class FollowUpReminderScheduler {
     // ─────────────────────────────────────────────────────────────────────────
 
     private String buildEmailSubject(int count) {
-        return "🔔 Reminder: You have " + count + " pending follow-up" + (count > 1 ? "s" : "") + " – ISTL CRM";
+        return "🔔 Reminder: You have " + count + " pending follow-up" + (count > 1 ? "s" : "") + " – SESOLA CRM";
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -131,7 +131,7 @@ public class FollowUpReminderScheduler {
 
           // Header
           .append("<tr><td style='background-color:#1a3c6e;padding:24px 32px;text-align:center;'>")
-          .append("<h1 style='margin:0;color:#ffffff;font-size:22px;letter-spacing:0.5px;'>ISTL CRM</h1>")
+          .append("<h1 style='margin:0;color:#ffffff;font-size:22px;letter-spacing:0.5px;'>SESOLA CRM</h1>")
           .append("<p style='margin:6px 0 0;color:#a8c4e8;font-size:13px;'>Daily Follow-up Reminder</p>")
           .append("</td></tr>")
 
@@ -219,14 +219,14 @@ public class FollowUpReminderScheduler {
           // Footer note
           .append("<tr><td style='padding:20px 32px 28px;'>")
           .append("<p style='margin:0;font-size:13px;color:#777777;line-height:1.6;'>")
-          .append("Please log in to <a href='https://crm.sesolaenergy.com/' style='color:#1a3c6e;font-weight:bold;text-decoration:none;'>ISTL CRM</a> to update or complete your follow-ups.")
+          .append("Please log in to <a href='https://crm.sesolaenergy.com/' style='color:#1a3c6e;font-weight:bold;text-decoration:none;'>SESOLA CRM</a> to update or complete your follow-ups.")
           .append("</p></td></tr>")
 
           // Footer
           .append("<tr><td style='background-color:#f0f4f9;padding:16px 32px;text-align:center;")
           .append("border-top:1px solid #e0e7ef;'>")
           .append("<p style='margin:0;font-size:11px;color:#999999;'>")
-          .append("This is an automated reminder from ISTL CRM. Please do not reply to this email.")
+          .append("This is an automated reminder from SESOLA CRM. Please do not reply to this email.")
           .append("</p></td></tr>")
 
           .append("</table>")

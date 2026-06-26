@@ -291,7 +291,7 @@ public class ProjectDashboardController {
 
     /**
      * Builds per-order-book modal entries from the raw query rows.
-     * Rows: [projectId, orderBookNo, orderTitle, unit, SUM(quantity)]
+     * Rows: [projectId, orderBookNo, orderTitle, unit, SUM(quantity), customerName]
      * Groups multi-unit rows for the same order book into one entry with unitBreakdown.
      */
     private List<Map<String, Object>> buildOrderBookEntries(
@@ -303,11 +303,12 @@ public class ProjectDashboardController {
         Map<String, Map<String, Object>> obMap = new LinkedHashMap<>();
 
         for (Object[] r : rows) {
-            String pid    = r[0] != null ? r[0].toString() : "";
-            String obNo   = r[1] != null ? r[1].toString() : "";
-            String title  = r[2] != null ? r[2].toString() : "";
-            String unit   = r[3] != null ? r[3].toString() : defaultUnit;
-            double qty    = r[4] != null ? ((Number) r[4]).doubleValue() : 0;
+            String pid          = r[0] != null ? r[0].toString() : "";
+            String obNo         = r[1] != null ? r[1].toString() : "";
+            String title        = r[2] != null ? r[2].toString() : "";
+            String unit         = r[3] != null ? r[3].toString() : defaultUnit;
+            double qty          = r[4] != null ? ((Number) r[4]).doubleValue() : 0;
+            String customerName = r.length > 5 && r[5] != null ? r[5].toString() : "";
 
             String key = pid + "||" + obNo;
             obMap.computeIfAbsent(key, k -> {
@@ -315,6 +316,7 @@ public class ProjectDashboardController {
                 m.put("projectId",     pid);
                 m.put("orderBookNo",   obNo);
                 m.put("orderTitle",    title);
+                m.put("customerName",  customerName);
                 m.put("quantity",      0.0);
                 m.put("unit",          unit);
                 m.put("unitBreakdown", new ArrayList<Map<String, Object>>());

@@ -445,27 +445,27 @@ public class LoginService {
 	 * Returns the full set of page permissions granted to SUPERADMIN and ADMIN.
 	 * Centralised here so the frontend can trust the server response entirely.
 	 */
-	private Map<String, List<String>> buildSuperAdminPermissions() {
-	    Map<String, List<String>> perms = new LinkedHashMap<>();
-	    perms.put("LEADS",                   Arrays.asList("VIEW","CREATE","EDIT","DELETE","ASSIGN","APPROVE","DOWNLOAD"));
-	    perms.put("CUSTOMERS",               Arrays.asList("VIEW","CREATE","EDIT","DELETE"));
-	    perms.put("VENDORS",                 Arrays.asList("VIEW","CREATE","EDIT","DELETE"));
-	    perms.put("PROPOSALS",               Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE","DOWNLOAD"));
-	    perms.put("PURCHASE_ORDERS",         Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE"));
-	    perms.put("ORDER_BOOK",              Arrays.asList("VIEW","CREATE","EDIT","DELETE","UPLOAD"));
-	    perms.put("PROCUREMENT_QUOTATIONS",  Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE"));
-	    perms.put("SALES_QUOTATIONS",        Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE"));
-	    perms.put("INVOICES",                Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE","SEND","DOWNLOAD"));
-	    perms.put("BILLS",                   Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE","DOWNLOAD"));
-	    perms.put("PAYMENTS",               Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE"));
-	    perms.put("REPORTS",                Arrays.asList("VIEW"));
-	    perms.put("SETTINGS",               Arrays.asList("VIEW","EDIT"));
-	    perms.put("USERS",                  Arrays.asList("VIEW","CREATE","EDIT","DELETE"));
-	    perms.put("ROLES",                  Arrays.asList("VIEW","CREATE","EDIT","DELETE"));
-	    perms.put("FOLLOWUPS",              Arrays.asList("VIEW","CREATE","EDIT","DELETE"));
-	    perms.put("ATTACHMENTS",            Arrays.asList("VIEW","UPLOAD","DELETE"));
-	    return perms;
-	}
+//	private Map<String, List<String>> buildSuperAdminPermissions() {
+//	    Map<String, List<String>> perms = new LinkedHashMap<>();
+//	    perms.put("LEADS",                   Arrays.asList("VIEW","CREATE","EDIT","DELETE","ASSIGN","APPROVE","DOWNLOAD"));
+//	    perms.put("CUSTOMERS",               Arrays.asList("VIEW","CREATE","EDIT","DELETE"));
+//	    perms.put("VENDORS",                 Arrays.asList("VIEW","CREATE","EDIT","DELETE"));
+//	    perms.put("PROPOSALS",               Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE","DOWNLOAD"));
+//	    perms.put("PURCHASE_ORDERS",         Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE"));
+//	    perms.put("ORDER_BOOK",              Arrays.asList("VIEW","CREATE","EDIT","DELETE","UPLOAD"));
+//	    perms.put("PROCUREMENT_QUOTATIONS",  Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE"));
+//	    perms.put("SALES_QUOTATIONS",        Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE"));
+//	    perms.put("INVOICES",                Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE","SEND","DOWNLOAD"));
+//	    perms.put("BILLS",                   Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE","DOWNLOAD"));
+//	    perms.put("PAYMENTS",               Arrays.asList("VIEW","CREATE","EDIT","DELETE","APPROVE"));
+//	    perms.put("REPORTS",                Arrays.asList("VIEW"));
+//	    perms.put("SETTINGS",               Arrays.asList("VIEW","EDIT"));
+//	    perms.put("USERS",                  Arrays.asList("VIEW","CREATE","EDIT","DELETE"));
+//	    perms.put("ROLES",                  Arrays.asList("VIEW","CREATE","EDIT","DELETE"));
+//	    perms.put("FOLLOWUPS",              Arrays.asList("VIEW","CREATE","EDIT","DELETE"));
+//	    perms.put("ATTACHMENTS",            Arrays.asList("VIEW","UPLOAD","DELETE"));
+//	    return perms;
+//	}
 
 	// Normalizes DB permission module names to match the keys expected by the frontend.
 	// e.g. "orderbook" in DB -> "ORDER_BOOK" used by pagePermissions?.ORDER_BOOK
@@ -608,7 +608,7 @@ public class LoginService {
 	        String maskedEmail = maskEmail(email);
 	 
 	        // Build and send OTP email
-	        String subject = "🔐 Your ISTL CRM Password Reset Code: " + otp;
+	        String subject = "🔐 Your SESOLA CRM Password Reset Code: " + otp;
 	        String body    = buildOtpEmailBody(user.getName(), otp);
 	 
 	        try {
@@ -691,7 +691,7 @@ public class LoginService {
 	 
 	            // Header
 	            + "<tr><td style='background:#1a3c6e;padding:22px 32px;text-align:center;'>"
-	            + "<h1 style='margin:0;color:#fff;font-size:20px;'>ISTL CRM</h1>"
+	            + "<h1 style='margin:0;color:#fff;font-size:20px;'>SESOLA CRM</h1>"
 	            + "<p style='margin:5px 0 0;color:#a8c4e8;font-size:12px;'>Password Reset Request</p>"
 	            + "</td></tr>"
 	 
@@ -723,7 +723,7 @@ public class LoginService {
 	            // Footer
 	            + "<tr><td style='background:#f0f4f9;padding:14px 32px;text-align:center;"
 	            + "border-top:1px solid #e0e7ef;'>"
-	            + "<p style='margin:0;font-size:11px;color:#aaa;'>This is an automated message from ISTL CRM.</p>"
+	            + "<p style='margin:0;font-size:11px;color:#aaa;'>This is an automated message from SESOLA CRM.</p>"
 	            + "</td></tr>"
 	 
 	            + "</table></td></tr></table></body></html>";
