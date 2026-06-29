@@ -129,8 +129,8 @@ public class DropdownFilterController {
      * GET /filters/followup-assignees
      * ─────────────────────────────────────────────────────────────────────────
      * Returns users the caller can assign a follow-up to.
-     * Team-first scoping: if the caller belongs to a team, all active teammates
-     * are returned (any role). SUPERADMIN / ADMIN get everyone.
+     * Team-first: if the caller belongs to a team, all active teammates are
+     * returned (any role). SUPERADMIN / ADMIN get everyone.
      * Deliberately separate from /leads-users so other dropdowns are unaffected.
      *
      * Required headers: User-Id, User-Role

@@ -56,6 +56,14 @@ public class OrderBookPhaseEntity {
     @Column(name = "progress_percent", precision = 5, scale = 2)
     private BigDecimal progressPercent = BigDecimal.ZERO;
 
+    /**
+     * Sub-items / work-packages under this phase, stored as a JSON array.
+     * Each element: { "name": "...", "status": "Not Started", "progressPercent": 0, "description": "" }
+     * Serialised by the service layer; never mapped by JPA so no extra table is needed.
+     */
+    @Column(name = "sub_items", columnDefinition = "JSON")
+    private String subItems;
+
     @Column(name = "responsible_user_id")
     private Long responsibleUserId;
 

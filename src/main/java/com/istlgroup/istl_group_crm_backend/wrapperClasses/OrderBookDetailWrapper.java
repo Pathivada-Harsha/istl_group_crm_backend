@@ -43,6 +43,8 @@ public class OrderBookDetailWrapper {
         private String status;
         private BigDecimal progressPercent;
         private Long responsibleUserId;
+        /** Sub-items / work-packages. Serialised to JSON before persist. */
+        private List<java.util.Map<String, Object>> subItems;
     }
 
     // ── Commercial (budget lines) ────────────────────────────────────────────

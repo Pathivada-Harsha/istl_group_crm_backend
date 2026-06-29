@@ -184,7 +184,6 @@ public class DropdownFilterService {
      */
     public List<LeadsUserWrapper> getFollowupAssignees(Long currentUserId, String currentUserRole) {
 
-        // ── 1. Fallback ───────────────────────────────────────────────────────
         if (currentUserRole == null || currentUserRole.isBlank()) {
             return usersRepo.findAllActiveUsers().stream()
                 .map(this::toWrapper).collect(Collectors.toList());
@@ -192,7 +191,6 @@ public class DropdownFilterService {
 
         String roleUpper = currentUserRole.toUpperCase();
 
-        // ── 2. SUPERADMIN / ADMIN → everyone ─────────────────────────────────
         if (roleHierarchyService.isTopLevelRole(roleUpper)) {
             return usersRepo.findAllActiveUsers().stream()
                 .map(this::toWrapper)
@@ -206,11 +204,10 @@ public class DropdownFilterService {
             ? usersRepo.findById(currentUserId) : Optional.empty();
         String callerTeam = callerOpt.map(UsersEntity::getTeam).orElse(null);
 
-        // ── 3. Caller has a team → all teammates (any role) ──────────────────
+        // Caller has a team → show all teammates (any role)
         if (callerTeam != null && !callerTeam.isBlank()) {
             List<UsersEntity> teammates = new ArrayList<>(
                 usersRepo.findActiveUsersByTeam(callerTeam));
-
             if (!teammates.isEmpty()) {
                 if (currentUserId != null) {
                     final Long cid = currentUserId;
@@ -222,10 +219,9 @@ public class DropdownFilterService {
                     .sorted(callerFirst(currentUserId))
                     .collect(Collectors.toList());
             }
-            // Team configured but no active members found yet → fall through
         }
 
-        // ── 4. No team ────────────────────────────────────────────────────────
+        // No team — fall back to role-scoped or self-only
         if (canAssign.isEmpty()) {
             if (currentUserId == null) return List.of();
             return usersRepo.findById(currentUserId)

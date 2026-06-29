@@ -1,15 +1,18 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.entity.OrderBookPhaseEntity;
 import com.istlgroup.istl_group_crm_backend.service.OrderBookDetailService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.OrderBookDetailWrapper.BudgetRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.OrderBookDetailWrapper.ScopeRequest;
@@ -42,7 +45,7 @@ public class OrderBookDetailController {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("scope",  detailService.getScope(id));
-            data.put("phases", detailService.getPhases(id));
+            data.put("phases", phasesToMaps(detailService.getPhases(id)));
             return ok(data);
         } catch (CustomException e) {
             return err(e.getMessage(), HttpStatus.NOT_FOUND);
@@ -61,7 +64,7 @@ public class OrderBookDetailController {
             detailService.saveScope(id, request, userId);
             Map<String, Object> data = new HashMap<>();
             data.put("scope",  detailService.getScope(id));
-            data.put("phases", detailService.getPhases(id));
+            data.put("phases", phasesToMaps(detailService.getPhases(id)));
             Map<String, Object> resp = new HashMap<>();
             resp.put("success", true);
             resp.put("message", "Technical scope saved successfully");
@@ -272,6 +275,40 @@ public class OrderBookDetailController {
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
+    /**
+     * Converts phase entities to plain Maps so that the `subItems` JSON string
+     * is returned as a proper array in the API response, not as an escaped string.
+     */
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> phasesToMaps(List<OrderBookPhaseEntity> phases) {
+        ObjectMapper mapper = new ObjectMapper();
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (OrderBookPhaseEntity p : phases) {
+            Map<String, Object> m = new HashMap<>();
+            m.put("id",                p.getId());
+            m.put("seqNo",             p.getSeqNo());
+            m.put("phaseName",         p.getPhaseName());
+            m.put("phaseDescription",  p.getPhaseDescription());
+            m.put("startWeek",         p.getStartWeek());
+            m.put("endWeek",           p.getEndWeek());
+            m.put("status",            p.getStatus());
+            m.put("progressPercent",   p.getProgressPercent());
+            m.put("responsibleUserId", p.getResponsibleUserId());
+            m.put("plannedStartDate",  p.getPlannedStartDate());
+            m.put("plannedEndDate",    p.getPlannedEndDate());
+            m.put("actualStartDate",   p.getActualStartDate());
+            m.put("actualEndDate",     p.getActualEndDate());
+            // Parse subItems JSON string → List so the API returns a real array
+            List<Object> subItems = null;
+            if (p.getSubItems() != null && !p.getSubItems().isBlank()) {
+                try { subItems = mapper.readValue(p.getSubItems(), List.class); } catch (Exception ignored) {}
+            }
+            m.put("subItems", subItems != null ? subItems : List.of());
+            result.add(m);
+        }
+        return result;
+    }
+
     private ResponseEntity<Map<String, Object>> ok(Map<String, Object> data) {
         Map<String, Object> resp = new HashMap<>();
         resp.put("success", true);

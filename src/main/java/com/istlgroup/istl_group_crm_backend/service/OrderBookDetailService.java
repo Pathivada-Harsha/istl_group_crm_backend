@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -139,6 +140,16 @@ public class OrderBookDetailService {
                 ph.setStatus(p.getStatus() != null ? p.getStatus() : "Not Started");
                 ph.setProgressPercent(p.getProgressPercent() != null ? p.getProgressPercent() : BigDecimal.ZERO);
                 ph.setResponsibleUserId(p.getResponsibleUserId());
+                // Serialise sub-items list → JSON string for storage
+                if (p.getSubItems() != null && !p.getSubItems().isEmpty()) {
+                    try {
+                        ph.setSubItems(new ObjectMapper().writeValueAsString(p.getSubItems()));
+                    } catch (Exception ex) {
+                        ph.setSubItems(null);
+                    }
+                } else {
+                    ph.setSubItems(null);
+                }
                 phaseRepo.save(ph);
                 seq++;
             }

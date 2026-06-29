@@ -39,14 +39,31 @@ public interface LeadAnalyticsRepo extends JpaRepository<LeadsEntity, Long> {
     // ── Per-person lead breakdown for the Team Lead Performance page.
     //    Each metric counts a DIFFERENT person-field so management can see who
     //    created vs owns vs handles vs closed each lead — these are distinct.
-    //    Scoped to a set of user ids (the viewer's allowed team). created/won use
-    //    created_by; assigned uses assigned_to; owned matches lead_owner by name.
+    //    Scoped to a set of user ids (the viewer's allowed team).
+    //
+    //    HANDLED: assigned_to = u.id  OR  closed_by_user_id = u.id
+    //      → if you were assigned OR you personally closed it, you handled it.
+    //        Managers/seniors who close a junior's lead get credited too.
+    //        Two users can both be credited for handling the same lead.
+    //
+    //    WON credit uses priority — single credit per lead, no double-count:
+    //      • closed_by_user_id IS SET  → the closer gets the win
+    //      • closed_by_user_id IS NULL → the current assignee gets the win
+    //
+    //    Conv% = Won / Handled — reflects how many of the leads a person was
+    //    involved with they actually converted.
     @Query(value =
         "SELECT u.id, u.name, u.role, " +
         "  (SELECT COUNT(*) FROM leads lc WHERE lc.deleted_at IS NULL AND lc.created_by = u.id) AS created, " +
-        "  (SELECT COUNT(*) FROM leads la WHERE la.deleted_at IS NULL AND la.assigned_to = u.id) AS assigned, " +
+        // handled = assigned to this user OR closed by this user (DISTINCT to avoid double-count within this metric)
+        "  (SELECT COUNT(DISTINCT la.id) FROM leads la WHERE la.deleted_at IS NULL " +
+        "   AND (la.assigned_to = u.id OR la.closed_by_user_id = u.id)) AS assigned, " +
         "  (SELECT COUNT(*) FROM leads lo WHERE lo.deleted_at IS NULL AND TRIM(lo.lead_owner) = TRIM(u.name)) AS owned, " +
-        "  (SELECT COUNT(*) FROM leads lw WHERE lw.deleted_at IS NULL AND lw.assigned_to = u.id AND lw.status='Closed Won') AS won " +
+        // won = Closed Won, closer gets the win; assignee gets it only when no closer is recorded
+        "  (SELECT COUNT(DISTINCT lw.id) FROM leads lw WHERE lw.deleted_at IS NULL " +
+        "   AND lw.status = 'Closed Won' " +
+        "   AND (lw.closed_by_user_id = u.id " +
+        "        OR (lw.closed_by_user_id IS NULL AND lw.assigned_to = u.id))) AS won " +
         "FROM users u " +
         "WHERE u.is_active = 1 AND u.id IN (:userIds) " +
         "ORDER BY created DESC, assigned DESC", nativeQuery = true)
