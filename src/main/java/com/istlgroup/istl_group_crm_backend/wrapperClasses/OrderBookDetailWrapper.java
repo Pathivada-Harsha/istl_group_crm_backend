@@ -25,7 +25,23 @@ public class OrderBookDetailWrapper {
         private LocalDate plannedEndDate;
         private Integer totalPlannedWeeks;
         private String planUnit;
+        private String trackingMode; // SIMPLE | DETAILED
         private List<PhaseRequest> phases;
+    }
+
+    // ── Detailed per-period progress (DETAILED tracking mode) ────────────────
+    @Data
+    public static class ProgressRequest {
+        private List<ProgressCell> cells;
+    }
+
+    @Data
+    public static class ProgressCell {
+        private Long phaseId;
+        private String subItemKey;  // null = the phase itself is the leaf
+        private Integer periodNo;
+        private BigDecimal plannedPct;
+        private BigDecimal actualPct;
     }
 
     @Data
@@ -42,6 +58,8 @@ public class OrderBookDetailWrapper {
         private LocalDate actualEndDate;
         private String status;
         private BigDecimal progressPercent;
+        private BigDecimal weightPct;   // absolute project weight %; parent = sum of sub-item weights
+        private BigDecimal plannedBudget; // planned procure budget; parent = sum of sub-item budgets
         private Long responsibleUserId;
         /** Sub-items / work-packages. Serialised to JSON before persist. */
         private List<java.util.Map<String, Object>> subItems;

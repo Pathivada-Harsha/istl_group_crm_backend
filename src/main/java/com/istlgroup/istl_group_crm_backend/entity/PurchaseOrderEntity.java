@@ -54,6 +54,11 @@ public class PurchaseOrderEntity {
     @Column(name = "po_file_content_type", length = 100)
     private String poFileContentType;
 
+    // ── Last-generated PO document form data (JSON), for prefill on re-generate ──
+    @Lob
+    @Column(name = "po_doc_payload", columnDefinition = "LONGTEXT")
+    private String poDocPayload;
+
     @Column(name = "vendor_name", nullable = false)
     private String vendorName;
     @Column(name = "vendor_id")  

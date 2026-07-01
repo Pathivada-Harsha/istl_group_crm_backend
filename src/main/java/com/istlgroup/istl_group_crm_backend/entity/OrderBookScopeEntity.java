@@ -58,6 +58,9 @@ public class OrderBookScopeEntity {
     @Column(name = "plan_unit")
     private String planUnit; // 'WEEK' or 'MONTH' — granularity of the schedule grid
 
+    @Column(name = "tracking_mode")
+    private String trackingMode = "SIMPLE"; // 'SIMPLE' (one progress %) or 'DETAILED' (per-period grid)
+
     @Column(name = "created_by")
     private Long createdBy;
 

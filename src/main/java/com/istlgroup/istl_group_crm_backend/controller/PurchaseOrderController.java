@@ -43,6 +43,7 @@ import java.util.stream.Collectors;
 public class PurchaseOrderController {
     
     private final PurchaseOrderService purchaseOrderService;
+    private final com.istlgroup.istl_group_crm_backend.service.PurchaseOrderPdfService purchaseOrderPdfService;
     private final ProjectAccessService projectAccessService;
     private final PurchaseOrderItemRepository purchaseOrderItemRepository;
     private final OrderBookItemCatalogueService catalogueService;
@@ -889,6 +890,57 @@ public ResponseEntity<?> updatePurchaseOrder(
     // =========================================================================
     // PO SOFT-COPY FILE UPLOAD / VIEW / DOWNLOAD  (max 10 MB)
     // =========================================================================
+
+    /** List available stamp file names (default + uploaded) for the picker. */
+    @GetMapping("/stamps")
+    public ResponseEntity<?> listStamps() {
+        try {
+            return ResponseEntity.ok(Map.of("stamps", purchaseOrderPdfService.listStamps()));
+        } catch (Exception e) {
+            log.error("Error listing stamps", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Could not list stamps"));
+        }
+    }
+
+    /** Upload a new stamp image with a chosen name; returns the stored file name. */
+    @PostMapping("/stamps/upload")
+    public ResponseEntity<?> uploadStamp(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam("name") String name
+    ) {
+        try {
+            if (file == null || file.isEmpty()) return ResponseEntity.badRequest().body(Map.of("error", "File is empty"));
+            String ct = file.getContentType();
+            if (ct == null || !ct.startsWith("image/")) return ResponseEntity.badRequest().body(Map.of("error", "Only image files are allowed"));
+            if (file.getSize() > 3L * 1024 * 1024) return ResponseEntity.badRequest().body(Map.of("error", "Stamp must be under 3 MB"));
+            String stored = purchaseOrderPdfService.saveStamp(name, file.getBytes(), file.getOriginalFilename());
+            return ResponseEntity.ok(Map.of("message", "Stamp uploaded", "stampFileName", stored));
+        } catch (Exception e) {
+            log.error("Error uploading stamp", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(Map.of("error", "Stamp upload failed"));
+        }
+    }
+
+    /** Generate the SESOLA PO PDF from supplied data and store it as the PO file. */
+    @PostMapping("/{id}/generate-document")
+    public ResponseEntity<?> generatePODocument(
+            @PathVariable Long id,
+            @RequestBody com.istlgroup.istl_group_crm_backend.wrapperClasses.PoDocumentRequest req
+    ) {
+        try {
+            String filePath = purchaseOrderService.generateAndStorePoDocument(id, req);
+            return ResponseEntity.ok(Map.of(
+                    "message", "PO document generated successfully",
+                    "filePath", filePath));
+        } catch (RuntimeException e) {
+            log.error("Error generating PO document for {}: {}", id, e.getMessage());
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            log.error("Error generating PO document for {}", id, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "PO generation failed"));
+        }
+    }
 
     @PostMapping("/{id}/upload-file")
     public ResponseEntity<?> uploadPOFile(

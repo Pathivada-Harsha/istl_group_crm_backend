@@ -46,6 +46,7 @@ public class OrderBookDetailController {
             Map<String, Object> data = new HashMap<>();
             data.put("scope",  detailService.getScope(id));
             data.put("phases", phasesToMaps(detailService.getPhases(id)));
+            data.put("progressPeriods", detailService.getProgressPeriods(id));
             return ok(data);
         } catch (CustomException e) {
             return err(e.getMessage(), HttpStatus.NOT_FOUND);
@@ -74,6 +75,62 @@ public class OrderBookDetailController {
             return err(e.getMessage(), HttpStatus.BAD_REQUEST);
         } catch (Exception e) {
             return err("Failed to save technical scope: " + e.getMessage(),
+                       HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * Budget-only update for scope items. Updates ONLY plannedBudget on existing phases
+     * and sub-items — never touches scope metadata or other phase fields. Used by the
+     * Commercial tab's Budget Allocation block so it can't clobber the Technical Scope.
+     */
+    @PutMapping("/{id}/scope/budgets")
+    public ResponseEntity<Map<String, Object>> saveScopeBudgets(
+            @PathVariable Long id,
+            @RequestBody Map<String, Object> request,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole) {
+        try {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> items = (List<Map<String, Object>>) request.get("items");
+            detailService.saveScopeBudgets(id, items);
+            Map<String, Object> data = new HashMap<>();
+            data.put("phases", phasesToMaps(detailService.getPhases(id)));
+            Map<String, Object> resp = new HashMap<>();
+            resp.put("success", true);
+            resp.put("message", "Budget allocation saved");
+            resp.put("data", data);
+            return ResponseEntity.ok(resp);
+        } catch (CustomException e) {
+            return err(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return err("Failed to save budget allocation: " + e.getMessage(),
+                       HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /** Replace-all save of per-period planned/actual progress (DETAILED tracking). */
+    @PutMapping("/{id}/scope/progress")
+    public ResponseEntity<Map<String, Object>> saveProgress(
+            @PathVariable Long id,
+            @RequestBody Map<String, Object> request,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole) {
+        try {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> cells = (List<Map<String, Object>>) request.get("cells");
+            detailService.saveProgressPeriods(id, cells);
+            Map<String, Object> data = new HashMap<>();
+            data.put("progressPeriods", detailService.getProgressPeriods(id));
+            Map<String, Object> resp = new HashMap<>();
+            resp.put("success", true);
+            resp.put("message", "Progress saved");
+            resp.put("data", data);
+            return ResponseEntity.ok(resp);
+        } catch (CustomException e) {
+            return err(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return err("Failed to save progress: " + e.getMessage(),
                        HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
@@ -293,6 +350,8 @@ public class OrderBookDetailController {
             m.put("endWeek",           p.getEndWeek());
             m.put("status",            p.getStatus());
             m.put("progressPercent",   p.getProgressPercent());
+            m.put("weightPct",         p.getWeightPct());
+            m.put("plannedBudget",     p.getPlannedBudget());
             m.put("responsibleUserId", p.getResponsibleUserId());
             m.put("plannedStartDate",  p.getPlannedStartDate());
             m.put("plannedEndDate",    p.getPlannedEndDate());

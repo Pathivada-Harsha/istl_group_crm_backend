@@ -18,8 +18,10 @@ import com.istlgroup.istl_group_crm_backend.entity.OrderBookBudgetEntity;
 import com.istlgroup.istl_group_crm_backend.entity.OrderBookEntity;
 import com.istlgroup.istl_group_crm_backend.entity.OrderBookPhaseEntity;
 import com.istlgroup.istl_group_crm_backend.entity.OrderBookScopeEntity;
+import com.istlgroup.istl_group_crm_backend.entity.OrderBookProgressPeriodEntity;
 import com.istlgroup.istl_group_crm_backend.repo.OrderBookBudgetRepo;
 import com.istlgroup.istl_group_crm_backend.repo.OrderBookPhaseRepo;
+import com.istlgroup.istl_group_crm_backend.repo.OrderBookProgressPeriodRepo;
 import com.istlgroup.istl_group_crm_backend.repo.OrderBookRepo;
 import com.istlgroup.istl_group_crm_backend.repo.OrderBookScopeRepo;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.OrderBookDetailWrapper.BudgetLineRequest;
@@ -49,6 +51,7 @@ public class OrderBookDetailService {
     @Autowired private OrderBookBudgetRepo  budgetRepo;
     @Autowired private OrderBookBillingRepo billingRepo;
     @Autowired private OrderBookCostRepo    costRepo;
+    @Autowired private OrderBookProgressPeriodRepo progressRepo;
     @Autowired private OrderBookBomRepo     bomRepo;
 
     @PersistenceContext
@@ -118,6 +121,7 @@ public class OrderBookDetailService {
         scope.setPlannedEndDate(req.getPlannedEndDate());
         scope.setTotalPlannedWeeks(req.getTotalPlannedWeeks());
         scope.setPlanUnit(req.getPlanUnit() != null ? req.getPlanUnit() : "WEEK");
+        scope.setTrackingMode(req.getTrackingMode() != null ? req.getTrackingMode() : (scope.getTrackingMode() != null ? scope.getTrackingMode() : "SIMPLE"));
         scope = scopeRepo.save(scope);
 
         // Replace-all strategy for phases (mirrors how order_book_items are saved).
@@ -139,6 +143,8 @@ public class OrderBookDetailService {
                 ph.setActualEndDate(p.getActualEndDate());
                 ph.setStatus(p.getStatus() != null ? p.getStatus() : "Not Started");
                 ph.setProgressPercent(p.getProgressPercent() != null ? p.getProgressPercent() : BigDecimal.ZERO);
+                ph.setWeightPct(p.getWeightPct());
+                ph.setPlannedBudget(p.getPlannedBudget());
                 ph.setResponsibleUserId(p.getResponsibleUserId());
                 // Serialise sub-items list → JSON string for storage
                 if (p.getSubItems() != null && !p.getSubItems().isEmpty()) {
@@ -157,7 +163,108 @@ public class OrderBookDetailService {
         return scope;
     }
 
-    /** Seed a default EPC plan; does NOT persist — returns it for the UI to edit then save. */
+    /**
+     * Surgical budget update: sets ONLY plannedBudget on existing phases and the
+     * "plannedBudget" field inside each sub-item's JSON. Does not create, delete, or
+     * reorder phases, and leaves every other phase/scope field untouched — so saving
+     * budgets from the Commercial tab can never clobber the Technical Scope.
+     * Input: list of { phaseId, plannedBudget, subBudgets: [{ name, plannedBudget }] }.
+     */
+    @Transactional
+    public void saveScopeBudgets(Long orderBookId, List<java.util.Map<String, Object>> items) throws CustomException {
+        if (items == null) return;
+        List<OrderBookPhaseEntity> phases = phaseRepo.findByOrderBookIdOrderBySeqNo(orderBookId);
+        java.util.Map<Long, OrderBookPhaseEntity> byId = new java.util.HashMap<>();
+        for (OrderBookPhaseEntity p : phases) byId.put(p.getId(), p);
+        ObjectMapper mapper = new ObjectMapper();
+
+        for (java.util.Map<String, Object> item : items) {
+            Object pidRaw = item.get("phaseId");
+            if (pidRaw == null) continue;
+            Long pid = Long.valueOf(String.valueOf(pidRaw).replaceAll("\\..*$", ""));
+            OrderBookPhaseEntity ph = byId.get(pid);
+            if (ph == null) continue;
+
+            // Sub-item budgets: merge plannedBudget into the stored sub_items JSON by name.
+            Object subBudgetsRaw = item.get("subBudgets");
+            if (subBudgetsRaw instanceof List && ph.getSubItems() != null && !ph.getSubItems().isBlank()) {
+                try {
+                    List<java.util.Map<String, Object>> stored =
+                        mapper.readValue(ph.getSubItems(), List.class);
+                    List<?> incoming = (List<?>) subBudgetsRaw;
+                    java.util.Map<String, Object> budgetByName = new java.util.HashMap<>();
+                    for (Object o : incoming) {
+                        java.util.Map<?, ?> m = (java.util.Map<?, ?>) o;
+                        if (m.get("name") != null)
+                            budgetByName.put(String.valueOf(m.get("name")), m.get("plannedBudget"));
+                    }
+                    java.math.BigDecimal sum = java.math.BigDecimal.ZERO;
+                    for (java.util.Map<String, Object> si : stored) {
+                        String nm = String.valueOf(si.get("name"));
+                        if (budgetByName.containsKey(nm)) {
+                            Object bv = budgetByName.get(nm);
+                            si.put("plannedBudget", bv);
+                            if (bv != null && !String.valueOf(bv).isBlank())
+                                sum = sum.add(new java.math.BigDecimal(String.valueOf(bv)));
+                        } else if (si.get("plannedBudget") != null && !String.valueOf(si.get("plannedBudget")).isBlank()) {
+                            sum = sum.add(new java.math.BigDecimal(String.valueOf(si.get("plannedBudget"))));
+                        }
+                    }
+                    ph.setSubItems(mapper.writeValueAsString(stored));
+                    ph.setPlannedBudget(sum); // parent = sum of sub-item budgets (rollup)
+                } catch (Exception ignored) { /* leave as-is on parse failure */ }
+            } else {
+                // Leaf phase (no sub-items): set its own planned budget.
+                Object bv = item.get("plannedBudget");
+                ph.setPlannedBudget(bv == null || String.valueOf(bv).isBlank()
+                    ? null : new java.math.BigDecimal(String.valueOf(bv)));
+            }
+            phaseRepo.save(ph);
+        }
+    }
+
+    // ── Per-period progress (DETAILED tracking) ────────────────────────────────
+    public List<OrderBookProgressPeriodEntity> getProgressPeriods(Long orderBookId) throws CustomException {
+        requireOrderBook(orderBookId);
+        return progressRepo.findByOrderBookId(orderBookId);
+    }
+
+    /**
+     * Replace-all save of per-period progress cells for an order book. Only leaf cells
+     * are stored (phase with sub_item_key=null, or sub-items by name). Parent curves are
+     * derived at read time, never stored. Zero-valued cells are skipped to keep the table lean.
+     */
+    @Transactional
+    public void saveProgressPeriods(Long orderBookId, List<java.util.Map<String, Object>> cells) throws CustomException {
+        requireOrderBook(orderBookId);
+        progressRepo.deleteByOrderBookId(orderBookId);
+        em.flush();
+        if (cells == null) return;
+        for (java.util.Map<String, Object> c : cells) {
+            Object pidRaw = c.get("phaseId");
+            Object perRaw = c.get("periodNo");
+            if (pidRaw == null || perRaw == null) continue;
+            java.math.BigDecimal planned = toBD(c.get("plannedPct"));
+            java.math.BigDecimal actual  = toBD(c.get("actualPct"));
+            if (planned.signum() == 0 && actual.signum() == 0) continue; // skip empties
+            OrderBookProgressPeriodEntity e = new OrderBookProgressPeriodEntity();
+            e.setOrderBookId(orderBookId);
+            e.setPhaseId(Long.valueOf(String.valueOf(pidRaw).replaceAll("\\..*$", "")));
+            Object sk = c.get("subItemKey");
+            e.setSubItemKey(sk == null || String.valueOf(sk).isBlank() ? null : String.valueOf(sk));
+            e.setPeriodNo(Integer.valueOf(String.valueOf(perRaw).replaceAll("\\..*$", "")));
+            e.setPlannedPct(planned);
+            e.setActualPct(actual);
+            progressRepo.save(e);
+        }
+    }
+
+    private java.math.BigDecimal toBD(Object o) {
+        if (o == null || String.valueOf(o).isBlank()) return java.math.BigDecimal.ZERO;
+        try { return new java.math.BigDecimal(String.valueOf(o)); }
+        catch (Exception e) { return java.math.BigDecimal.ZERO; }
+    }
+
     public List<OrderBookPhaseEntity> defaultEpcPlan(Long orderBookId) throws CustomException {
         requireOrderBook(orderBookId);
         List<OrderBookPhaseEntity> out = new ArrayList<>();

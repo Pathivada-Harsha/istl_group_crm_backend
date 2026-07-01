@@ -57,6 +57,23 @@ public class OrderBookPhaseEntity {
     private BigDecimal progressPercent = BigDecimal.ZERO;
 
     /**
+     * Absolute project-level weight (%). A parent phase's weight equals the sum of its
+     * sub-items' weights; all parent weights across an order book sum to 100%. Mirrors the
+     * EPC tracker "Weight (%)" column. Used to compute the weighted-average project progress.
+     */
+    @Column(name = "weight_pct", precision = 9, scale = 6)
+    private BigDecimal weightPct;
+
+    /**
+     * Planned procurement budget (cost to procure) for this item, in project currency.
+     * Stored only on leaf items (sub-items, or parents with no children). A parent with
+     * children derives its budget as the sum of its sub-items' budgets, the same way
+     * weightPct rolls up. Used by the Commercial tab's Budget Allocation block.
+     */
+    @Column(name = "planned_budget", precision = 18, scale = 2)
+    private BigDecimal plannedBudget;
+
+    /**
      * Sub-items / work-packages under this phase, stored as a JSON array.
      * Each element: { "name": "...", "status": "Not Started", "progressPercent": 0, "description": "" }
      * Serialised by the service layer; never mapped by JPA so no extra table is needed.

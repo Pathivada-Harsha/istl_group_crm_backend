@@ -38,6 +38,9 @@ public class PurchaseOrderItemEntity {
     
     @Column(name = "item_name")
     private String itemName;
+
+    @Column(name = "hsn_code", length = 20)
+    private String hsnCode;
     
     @Column(name = "description", columnDefinition = "TEXT")
     private String description;

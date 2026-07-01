@@ -244,7 +244,7 @@ public class ProposalsService {
             return true;
         }
         // Anyone with level <= 4 (e.g. sales, BD) can view offline/approved proposals
-        if (level <= 4 && proposal.getOfflinePdfPath() != null) return true;
+        if (level <= 4 && proposal.getOfflinePdfName() != null) return true;
         if (level <= 4 && "Approved".equalsIgnoreCase(proposal.getStatus())) return true;
         return false;
     }
@@ -335,7 +335,6 @@ public class ProposalsService {
         proposal.setOfflinePdfData(fileData);
         proposal.setOfflinePdfName(fileName);
         proposal.setOfflinePdfPath(null);   // null = BLOB is authoritative
-        proposal.setStatus("Approved");
         return convertToWrapper(proposalsRepo.save(proposal));
     }
 

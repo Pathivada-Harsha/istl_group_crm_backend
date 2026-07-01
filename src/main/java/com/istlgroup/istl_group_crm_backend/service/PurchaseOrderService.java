@@ -38,6 +38,7 @@ import org.springframework.web.multipart.MultipartFile;
 public class PurchaseOrderService {
     
     private final PurchaseOrderRepository purchaseOrderRepository;
+    private final PurchaseOrderPdfService purchaseOrderPdfService;
     private final ProjectAccessService projectAccessService;
     private final RoleHierarchyRepo roleHierarchyRepo;
     private final PurchaseOrderItemRepository purchaseOrderItemRepository;
@@ -438,6 +439,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                         .purchaseOrder(savedPO)
                         .lineNo(i + 1)
                         .itemName(itemData.get("itemName").toString())
+                        .hsnCode(itemData.get("hsnCode") != null ? itemData.get("hsnCode").toString() : null)
                         .description(itemData.containsKey("itemDescription") 
                             ? itemData.get("itemDescription").toString() 
                             : "")
@@ -579,6 +581,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                         .purchaseOrder(savedPO)
                         .lineNo(i + 1)
                         .itemName(itemData.get("itemName").toString())
+                        .hsnCode(itemData.get("hsnCode") != null ? itemData.get("hsnCode").toString() : null)
                         .description(itemData.containsKey("itemDescription") 
                             ? itemData.get("itemDescription").toString() 
                             : "")
@@ -1043,6 +1046,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                         .purchaseOrder(po)
                         .lineNo(lineNo)
                         .itemName(itemData.get("itemName").toString())
+                        .hsnCode(itemData.get("hsnCode") != null ? itemData.get("hsnCode").toString() : null)
                         .description(itemData.containsKey("itemDescription")
                             ? itemData.get("itemDescription").toString()
                             : "")
@@ -1519,6 +1523,39 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
     }
 
     /**
+     * Generate the SESOLA PO PDF from the supplied document data and store it in the
+     * PO's file BLOB (same slot used by uploads, so existing download routes serve it).
+     */
+    @Transactional
+    public String generateAndStorePoDocument(Long poId,
+            com.istlgroup.istl_group_crm_backend.wrapperClasses.PoDocumentRequest req) {
+        PurchaseOrderEntity po = purchaseOrderRepository.findById(poId)
+                .orElseThrow(() -> new RuntimeException("Purchase order not found: " + poId));
+        try {
+            if (req.getPoNo() == null || req.getPoNo().isBlank()) req.setPoNo(po.getPoNo());
+            byte[] pdf = purchaseOrderPdfService.generate(req);
+            String fileName = "PO_" + (po.getPoNo() != null ? po.getPoNo().replaceAll("[^A-Za-z0-9._-]", "_") : poId) + ".pdf";
+            po.setPoFileData(pdf);
+            po.setPoFileContentType("application/pdf");
+            po.setPoFileName(fileName);
+            po.setPoFileSize((long) pdf.length);
+            po.setPoFilePath(null);
+            // Persist the form data so re-generate can prefill exactly what was used.
+            try {
+                po.setPoDocPayload(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(req));
+            } catch (Exception je) {
+                log.warn("Could not serialize PO doc payload for id={}: {}", poId, je.getMessage());
+            }
+            purchaseOrderRepository.save(po);
+            log.info("Generated PO PDF for PO id={} ({} bytes)", poId, pdf.length);
+            return "blob:" + poId;
+        } catch (Exception e) {
+            log.error("Failed to generate PO document for id={}", poId, e);
+            throw new RuntimeException("Failed to generate PO document: " + e.getMessage());
+        }
+    }
+
+    /**
      * Returns the raw file bytes for a PO, regardless of where the file lives.
      * Priority: BLOB column → disk fallback (legacy files).
      */
@@ -1560,7 +1597,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
         return contentType != null && (
                 contentType.equals("application/pdf") ||
                 contentType.equals("image/png") ||
-                contentType.equals("image/jpg") ||
+                contentType.equals("image/jpg") || 
                 contentType.equals("image/jpeg")
         );
     }
