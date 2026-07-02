@@ -19,6 +19,14 @@ public interface UsersRepo extends JpaRepository<UsersEntity, Long> {
     @Query("SELECT c FROM UsersEntity c WHERE c.user_id = :userid")
     UsersEntity isUserIdExist(@Param("userid") String userid);
 
+    // Duplicate-email check that excludes the user being edited
+    @Query("SELECT u FROM UsersEntity u WHERE LOWER(u.email) = LOWER(:email) AND u.id <> :excludeId")
+    Optional<UsersEntity> findByEmailExcludingId(@Param("email") String email, @Param("excludeId") Long excludeId);
+
+    // Duplicate-phone check that excludes the user being edited
+    @Query("SELECT u FROM UsersEntity u WHERE u.phone = :phone AND u.id <> :excludeId")
+    Optional<UsersEntity> findByPhoneExcludingId(@Param("phone") String phone, @Param("excludeId") Long excludeId);
+
     @Query("SELECT DISTINCT u.role FROM UsersEntity u ORDER BY u.role")
     List<String> findDistinctRoles();
 
