@@ -3,6 +3,7 @@ package com.istlgroup.istl_group_crm_backend.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.*;
 import com.istlgroup.istl_group_crm_backend.entity.*;
+import com.istlgroup.istl_group_crm_backend.constants.NotificationConstants;
 import com.istlgroup.istl_group_crm_backend.repo.*;
 import jakarta.persistence.EntityNotFoundException;
 import jakarta.servlet.http.HttpServletResponse;
@@ -36,6 +37,8 @@ public class ProjectExpenseService {
     private final ObjectMapper                    objectMapper;
     private final ProjectAccessService            projectAccessService;
     private final com.istlgroup.istl_group_crm_backend.repo.RoleHierarchyRepo roleHierarchyRepo;
+    private final MailService                     mailService;
+    private final NotificationService             notificationService;
 
     private static final long MAX_BILL_BYTES = 10L * 1024 * 1024; // 10 MB
     private static final List<String> ALLOWED_BILL_TYPES = Arrays.asList(
@@ -150,6 +153,11 @@ public class ProjectExpenseService {
             "Expense created: " + code + " — submitted for approval", code);
 
         updateProjectExpenseStats(request.getProjectId());
+
+        // Notify whoever the expense now waits on: the reporting manager, or the
+        // CFO directly if the submitter had no manager (stage was auto-advanced).
+        notifyPendingApprover(saved);
+
         return List.of(toExpenseResponse(saved));
     }
 
@@ -373,10 +381,21 @@ public class ProjectExpenseService {
             saved);
 
         updateProjectExpenseStats(saved.getProjectId());
+
+        // Email routing after the transition:
+        //  • rejected            → tell the original submitter it was rejected
+        //  • now COMPLETED       → tell the submitter it was fully approved
+        //  • advanced a stage    → tell the next pending approver (CFO / FINAL)
+        if (reject) {
+            notifySubmitterFinal(saved, true);
+        } else if ("COMPLETED".equals(saved.getApprovalStage())) {
+            notifySubmitterFinal(saved, false);
+        } else {
+            notifyPendingApprover(saved);
+        }
+
         return toExpenseResponse(saved);
     }
-
-    /** Accounts Executive marks a fully-approved expense as Paid. */
     public ProjectExpenseResponse markPaid(Long id, Long actorId, String actorName) {
         ProjectExpense e = findExpenseOrThrow(id);
 
@@ -974,20 +993,25 @@ public class ProjectExpenseService {
     }
 
     private Sort buildSort(String sortBy, String dir) {
-        if (sortBy == null || sortBy.isBlank()) sortBy = "tripDate";
+        // "Latest record at top" — default to creation time, newest first.
+        if (sortBy == null || sortBy.isBlank()) sortBy = "createdAt";
         Sort.Direction direction = "asc".equalsIgnoreCase(dir)
             ? Sort.Direction.ASC : Sort.Direction.DESC;
         Map<String, String> fieldMap = Map.of(
             "date",        "tripDate",
             "tripDate",    "tripDate",
+            "createdAt",   "createdAt",
             "amount",      "amount",
             "category",    "category",
             "status",      "status",
             "paymentMode", "paymentMode",
             "paidByName",  "paidByName"
         );
-        String field = fieldMap.getOrDefault(sortBy, "tripDate");
-        return Sort.by(direction, field);
+        String field = fieldMap.getOrDefault(sortBy, "createdAt");
+        // Always tiebreak on id in the SAME direction, so records sharing a
+        // timestamp (e.g. several created in one bulk submit) stay in a stable,
+        // strictly monotonic order — newest-inserted first when descending.
+        return Sort.by(direction, field).and(Sort.by(direction, "id"));
     }
 
     /**
@@ -1124,6 +1148,201 @@ public class ProjectExpenseService {
 
     // ── normalization + error helpers ─────────────────────────────────────────
     private String norm(String s) { return s == null ? "" : s.toUpperCase().replaceAll("[^A-Z]", ""); }
+
+    // =========================================================================
+    // APPROVAL-STAGE EMAIL NOTIFICATIONS
+    //
+    // Recipients are the INTENDED approver for the current stage — deliberately
+    // NARROWER than the approval-permission check (which also lets SUPERADMIN /
+    // ADMIN override). We do NOT email overriders; only the person expected to
+    // act. Addresses come straight from users.email.
+    //   MANAGER → the expense's reportingManagerId user.
+    //   CFO     → active users whose normalized role = ACCOUNTSCFO
+    //             OR normalized designation = CFO.
+    //   FINAL   → active users whose normalized role = ACCOUNTSMANAGER
+    //             OR normalized designation = ACCOUNTSMANAGER ("Accounts Manager").
+    // Superadmins are excluded even though they can approve.
+    // =========================================================================
+
+    /** Resolve the email recipients for whatever stage the expense is now waiting on. */
+    private List<UsersEntity> resolveStageApprovers(ProjectExpense e) {
+        String stage = e.getApprovalStage();
+        if (stage == null) return List.of();
+        switch (stage) {
+            case "MANAGER": {
+                if (e.getReportingManagerId() == null) return List.of();
+                return usersRepo.findById(e.getReportingManagerId())
+                    .filter(u -> u.getIs_active() != null && u.getIs_active() == 1L)
+                    .map(List::of).orElseGet(List::of);
+            }
+            case "CFO":
+                return matchActive(u ->
+                    norm(u.getRole()).equals("ACCOUNTSCFO")
+                    || norm(u.getDesignation()).equals("CFO"));
+            case "FINAL":
+                return matchActive(u ->
+                    norm(u.getRole()).equals("ACCOUNTSMANAGER")
+                    || norm(u.getDesignation()).equals("ACCOUNTSMANAGER"));
+            default:
+                return List.of(); // COMPLETED / REJECTED — no pending approver
+        }
+    }
+
+    /** Active, non-superadmin users matching a predicate, with a non-blank email. */
+    private List<UsersEntity> matchActive(java.util.function.Predicate<UsersEntity> p) {
+        return usersRepo.findAllActiveUsers().stream()
+            .filter(u -> !norm(u.getRole()).equals("SUPERADMIN"))
+            .filter(p)
+            .filter(u -> u.getEmail() != null && !u.getEmail().isBlank())
+            .collect(Collectors.toList());
+    }
+
+    private String stageApproverLabel(String stage) {
+        if (stage == null) return "Approver";
+        switch (stage) {
+            case "MANAGER": return "Reporting Manager";
+            case "CFO":     return "Chief Financial Officer";
+            case "FINAL":   return "Accounts Manager";
+            default:        return "Approver";
+        }
+    }
+
+    /**
+     * Email the current pending approver(s) that an expense awaits their action.
+     * Never throws into the caller — a mail failure must not roll back an approval
+     * or a submission. Runs best-effort; MailService.sendEmail is itself @Async.
+     */
+    private void notifyPendingApprover(ProjectExpense e) {
+        try {
+            String stage = e.getApprovalStage();
+            if (stage == null || "COMPLETED".equals(stage) || "REJECTED".equals(stage)) return;
+            List<UsersEntity> approvers = resolveStageApprovers(e);
+            if (approvers.isEmpty()) {
+                log.warn("Expense {} at stage {} has no resolvable approver to notify.",
+                    e.getExpenseCode(), stage);
+                return;
+            }
+            String subject = "[Action needed] Expense " + e.getExpenseCode()
+                + " awaits your approval (" + stageApproverLabel(stage) + ")";
+            String noteMsg = "Expense " + e.getExpenseCode() + " (" + projectLabel(e.getProjectId())
+                + ") is pending your approval as " + stageApproverLabel(stage) + ".";
+            for (UsersEntity approver : approvers) {
+                // In-app notification — one per approver, mirrors the email.
+                // Sent regardless of whether the user has an email on file.
+                safeNotify(approver.getId(), "Expense pending approval", noteMsg,
+                    e.getId(), NotificationConstants.Type.EXPENSE_PENDING_APPROVAL);
+                if (approver.getEmail() != null && !approver.getEmail().isBlank()) {
+                    mailService.sendEmail(approver.getEmail(), subject,
+                        buildApproverEmailBody(e, approver, stage));
+                }
+            }
+        } catch (Exception ex) {
+            log.error("Failed to notify approver for expense {}: {}",
+                e.getExpenseCode(), ex.getMessage());
+        }
+    }
+
+    /** Notify the original submitter once the chain finishes (approved or rejected). */
+    private void notifySubmitterFinal(ProjectExpense e, boolean rejected) {
+        try {
+            if (e.getCreatedBy() == null) return;
+            UsersEntity submitter = usersRepo.findById(e.getCreatedBy()).orElse(null);
+            if (submitter == null) return;
+            String verdict = rejected ? " was rejected" : " was fully approved";
+            // In-app notification first — independent of email availability.
+            safeNotify(submitter.getId(),
+                rejected ? "Expense rejected" : "Expense approved",
+                "Expense " + e.getExpenseCode() + " (" + projectLabel(e.getProjectId()) + ")" + verdict + ".",
+                e.getId(),
+                rejected ? NotificationConstants.Type.EXPENSE_REJECTED
+                         : NotificationConstants.Type.EXPENSE_APPROVED);
+            if (submitter.getEmail() != null && !submitter.getEmail().isBlank()) {
+                mailService.sendEmail(submitter.getEmail(),
+                    "Expense " + e.getExpenseCode() + verdict,
+                    buildSubmitterEmailBody(e, submitter, rejected));
+            }
+        } catch (Exception ex) {
+            log.error("Failed to notify submitter for expense {}: {}",
+                e.getExpenseCode(), ex.getMessage());
+        }
+    }
+
+    /**
+     * Create a single in-app notification, swallowing any failure so it can
+     * never roll back the surrounding approval transaction. The notification
+     * service already null-guards a missing userId and pushes over WebSocket.
+     */
+    private void safeNotify(Long userId, String title, String message, Long refId, String type) {
+        try {
+            if (userId == null) return;
+            notificationService.createNotification(
+                userId, title, message, NotificationConstants.Module.EXPENSE, refId, type);
+        } catch (Exception ex) {
+            log.error("In-app notification failed (user {}, type {}): {}", userId, type, ex.getMessage());
+        }
+    }
+
+    private String buildApproverEmailBody(ProjectExpense e, UsersEntity approver, String stage) {
+        String amount = e.getTotalAmount() == null ? "-" : e.getTotalAmount().toPlainString();
+        return "<div style=\"font-family:Arial,sans-serif;font-size:14px;color:#1f2937\">"
+            + "<p>Dear " + safe(approver.getName()) + ",</p>"
+            + "<p>An expense is pending your approval as <b>" + stageApproverLabel(stage) + "</b>.</p>"
+            + "<table style=\"border-collapse:collapse\">"
+            + row("Expense Code", safe(e.getExpenseCode()))
+            + row("Project", safe(projectLabel(e.getProjectId())))
+            + row("Submitted by", safe(e.getPaidByName() != null ? e.getPaidByName() : e.getReportingManagerName()))
+            + row("Trip date", e.getTripDate() == null ? "-" : e.getTripDate().toString())
+            + row("Amount", "INR " + amount)
+            + row("Reason", safe(e.getTripReason()))
+            + "</table>"
+            + "<p>Please log in to the SESOLA CRM portal to review and take action:<br>"
+            + "<a href=\"https://crm.sesolaenergy.com\">crm.sesolaenergy.com</a></p>"
+            + "<p style=\"color:#6b7280;font-size:12px\">This is an automated notification.</p>"
+            + "</div>";
+    }
+
+    private String buildSubmitterEmailBody(ProjectExpense e, UsersEntity submitter, boolean rejected) {
+        String amount = e.getTotalAmount() == null ? "-" : e.getTotalAmount().toPlainString();
+        String verdict = rejected
+            ? "<span style=\"color:#b91c1c\"><b>rejected</b></span>"
+            : "<span style=\"color:#15803d\"><b>fully approved</b></span>";
+        return "<div style=\"font-family:Arial,sans-serif;font-size:14px;color:#1f2937\">"
+            + "<p>Dear " + safe(submitter.getName()) + ",</p>"
+            + "<p>Your expense " + verdict + ".</p>"
+            + "<table style=\"border-collapse:collapse\">"
+            + row("Expense Code", safe(e.getExpenseCode()))
+            + row("Project", safe(projectLabel(e.getProjectId())))
+            + row("Amount", "INR " + amount)
+            + "</table>"
+            + "<p>View in the SESOLA CRM portal: "
+            + "<a href=\"https://crm.sesolaenergy.com\">crm.sesolaenergy.com</a></p>"
+            + "<p style=\"color:#6b7280;font-size:12px\">This is an automated notification.</p>"
+            + "</div>";
+    }
+
+    /**
+     * Human-readable project label for emails: the project name if resolvable,
+     * otherwise the raw project id. projectId holds the unique id string
+     * (e.g. "PROJ-2026-0005"), so we look up by projectUniqueId. Falls back to
+     * the id when the project is missing or its name is blank.
+     */
+    private String projectLabel(String projectId) {
+        if (projectId == null || projectId.isBlank()) return "-";
+        try {
+            String name = projectRepo.findByProjectUniqueId(projectId)
+                .map(ProjectEntity::getProjectName).orElse(null);
+            if (name != null && !name.isBlank()) return name;
+        } catch (Exception ex) {
+            log.warn("Could not resolve project name for {}: {}", projectId, ex.getMessage());
+        }
+        return projectId;
+    }
+
+    private String row(String k, String v) {
+        return "<tr><td style=\"padding:4px 12px 4px 0;color:#6b7280\">" + k
+            + "</td><td style=\"padding:4px 0\"><b>" + v + "</b></td></tr>";
+    }
+    private String safe(String s) { return s == null ? "-" : s.replace("<", "&lt;").replace(">", "&gt;"); }
 
     private ResponseStatusException badRequest(String msg) {
         return new ResponseStatusException(HttpStatus.BAD_REQUEST, msg);

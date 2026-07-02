@@ -21,6 +21,7 @@ public final class NotificationConstants {
         public static final String TASK     = "TASK";
         public static final String FOLLOWUP = "FOLLOWUP";
         public static final String INVOICE  = "INVOICE";
+        public static final String EXPENSE  = "EXPENSE";
         private Module() { }
     }
 
@@ -53,6 +54,11 @@ public final class NotificationConstants {
         public static final String INVOICE_APPROVED     = "INVOICE_APPROVED";
         public static final String INVOICE_REJECTED     = "INVOICE_REJECTED";
         public static final String INVOICE_PAYMENT      = "INVOICE_PAYMENT_RECEIVED";
+
+        // Project-expense approval chain
+        public static final String EXPENSE_PENDING_APPROVAL = "EXPENSE_PENDING_APPROVAL";
+        public static final String EXPENSE_APPROVED         = "EXPENSE_APPROVED";
+        public static final String EXPENSE_REJECTED         = "EXPENSE_REJECTED";
 
         private Type() { }
     }
