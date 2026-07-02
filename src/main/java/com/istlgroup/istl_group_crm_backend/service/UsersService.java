@@ -64,9 +64,31 @@ public class UsersService {
     public ResponseEntity<?> UpdateUser(LoginEntity newData, Long id) throws CustomException {
         UsersEntity isUserExist = usersRepo.findById(id).orElseThrow(() -> new CustomException("Invalid User"));
 
+        // Duplicate email → 409 CONFLICT so the frontend can show a WARNING
+        // toast instead of a generic error (previously the DB unique
+        // constraint blew up into a 500).
+        if (newData.getEmail() != null
+                && usersRepo.findByEmailExcludingId(newData.getEmail().trim(), id).isPresent()) {
+            return ResponseEntity.status(HttpStatus.CONFLICT)
+                    .body("Email already exists. Please use a different email.");
+        }
+
+        // Server-side phone guard: exactly 10 digits
+        String phone = newData.getPhone() == null ? "" : newData.getPhone().replaceAll("\\D", "");
+        if (!phone.matches("\\d{10}")) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body("Phone number must be exactly 10 digits.");
+        }
+
+        // Duplicate phone → 409 CONFLICT (warning on frontend), same as email
+        if (usersRepo.findByPhoneExcludingId(phone, id).isPresent()) {
+            return ResponseEntity.status(HttpStatus.CONFLICT)
+                    .body("Mobile number already exists. Please use a different mobile number.");
+        }
+
         isUserExist.setName(newData.getName());
         isUserExist.setEmail(newData.getEmail());
-        isUserExist.setPhone(newData.getPhone());
+        isUserExist.setPhone(phone);
         isUserExist.setRole(RoleNormalizer.normalize(newData.getRole())); // always UPPER_SNAKE_CASE
         isUserExist.setIs_active(newData.getIs_active());
         // FIX #1: persist manager, team, designation on update
@@ -212,6 +234,28 @@ public class UsersService {
 
 	    if (!errors.isEmpty()) {
 	        throw new CustomException(String.join(", ", errors));
+	    }
+
+	    // ---------------- DUPLICATE EMAIL → 409 (warning on frontend) ----------------
+	    // Previously the DB unique constraint threw a raw SQL exception
+	    // ("Duplicate entry ... for key 'users.email'") that leaked to the UI.
+	    if (usersRepo.findByEmailExcludingId(user.getEmail().trim(), -1L).isPresent()) {
+	        return ResponseEntity.status(HttpStatus.CONFLICT)
+	                .body("Email already exists. Please use a different email.");
+	    }
+
+	    // ---------------- PHONE: exactly 10 digits ----------------
+	    String cleanPhone = user.getPhone().replaceAll("\\D", "");
+	    if (!cleanPhone.matches("\\d{10}")) {
+	        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+	                .body("Phone number must be exactly 10 digits.");
+	    }
+	    user.setPhone(cleanPhone);
+
+	    // ---------------- DUPLICATE PHONE → 409 (warning on frontend) ----------------
+	    if (usersRepo.findByPhoneExcludingId(cleanPhone, -1L).isPresent()) {
+	        return ResponseEntity.status(HttpStatus.CONFLICT)
+	                .body("Mobile number already exists. Please use a different mobile number.");
 	    }
 
 	    // ---------------- PASSWORD ----------------
@@ -407,8 +451,11 @@ public class UsersService {
 	        ? usersRepo.countByIsActive(0L)
 	        : users.stream().filter(u -> u.getIs_active() == 0).count());
 
-	    // Get all unique roles for filter dropdown
-	    List<String> allRoles = usersRepo.findDistinctRoles();
+	    // Get all roles for the filter dropdown from the roles table — NOT
+	    // findDistinctRoles() (distinct roles on users), which drops newly
+	    // created roles that have no users assigned yet and caused the role
+	    // filter to lose new roles whenever a search/filter was applied.
+	    List<String> allRoles = rolesRepo.getAllRoles();
 
 	    // Build response
 	    UsersResponseWrapper response = new UsersResponseWrapper();
