@@ -127,7 +127,12 @@ public class PurchaseOrderEntity {
     
     @Column(name = "category", length = 100)
     private String category;
-    
+
+    // Discriminates a goods Purchase Order from a services Work Order.
+    // Values: PURCHASE_ORDER | WORK_ORDER. Same record/template; only the document title differs.
+    @Column(name = "document_type", length = 20)
+    private String documentType;
+
     @Column(name = "created_by")
     private Long createdBy;
     
@@ -157,6 +162,7 @@ public class PurchaseOrderEntity {
         if (orderDate == null) orderDate = now;
         if (status == null) status = "Draft";
         if (paymentStatus == null) paymentStatus = "Pending";
+        if (documentType == null || documentType.isBlank()) documentType = "PURCHASE_ORDER";
         if (totalItemsOrdered == null) totalItemsOrdered = 0;
         if (totalItemsDelivered == null) totalItemsDelivered = 0;
         // total_items_pending is calculated by database

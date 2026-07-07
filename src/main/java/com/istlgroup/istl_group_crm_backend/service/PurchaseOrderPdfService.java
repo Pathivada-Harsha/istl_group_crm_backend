@@ -99,7 +99,9 @@ public class PurchaseOrderPdfService {
             pdf.addEventHandler(com.itextpdf.kernel.events.PdfDocumentEvent.END_PAGE,
                     new HeaderFooterHandler(loadAsset("sesola_logo.png"), bold, normal));
 
-            doc.add(new Paragraph("PURCHASE ORDER").setFont(bold).setFontSize(14)
+            String title = (r.getDocTitle() != null && !r.getDocTitle().isBlank())
+                    ? r.getDocTitle().trim() : "PURCHASE ORDER";
+            doc.add(new Paragraph(title).setFont(bold).setFontSize(14)
                     .setTextAlignment(TextAlignment.CENTER).setMarginBottom(8));
 
             addHeaderGrid(doc, r, bold, normal);
@@ -319,11 +321,11 @@ public class PurchaseOrderPdfService {
     }
 
     private void addPricingTable(Document doc, PoDocumentRequest r, PdfFont bold, PdfFont normal) {
-        Table t = new Table(new float[]{0.6f, 3.2f, 1.3f, 0.8f, 1.1f, 1.2f})
+        Table t = new Table(new float[]{0.6f, 3.2f, 0.8f, 1.1f, 1.1f, 1.2f})
                 .setWidth(UnitValue.createPercentValue(100));
         Border b = new SolidBorder(ColorConstants.BLACK, 0.5f);
 
-        String[] heads = {"S.No", "Item & Description", "HSN Code", "Qty", "Price Per Unit", "AMOUNT"};
+        String[] heads = {"S.No", "Item & Description", "Qty", "Unit", "Price Per Unit", "AMOUNT"};
         for (String h : heads) {
             t.addHeaderCell(new Cell().add(p(h, bold, 9)).setBackgroundColor(HEADER_BG)
                     .setBorder(b).setPadding(4).setTextAlignment(TextAlignment.CENTER));
@@ -337,8 +339,8 @@ public class PurchaseOrderPdfService {
             int rowNo = (it.getSNo() != null && it.getSNo() > 0) ? it.getSNo() : sNo;
             t.addCell(cell(String.valueOf(rowNo), normal, b, TextAlignment.CENTER));
             t.addCell(cell(nz(it.getDescription()), normal, b, TextAlignment.LEFT));
-            t.addCell(cell(nz(it.getHsnCode()), normal, b, TextAlignment.CENTER));
             t.addCell(cell(num(it.getQty()), normal, b, TextAlignment.CENTER));
+            t.addCell(cell(notBlank(it.getUnit()) ? it.getUnit() : "Nos", normal, b, TextAlignment.CENTER));
             t.addCell(cell(money(it.getPricePerUnit()), normal, b, TextAlignment.RIGHT));
             t.addCell(cell(money(it.getAmount()), normal, b, TextAlignment.RIGHT));
             sNo++;
@@ -367,10 +369,11 @@ public class PurchaseOrderPdfService {
         doc.add(t.setMarginBottom(6));
     }
 
-    // A summary row: empty S.No + Description + HSN, label spanning Qty+Price, value in AMOUNT.
+    // A summary row for the reordered layout [S.No, Description, Qty, Unit, Price, Amount]:
+    // blank across S.No+Description, label spanning Qty+Unit+Price, value in AMOUNT.
     private void addSpanSummaryRow(Table t, Border b, PdfFont normal, PdfFont bold, String label, String value) {
-        t.addCell(new Cell(1, 3).setBorder(b).setPadding(4)); // blank across first 3 cols
-        t.addCell(new Cell(1, 2).add(p(label, bold, 9)).setBorder(b).setPadding(4).setTextAlignment(TextAlignment.RIGHT));
+        t.addCell(new Cell(1, 2).setBorder(b).setPadding(4)); // blank across first 2 cols
+        t.addCell(new Cell(1, 3).add(p(label, bold, 9)).setBorder(b).setPadding(4).setTextAlignment(TextAlignment.RIGHT));
         t.addCell(cell(value, bold, b, TextAlignment.RIGHT));
     }
 
@@ -444,7 +447,13 @@ public class PurchaseOrderPdfService {
     private static boolean notBlank(String s) { return s != null && !s.trim().isEmpty(); }
     private static String nz(String s) { return s == null ? "" : s; }
     private static String defIfBlank(String s, String d) { return notBlank(s) ? s : d; }
-    private static String money(Double v) { return v == null ? "" : MONEY.format(v); }
+    private static String money(Double v) {
+        if (v == null) return "";
+        // Preserve decimals when present (e.g. 1234.56 → "1,234.56"); keep whole amounts clean (1000 → "1,000").
+        // Previously used a no-decimal pattern which rounded prices/amounts on the PDF.
+        if (v == Math.floor(v) && !v.isInfinite()) return MONEY.format(v);
+        return MONEY2.format(v);
+    }
     private static String num(Double v) {
         if (v == null) return "";
         if (v == Math.floor(v)) return String.valueOf(v.longValue());

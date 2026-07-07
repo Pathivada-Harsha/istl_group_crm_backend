@@ -18,7 +18,8 @@ import java.util.List;
 import java.util.Optional;
 
 @Repository
-public interface PurchaseOrderRepository extends JpaRepository<PurchaseOrderEntity, Long> {
+public interface PurchaseOrderRepository extends JpaRepository<PurchaseOrderEntity, Long>,
+        org.springframework.data.jpa.repository.JpaSpecificationExecutor<PurchaseOrderEntity> {
     
     // ========== Basic Queries ==========
     
@@ -527,7 +528,21 @@ public interface PurchaseOrderRepository extends JpaRepository<PurchaseOrderEnti
 	           "WHERE YEAR(po.orderDate) = :year " +
 	           "AND po.deletedAt IS NULL")
 	    long countPOsForYear(@Param("year") int year);
-	    
+
+	    /**
+	     * Count finalized (already-numbered) records of a given document type for a year.
+	     * The poNo-prefix filter excludes freshly-saved rows that still carry a __TEMP_PO_ number,
+	     * so the count reflects only issued documents. Used to build the per-type WO-YYYY-NNNN series.
+	     */
+	    @Query("SELECT COUNT(po) FROM PurchaseOrderEntity po " +
+	           "WHERE po.documentType = :documentType " +
+	           "AND YEAR(po.orderDate) = :year " +
+	           "AND po.poNo LIKE :poNoPrefix " +
+	           "AND po.deletedAt IS NULL")
+	    long countFinalizedByTypeForYear(@Param("documentType") String documentType,
+	                                     @Param("year") int year,
+	                                     @Param("poNoPrefix") String poNoPrefix);
+
 	    /**
 	     * ✅ NEW: Check if PO number already exists
 	     * Used to prevent duplicate PO numbers

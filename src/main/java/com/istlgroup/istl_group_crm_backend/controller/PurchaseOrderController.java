@@ -60,6 +60,7 @@ public class PurchaseOrderController {
         @RequestParam(required = false) String status,
         @RequestParam(required = false) String paymentStatus,
         @RequestParam(required = false) String searchTerm,
+        @RequestParam(required = false) String documentType,
         @RequestParam(defaultValue = "0") int page,
         @RequestParam(defaultValue = "10") int size,
         @RequestParam(defaultValue = "orderDate") String sortBy,
@@ -84,6 +85,7 @@ public class PurchaseOrderController {
             status,
             paymentStatus,
             searchTerm,
+            documentType,
             userId,
             userRole,
             page,
@@ -349,6 +351,7 @@ public ResponseEntity<?> createPurchaseOrder(
         String notes = (String) poRequest.get("notes");
         String status = (String) poRequest.get("status");
         String poRefId = (String) poRequest.get("poRefId");
+        String documentType = (String) poRequest.get("documentType");
 
         // Validate
         if (groupName == null || groupName.trim().isEmpty()) {
@@ -391,6 +394,7 @@ public ResponseEntity<?> createPurchaseOrder(
             shippingAddress,
             notes,
             status,
+            documentType,
             itemsData
         );
         
@@ -747,6 +751,7 @@ public ResponseEntity<?> updatePurchaseOrder(
             @RequestParam(required = false) String status,
             @RequestParam(required = false) String paymentStatus,
             @RequestParam(required = false) String searchTerm,
+            @RequestParam(required = false) String documentType,
             @RequestParam(required = false) String orderDateFrom,
             @RequestParam(required = false) String orderDateTo,
             HttpServletRequest request
@@ -754,10 +759,10 @@ public ResponseEntity<?> updatePurchaseOrder(
         try {
             Long userId = getUserIdFromRequest(request);
             String userRole = getUserRoleFromRequest(request);
-            
+
             PurchaseOrderService.POStats stats = purchaseOrderService.getStatistics(
                     groupName, subGroupName, projectId, status, paymentStatus, searchTerm,
-                    orderDateFrom, orderDateTo, userId, userRole
+                    documentType, orderDateFrom, orderDateTo, userId, userRole
             );
             return ResponseEntity.ok(stats);
         } catch (Exception e) {
