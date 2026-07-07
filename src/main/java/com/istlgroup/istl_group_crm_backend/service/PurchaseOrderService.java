@@ -58,6 +58,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
         String status,
         String paymentStatus,
         String searchTerm,
+        String documentType,
         Long userId,
         String userRole,
         int page,
@@ -68,12 +69,78 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
         String orderDateTo
 ) {
     Pageable pageable = PageRequest.of(
-            page, 
-            size, 
+            page,
+            size,
             Sort.by(Sort.Direction.fromString(sortDirection), sortBy)
     );
-    
+
     boolean isAdmin = isAdmin(userRole);
+
+    // ── Document-type filter (PURCHASE_ORDER / WORK_ORDER) ──
+    // Only engages when a specific type is requested; the default ("all"/blank) view falls
+    // through to the existing query fan-out unchanged, so POs and WOs list together with a Type badge.
+    String docTypeFilter = (documentType != null && !documentType.isEmpty()
+            && !"all".equalsIgnoreCase(documentType)) ? documentType : null;
+    if (docTypeFilter != null) {
+        String statusFilter   = (status        != null && !status.isEmpty()        && !"all".equalsIgnoreCase(status))        ? status        : null;
+        String paymentFilter  = (paymentStatus != null && !paymentStatus.isEmpty() && !"all".equalsIgnoreCase(paymentStatus)) ? paymentStatus : null;
+        String groupFilter    = (groupName     != null && !groupName.isEmpty())     ? groupName     : null;
+        String subGroupFilter = (subGroupName  != null && !subGroupName.isEmpty())  ? subGroupName  : null;
+        String projectFilter  = (projectId     != null && !projectId.isEmpty())     ? projectId     : null;
+        String searchFilter   = (searchTerm    != null && !searchTerm.trim().isEmpty()) ? searchTerm.trim() : null;
+
+        LocalDateTime dateFrom = null, dateTo = null;
+        try {
+            if (orderDateFrom != null && !orderDateFrom.isEmpty()) dateFrom = LocalDate.parse(orderDateFrom).atStartOfDay();
+            if (orderDateTo   != null && !orderDateTo.isEmpty())   dateTo   = LocalDate.parse(orderDateTo).atTime(23, 59, 59);
+        } catch (Exception e) {
+            log.warn("Invalid date filter values: from={}, to={}", orderDateFrom, orderDateTo);
+        }
+
+        // Access scope: admin = all; non-admin = restrict to accessible project IDs
+        // (unless a specific, already-granted project is requested).
+        List<String> accessibleProjectIds = null;
+        if (!isAdmin) {
+            boolean hasProjectGrant = projectFilter != null
+                    && projectAccessService.canAccessProject(projectFilter, userId, userRole);
+            if (!hasProjectGrant) {
+                accessibleProjectIds = projectAccessService.getAccessibleProjectIds(userId, userRole);
+                if (accessibleProjectIds == null || accessibleProjectIds.isEmpty()) {
+                    return Page.empty(pageable);
+                }
+            }
+        }
+
+        final String fDocType = docTypeFilter, fStatus = statusFilter, fPayment = paymentFilter,
+                     fGroup = groupFilter, fSubGroup = subGroupFilter, fProject = projectFilter, fSearch = searchFilter;
+        final LocalDateTime fFrom = dateFrom, fTo = dateTo;
+        final List<String> fProjectIds = accessibleProjectIds;
+
+        org.springframework.data.jpa.domain.Specification<PurchaseOrderEntity> spec = (root, query, cb) -> {
+            List<jakarta.persistence.criteria.Predicate> ps = new ArrayList<>();
+            ps.add(cb.isNull(root.get("deletedAt")));
+            ps.add(cb.equal(root.get("documentType"), fDocType));
+            if (fStatus   != null) ps.add(cb.equal(root.get("status"), fStatus));
+            if (fPayment  != null) ps.add(cb.equal(root.get("paymentStatus"), fPayment));
+            if (fGroup    != null) ps.add(cb.equal(root.get("groupName"), fGroup));
+            if (fSubGroup != null) ps.add(cb.equal(root.get("subGroupName"), fSubGroup));
+            if (fProject  != null) ps.add(cb.equal(root.get("projectId"), fProject));
+            if (fProjectIds != null) ps.add(root.get("projectId").in(fProjectIds));
+            if (fFrom != null) ps.add(cb.greaterThanOrEqualTo(root.get("orderDate"), fFrom));
+            if (fTo   != null) ps.add(cb.lessThanOrEqualTo(root.get("orderDate"), fTo));
+            if (fSearch != null) {
+                String like = "%" + fSearch.toLowerCase() + "%";
+                ps.add(cb.or(
+                    cb.like(cb.lower(root.get("poNo")), like),
+                    cb.like(cb.lower(root.get("rfqId")), like),
+                    cb.like(cb.lower(root.get("poRefId")), like),
+                    cb.like(cb.lower(root.get("vendorName")), like)
+                ));
+            }
+            return cb.and(ps.toArray(new jakarta.persistence.criteria.Predicate[0]));
+        };
+        return purchaseOrderRepository.findAll(spec, pageable);
+    }
 
     // ── Date-range filter: use the comprehensive query that handles all combinations ──
     // This runs when either date bound is supplied, regardless of other filter state.
@@ -400,7 +467,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                     .build();
             PurchaseOrderEntity savedPO = purchaseOrderRepository.save(po);
             if (savedPO.getPoNo().startsWith("__TEMP_PO_")) {
-                savedPO.setPoNo(buildPoCode(savedPO.getId()));
+                savedPO.setPoNo(buildPoCode(savedPO.getId(), savedPO.getDocumentType()));
                 savedPO = purchaseOrderRepository.save(savedPO);
             }
             log.info("Saved PO with ID: {} poNo: {} and vendorId: {}", savedPO.getId(), savedPO.getPoNo(), savedPO.getVendorId());
@@ -439,6 +506,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                         .purchaseOrder(savedPO)
                         .lineNo(i + 1)
                         .itemName(itemData.get("itemName").toString())
+                        .unit(itemData.get("unit") != null ? itemData.get("unit").toString() : "Nos")
                         .hsnCode(itemData.get("hsnCode") != null ? itemData.get("hsnCode").toString() : null)
                         .description(itemData.containsKey("itemDescription") 
                             ? itemData.get("itemDescription").toString() 
@@ -501,6 +569,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
             String shippingAddress,
             String notes,
             String status,
+            String documentType,
             List<Map<String, Object>> itemsData
     ) {
         try {
@@ -531,6 +600,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                     .expectedDelivery(expectedDelivery.atStartOfDay())
                     .status(status != null && !status.trim().isEmpty() ? status : "Draft")
                     .paymentStatus("Pending")
+                    .documentType(documentType != null && !documentType.isBlank() ? documentType : "PURCHASE_ORDER")
                     .groupName(groupName)
                     .subGroupName(subGroupName)
                     .projectId(projectId)
@@ -545,7 +615,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
             // Save PO FIRST — DB assigns auto-increment id
             PurchaseOrderEntity savedPO = purchaseOrderRepository.save(po);
             if (savedPO.getPoNo().startsWith("__TEMP_PO_")) {
-                savedPO.setPoNo(buildPoCode(savedPO.getId()));
+                savedPO.setPoNo(buildPoCode(savedPO.getId(), savedPO.getDocumentType()));
                 savedPO = purchaseOrderRepository.save(savedPO);
             }
             log.info("Saved PO from order books with ID: {} poNo: {} and vendorId: {}", savedPO.getId(), savedPO.getPoNo(), savedPO.getVendorId());
@@ -581,6 +651,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                         .purchaseOrder(savedPO)
                         .lineNo(i + 1)
                         .itemName(itemData.get("itemName").toString())
+                        .unit(itemData.get("unit") != null ? itemData.get("unit").toString() : "Nos")
                         .hsnCode(itemData.get("hsnCode") != null ? itemData.get("hsnCode").toString() : null)
                         .description(itemData.containsKey("itemDescription") 
                             ? itemData.get("itemDescription").toString() 
@@ -1046,6 +1117,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                         .purchaseOrder(po)
                         .lineNo(lineNo)
                         .itemName(itemData.get("itemName").toString())
+                        .unit(itemData.get("unit") != null ? itemData.get("unit").toString() : "Nos")
                         .hsnCode(itemData.get("hsnCode") != null ? itemData.get("hsnCode").toString() : null)
                         .description(itemData.containsKey("itemDescription")
                             ? itemData.get("itemDescription").toString()
@@ -1125,7 +1197,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
         // First save — DB assigns auto-increment id
         PurchaseOrderEntity savedPO = purchaseOrderRepository.save(po);
         if (savedPO.getPoNo().startsWith("__TEMP_PO_")) {
-            savedPO.setPoNo(buildPoCode(savedPO.getId()));
+            savedPO.setPoNo(buildPoCode(savedPO.getId(), savedPO.getDocumentType()));
             savedPO = purchaseOrderRepository.save(savedPO);
         }
         
@@ -1199,7 +1271,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
         // First save — DB assigns auto-increment id
         PurchaseOrderEntity savedPO = purchaseOrderRepository.save(po);
         if (savedPO.getPoNo().startsWith("__TEMP_PO_")) {
-            savedPO.setPoNo(buildPoCode(savedPO.getId()));
+            savedPO.setPoNo(buildPoCode(savedPO.getId(), savedPO.getDocumentType()));
             savedPO = purchaseOrderRepository.save(savedPO);
         }
         
@@ -1210,6 +1282,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                     .purchaseOrder(savedPO)
                     .lineNo(i + 1)
                     .itemName(qItem.getItemName())
+                    .unit(qItem.getUnit() != null && !qItem.getUnit().isBlank() ? qItem.getUnit() : "Nos")
                     .description(qItem.getDescription())
                     .quantity(qItem.getQuantity())
                     .deliveredQty(BigDecimal.ZERO)
@@ -1256,15 +1329,15 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
      */
     @Transactional(readOnly = true)
     public POStats getStatistics(String groupName, String subGroupName, String projectId, Long userId, String userRole) {
-        return getStatistics(groupName, subGroupName, projectId, null, null, null, null, null, userId, userRole);
+        return getStatistics(groupName, subGroupName, projectId, null, null, null, null, null, null, userId, userRole);
     }
 
     public POStats getStatistics(String groupName, String subGroupName, String projectId,
-            String status, String paymentStatus, String searchTerm,
+            String status, String paymentStatus, String searchTerm, String documentType,
             String orderDateFrom, String orderDateTo, Long userId, String userRole) {
         Page<PurchaseOrderEntity> allPOs = getPurchaseOrders(
                 groupName, subGroupName, projectId, status, paymentStatus, searchTerm,
-                userId, userRole, 0, Integer.MAX_VALUE, "orderDate", "DESC",
+                documentType, userId, userRole, 0, Integer.MAX_VALUE, "orderDate", "DESC",
                 orderDateFrom, orderDateTo
         );
         
@@ -1317,11 +1390,26 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
     
  
  /**
-  * Derives the PO number deterministically from the DB auto-increment id.
-  * Format: PO-YYYY-NNNN  (e.g. PO-2026-0042)
+  * Derives the document number based on type.
+  * Purchase Orders keep the deterministic id-based scheme: PO-YYYY-NNNN (e.g. PO-2026-0042).
+  * Work Orders get their own contiguous per-year series: WO-YYYY-NNNN (e.g. WO-2026-0001),
+  * counted independently of POs. existsByPoNo guards against concurrent-insert collisions.
   */
- private String buildPoCode(Long id) {
-     return String.format("PO-%d-%04d", java.time.LocalDate.now().getYear(), id);
+ private String buildPoCode(Long id, String documentType) {
+     int year = java.time.LocalDate.now().getYear();
+     if ("WORK_ORDER".equalsIgnoreCase(documentType)) {
+         long count = purchaseOrderRepository.countFinalizedByTypeForYear("WORK_ORDER", year, "WO-%");
+         String code = String.format("WO-%d-%04d", year, count + 1);
+         int attempt = 0;
+         while (purchaseOrderRepository.existsByPoNo(code) && attempt < 100) {
+             count++;
+             code = String.format("WO-%d-%04d", year, count + 1);
+             attempt++;
+         }
+         return code;
+     }
+     // Purchase Order — unchanged id-based scheme
+     return String.format("PO-%d-%04d", year, id);
  }
 
  /** @deprecated Use buildPoCode(id) after the first save instead. */
@@ -1534,7 +1622,8 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
         try {
             if (req.getPoNo() == null || req.getPoNo().isBlank()) req.setPoNo(po.getPoNo());
             byte[] pdf = purchaseOrderPdfService.generate(req);
-            String fileName = "PO_" + (po.getPoNo() != null ? po.getPoNo().replaceAll("[^A-Za-z0-9._-]", "_") : poId) + ".pdf";
+            String filePrefix = "WORK_ORDER".equalsIgnoreCase(po.getDocumentType()) ? "WO_" : "PO_";
+            String fileName = filePrefix + (po.getPoNo() != null ? po.getPoNo().replaceAll("[^A-Za-z0-9._-]", "_") : poId) + ".pdf";
             po.setPoFileData(pdf);
             po.setPoFileContentType("application/pdf");
             po.setPoFileName(fileName);

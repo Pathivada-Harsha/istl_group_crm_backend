@@ -490,6 +490,7 @@ public class AiDataService {
                 null,           // projectId
                 gcf.statusFilter, null,      // status, paymentStatus
                 nameSearch,                  // searchTerm
+                null,                        // documentType (both PO + WO)
                 userId, userRole,            // userId, userRole
                 0, 200,                      // page, size
                 "id", "desc",               // sortBy, sortDir

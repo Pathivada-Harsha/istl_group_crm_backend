@@ -14,6 +14,8 @@ public class PoDocumentRequest {
 
     // PO meta
     private String poNo;
+    // Document heading rendered at the top of the PDF. "PURCHASE ORDER" (default) or "WORK ORDER".
+    private String docTitle;
     private String poDate;        // pre-formatted display string e.g. "11/06/2026"
     private String quoteRef;      // "NA" etc.
     private String quoteRefDate;
@@ -73,7 +75,8 @@ public class PoDocumentRequest {
         @JsonProperty("sNo")
         private Integer sNo;
         private String description;
-        private String hsnCode;
+        private String hsnCode;   // retained for backward compatibility; no longer rendered on the PO PDF
+        private String unit;      // e.g. Nos, Kg, Set — replaces HSN column on the PDF
         private Double qty;
         private Double pricePerUnit;
         private Double amount;
