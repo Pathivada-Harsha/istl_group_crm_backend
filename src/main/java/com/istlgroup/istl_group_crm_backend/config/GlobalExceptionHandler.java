@@ -1,6 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.config;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.customException.SessionLimitException;
 import jakarta.persistence.EntityNotFoundException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -37,6 +38,21 @@ public class GlobalExceptionHandler {
                 .body(Map.of(
                     "error", "BAD_REQUEST",
                     "message", ex.getMessage()
+                ));
+    }
+
+    // ✅ SessionLimitException — LOGIN ACTIVITY MODULE (Feature 2).
+    // 409 with the active session list; the frontend shows the
+    // "Maximum Active Sessions Reached" dialog and may retry with forceLogin.
+    // MUST be declared before the RuntimeException handler.
+    @ExceptionHandler(SessionLimitException.class)
+    public ResponseEntity<Map<String, Object>> handleSessionLimit(SessionLimitException ex) {
+        return ResponseEntity
+                .status(HttpStatus.CONFLICT)
+                .body(Map.of(
+                    "error", "SESSION_LIMIT_REACHED",
+                    "message", ex.getMessage(),
+                    "sessions", ex.getActiveSessions()
                 ));
     }
 
