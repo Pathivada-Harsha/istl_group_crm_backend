@@ -35,6 +35,8 @@ import com.istlgroup.istl_group_crm_backend.wrapperClasses.LoginResponseWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.UserWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.UsersResponseWrapper;
 import com.istlgroup.istl_group_crm_backend.util.RoleNormalizer;
+import com.istlgroup.istl_group_crm_backend.customException.SessionLimitException;
+import com.istlgroup.istl_group_crm_backend.entity.UserSessionEntity;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpSession;
@@ -64,6 +66,17 @@ public class LoginService {
 	@Autowired
 	private MailService mailService;
 	
+	// ── LOGIN ACTIVITY MODULE ────────────────────────────────────────────
+	@Autowired
+	private SessionRegistryService sessionRegistryService;
+	
+	@Autowired
+	private LoginAttemptService loginAttemptService;
+	
+	@Autowired
+	private AuditLogService auditLogService;
+	// ─────────────────────────────────────────────────────────────────────
+	
 	
 	public ResponseEntity<LoginResponseWrapper> AuthenticateUser(
 	        Map<String, String> credentials,
@@ -78,9 +91,25 @@ public class LoginService {
 	        throw new CustomException("Username and Password are required");
 	    }
 
+	    // 🔐 LOGIN ACTIVITY: brute-force protection — reject while locked out
+	    String clientIp = SessionRegistryService.clientIp(request);
+	    if (loginAttemptService.isLocked(username, clientIp)) {
+	        long minutes = loginAttemptService.lockedMinutesRemaining(username, clientIp);
+	        sessionRegistryService.recordFailedLogin(username, null,
+	                com.istlgroup.istl_group_crm_backend.entity.LoginHistoryBase.STATUS_FAILED_ACCOUNT_LOCKED,
+	                "Too many failed attempts", request, credentials);
+	        throw new CustomException("Too many failed login attempts. Please try again in "
+	                + minutes + " minute(s).");
+	    }
+
 	    LoginEntity response = loginRepo.findByUserId(username);
 
 	    if (response == null) {
+	        // 🔐 LOGIN ACTIVITY: record failed attempt (unknown user)
+	        loginAttemptService.onFailure(username, clientIp);
+	        sessionRegistryService.recordFailedLogin(username, null,
+	                com.istlgroup.istl_group_crm_backend.entity.LoginHistoryBase.STATUS_FAILED_USER_NOT_FOUND,
+	                "Username not found", request, credentials);
 	        throw new CustomException("Invalid Credentials");
 	    }
 
@@ -100,6 +129,11 @@ public class LoginService {
 	    }
 
 	    if (!passwordMatches) {
+	        // 🔐 LOGIN ACTIVITY: record failed attempt (wrong password)
+	        loginAttemptService.onFailure(username, clientIp);
+	        sessionRegistryService.recordFailedLogin(username, response,
+	                com.istlgroup.istl_group_crm_backend.entity.LoginHistoryBase.STATUS_FAILED_INVALID_PASSWORD,
+	                "Invalid password", request, credentials);
 	        throw new CustomException("Invalid Credentials");
 	    }
 
@@ -123,11 +157,28 @@ public class LoginService {
 
 	    // 🔹 STEP 4: Check if user is active
 	    if (response.getIs_active() == null || response.getIs_active() == 0) {
+	        // 🔐 LOGIN ACTIVITY: record failed attempt (inactive account)
+	        sessionRegistryService.recordFailedLogin(username, response,
+	                com.istlgroup.istl_group_crm_backend.entity.LoginHistoryBase.STATUS_FAILED_ACCOUNT_INACTIVE,
+	                "Account inactive", request, credentials);
 	        throw new CustomException(
 	            "Your Account Is INACTIVE Please Contact "
 	            + creatorName
 	            + (maskedPhone.isEmpty() ? "" : " " + maskedPhone)
 	        );
+	    }
+
+	    // 🔐 LOGIN ACTIVITY: if this browser already holds a session (e.g. the
+	    // user logged in again without logging out), close its registry row
+	    // first — otherwise it would be orphaned as a phantom ACTIVE session
+	    // and wrongly count towards the two-device limit.
+	    jakarta.servlet.http.HttpSession existingSession = request.getSession(false);
+	    if (existingSession != null) {
+	        try {
+	            sessionRegistryService.closeByRawSessionId(existingSession.getId(), "RE_LOGIN");
+	        } catch (Exception ignored) { }
+	        // session-fixation protection — new session id on login
+	        request.changeSessionId();
 	    }
 
 	    // 🔹 STEP 5: Create Authentication Context
@@ -147,6 +198,31 @@ public class LoginService {
 
 	    HttpSession session = request.getSession(true);
 	    session.setAttribute("USER_ID", response.getId());
+
+	    // 🔐 LOGIN ACTIVITY: enforce the 2-device limit and register the session.
+	    // Applies to ALL roles including SUPERADMIN (confirmed requirement).
+	    // Throws SessionLimitException (HTTP 409) when the limit is reached and
+	    // the client did not send forceLogin=true — the frontend then shows the
+	    // "Maximum Active Sessions Reached" dialog and retries with the flag.
+	    boolean forceLogin = "true".equalsIgnoreCase(credentials.get("forceLogin"));
+	    UserSessionEntity sessionRow;
+	    try {
+	        sessionRow = sessionRegistryService.registerLogin(response, request, credentials, forceLogin);
+	    } catch (SessionLimitException e) {
+	        // Do not leave a half-authenticated session behind on 409
+	        SecurityContextHolder.clearContext();
+	        session.invalidate();
+	        throw e;
+	    }
+	    session.setAttribute("SESSION_ROW_ID", sessionRow.getId());
+	    session.setAttribute("USER_NAME", response.getName());
+	    if (sessionRow.getLatitude() != null)  session.setAttribute("SESSION_LAT", sessionRow.getLatitude());
+	    if (sessionRow.getLongitude() != null) session.setAttribute("SESSION_LNG", sessionRow.getLongitude());
+
+	    loginAttemptService.onSuccess(username, clientIp);
+	    auditLogService.log("AUTH", "LOGIN", "Login",
+	            response.getName() + " logged in from " + sessionRow.getDeviceType()
+	            + (sessionRow.getCity() != null ? " (" + sessionRow.getCity() + ")" : ""));
 
 	    // 🔹 STEP 6: Wrap User Data
 	    LoginCredentialsWrapper wrappedData = new LoginCredentialsWrapper();

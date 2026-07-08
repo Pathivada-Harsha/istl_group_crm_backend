@@ -15,10 +15,19 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import org.springframework.stereotype.Component;
 
+import org.springframework.beans.factory.annotation.Autowired;
+import com.istlgroup.istl_group_crm_backend.entity.UserSessionEntity;
+import com.istlgroup.istl_group_crm_backend.service.SessionRegistryService;
+
 import java.io.IOException;
 
 @Component
 public class SessionFilter implements Filter {
+
+    // ── LOGIN ACTIVITY MODULE — session registry ─────────────────────────
+    @Autowired
+    private SessionRegistryService sessionRegistryService;
+    // ─────────────────────────────────────────────────────────────────────
 
     @Override
     public void doFilter(
@@ -73,6 +82,35 @@ public class SessionFilter implements Filter {
             );
             return;
         }
+
+        // 🔐 LOGIN ACTIVITY: registry check — an EVICTED or ADMIN_TERMINATED
+        // session is rejected here, which is what makes "logout oldest device"
+        // and admin remote termination take effect immediately on that device.
+        // A null status means the session predates this module — allowed.
+        String registryStatus = sessionRegistryService.statusOf(session.getId());
+        if (registryStatus != null && !UserSessionEntity.STATUS_ACTIVE.equals(registryStatus)) {
+            session.invalidate();
+            res.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+            res.setContentType("application/json");
+            res.setCharacterEncoding("UTF-8");
+            if (UserSessionEntity.STATUS_EVICTED.equals(registryStatus)) {
+                res.getWriter().write(
+                    "{\"error\":\"SESSION_EVICTED\",\"message\":\"You were signed out because your account was used to sign in on another device.\"}"
+                );
+            } else if (UserSessionEntity.STATUS_ADMIN_TERMINATED.equals(registryStatus)) {
+                res.getWriter().write(
+                    "{\"error\":\"SESSION_EVICTED\",\"message\":\"Your session was ended by an administrator.\"}"
+                );
+            } else {
+                res.getWriter().write(
+                    "{\"error\":\"SESSION_EXPIRED\",\"message\":\"Your session has expired. Please log in again.\"}"
+                );
+            }
+            return;
+        }
+
+        // 🔐 LOGIN ACTIVITY: refresh last_seen_at (throttled to 1/min inside)
+        sessionRegistryService.touch(session.getId());
 
         // ✅ Session valid — continue
         SecurityContextHolder.setContext(context);

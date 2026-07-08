@@ -10,6 +10,8 @@ import org.springframework.web.bind.annotation.*;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.LoginEntity;
 import com.istlgroup.istl_group_crm_backend.service.LoginService;
+import com.istlgroup.istl_group_crm_backend.service.AuditLogService;
+import com.istlgroup.istl_group_crm_backend.service.SessionRegistryService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LoginResponseWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.UsersResponseWrapper;
 
@@ -23,6 +25,14 @@ public class LoginController {
     @Autowired
     private LoginService logingService;
 
+    // ── LOGIN ACTIVITY MODULE ────────────────────────────────────────────
+    @Autowired
+    private SessionRegistryService sessionRegistryService;
+
+    @Autowired
+    private AuditLogService auditLogService;
+    // ─────────────────────────────────────────────────────────────────────
+
     // ✅ LOGIN
     @PostMapping("/userLogin")
     public ResponseEntity<LoginResponseWrapper> login(
@@ -32,9 +42,18 @@ public class LoginController {
         return logingService.AuthenticateUser(credentials, request);
     }
 
-    // ✅ LOGOUT
+    // ✅ LOGOUT — closes the session registry row (sets logout time and
+    // computes session duration in login_history) before invalidating.
     @PostMapping("/logout")
     public ResponseEntity<?> logout(HttpSession session) {
+        try {
+            Object username = session.getAttribute("USER_NAME");
+            sessionRegistryService.closeByRawSessionId(session.getId(), "USER_LOGOUT");
+            auditLogService.log("AUTH", "LOGOUT", "Logout",
+                    (username != null ? username : "User") + " logged out");
+        } catch (Exception ignored) {
+            // Logout must always succeed even if registry bookkeeping fails
+        }
         session.invalidate();
         return ResponseEntity.ok("Logged out");
     }
