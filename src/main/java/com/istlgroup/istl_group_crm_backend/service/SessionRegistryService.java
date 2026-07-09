@@ -273,6 +273,52 @@ public class SessionRegistryService {
         return live.size();
     }
 
+    // ── Self-service (Profile page "Active Sessions") ──────────────────────
+    // Every user — not just admins — can see and manage their OWN devices.
+    // These never touch other users' sessions; ownership is checked before
+    // any write.
+
+    /** A user's own active sessions, newest first — for the Profile page. */
+    public List<UserSessionEntity> findActiveForUser(Long userId) {
+        return sessionRepo.findActiveByUserId(userId);
+    }
+
+    /**
+     * Signs the requesting user out of ONE of their own devices. Returns
+     * false (no-op) if the session doesn't exist or belongs to someone else,
+     * so a user can never terminate another account's session this way.
+     */
+    @Transactional
+    public boolean terminateOwnSession(Long sessionRowId, Long requestingUserId) {
+        UserSessionEntity s = sessionRepo.findById(sessionRowId).orElse(null);
+        if (s == null || !s.getUserId().equals(requestingUserId)) return false;
+        if (UserSessionEntity.STATUS_ACTIVE.equals(s.getStatus())) {
+            closeSessionRow(s, UserSessionEntity.STATUS_ADMIN_TERMINATED, "USER_REMOTE_SIGNOUT", LocalDateTime.now(IST));
+            invalidateCache(s.getSessionHash());
+        }
+        return true;
+    }
+
+    /**
+     * "Sign out of all other devices" from the Profile page — closes every
+     * ACTIVE session for this user EXCEPT the one making the request, so the
+     * user's own browser stays logged in.
+     */
+    @Transactional
+    public int terminateOthersForUser(Long userId, String currentRawSessionId) {
+        String currentHash = currentRawSessionId != null ? sha256(currentRawSessionId) : null;
+        List<UserSessionEntity> live = sessionRepo.findActiveByUserId(userId);
+        LocalDateTime now = LocalDateTime.now(IST);
+        int count = 0;
+        for (UserSessionEntity s : live) {
+            if (currentHash != null && currentHash.equals(s.getSessionHash())) continue;
+            closeSessionRow(s, UserSessionEntity.STATUS_ADMIN_TERMINATED, "USER_REMOTE_SIGNOUT", now);
+            invalidateCache(s.getSessionHash());
+            count++;
+        }
+        return count;
+    }
+
     /** Called by SessionSweeperJob — expires sessions idle past the timeout. */
     @Transactional
     public int sweepExpired() {

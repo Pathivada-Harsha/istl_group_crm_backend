@@ -19,6 +19,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.dto.ActiveSessionDto;
 import com.istlgroup.istl_group_crm_backend.entity.AuditLogEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LoginEntity;
 import com.istlgroup.istl_group_crm_backend.entity.UserSessionEntity;
@@ -235,6 +236,45 @@ public class LoginActivityController {
         if (v == null) return null;
         v = v.trim();
         return v.length() > 100 ? v.substring(0, 100) : (v.isEmpty() ? null : v);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // Self-service "my sessions" — Profile page. Any authenticated user can
+    // view/manage their OWN devices only; unlike /active-sessions above,
+    // this is NOT admin-gated and never exposes other users' sessions.
+    // ═════════════════════════════════════════════════════════════════════
+
+    @GetMapping("/my-sessions")
+    public ResponseEntity<?> mySessions(HttpSession session) {
+        Long uid = currentUserId(session);
+        if (uid == null) return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        List<ActiveSessionDto> dtos = sessionRegistryService.findActiveForUser(uid).stream()
+                .map(s -> sessionRegistryService.toDto(s, session.getId()))
+                .toList();
+        return ResponseEntity.ok(dtos);
+    }
+
+    @DeleteMapping("/my-sessions/{id}")
+    public ResponseEntity<?> terminateMySession(@PathVariable Long id, HttpSession session) {
+        Long uid = currentUserId(session);
+        if (uid == null) return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        boolean ok = sessionRegistryService.terminateOwnSession(id, uid);
+        if (!ok) return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("message", "Session not found"));
+        return ResponseEntity.ok(Map.of("message", "Device signed out"));
+    }
+
+    @DeleteMapping("/my-sessions")
+    public ResponseEntity<?> signOutOtherDevices(HttpSession session) {
+        Long uid = currentUserId(session);
+        if (uid == null) return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        int n = sessionRegistryService.terminateOthersForUser(uid, session.getId());
+        return ResponseEntity.ok(Map.of("message", n + " device(s) signed out", "count", n));
+    }
+
+    private static Long currentUserId(HttpSession session) {
+        if (session == null) return null;
+        Object uid = session.getAttribute("USER_ID");
+        return (uid instanceof Long) ? (Long) uid : null;
     }
 
     // ═════════════════════════════════════════════════════════════════════
