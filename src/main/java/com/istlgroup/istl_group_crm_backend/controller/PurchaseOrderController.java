@@ -181,13 +181,14 @@ public ResponseEntity<?> createPOFromQuotation(
         String shippingAddress = (String) poRequest.get("shippingAddress");
         String notes = (String) poRequest.get("notes");
         String status = (String) poRequest.get("status");
-        
+        String documentType = (String) poRequest.get("documentType");
+
         // Validate required fields
         if (orderDate == null || orderDate.isEmpty()) {
             return ResponseEntity.badRequest()
                     .body(createErrorResponse("Order date is required"));
         }
-        
+
         if (expectedDelivery == null || expectedDelivery.isEmpty()) {
             return ResponseEntity.badRequest()
                     .body(createErrorResponse("Expected delivery date is required"));
@@ -220,17 +221,13 @@ public ResponseEntity<?> createPOFromQuotation(
             shippingAddress != null ? shippingAddress : "",
             notes != null ? notes : "",
             status,
+            documentType,
             itemsData
         );
-        
-        // Link PO back to quotation
-        try {
-            linkPOToQuotation(quotationId, po.getId());
-        } catch (Exception e) {
-            log.warn("Failed to link PO to quotation: {}", e.getMessage());
-            // Don't fail the whole operation for this
-        }
-        
+
+        // Note: the service now links the PO to the quotation and sets the quotation status
+        // (Partially Ordered / PO Created) based on remaining quantities — no separate call.
+
         // Return success with PO data
         Map<String, Object> response = createSuccessResponse(
             "Purchase Order created successfully", 
@@ -249,8 +246,25 @@ public ResponseEntity<?> createPOFromQuotation(
 }
 
     /**
+     * GET /api/purchase-orders/quotation/{quotationId}/remaining
+     * Per-line quoted / ordered / remaining quantities for a quotation, across all its POs.
+     * Consumed by both PO-creation flows to cap PO quantities per line item.
+     */
+    @GetMapping("/quotation/{quotationId}/remaining")
+    public ResponseEntity<?> getQuotationRemaining(@PathVariable Long quotationId) {
+        try {
+            return ResponseEntity.ok(purchaseOrderService.getQuotationRemaining(quotationId));
+        } catch (Exception e) {
+            log.error("Error computing remaining quantities for quotation {}", quotationId, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(createErrorResponse(e.getMessage()));
+        }
+    }
+
+    /**
      * Link PO back to quotation
      */
+    @SuppressWarnings("unused")
     private void linkPOToQuotation(Long quotationId, Long poId) {
         try {
             // Update quotation via HTTP call
@@ -378,6 +392,10 @@ public ResponseEntity<?> createPurchaseOrder(
                     .body(createErrorResponse("At least one item is required"));
         }
 
+        // New-vendor category/type — so a NEW vendor is created with them (not just "General").
+        String vendorCategory = (String) poRequest.get("vendorCategory");
+        String vendorType = (String) poRequest.get("vendorType");
+
         // Create PO
         PurchaseOrderEntity po = purchaseOrderService.createPOFromOrderBooks(
             userId,
@@ -395,6 +413,8 @@ public ResponseEntity<?> createPurchaseOrder(
             notes,
             status,
             documentType,
+            vendorCategory,
+            vendorType,
             itemsData
         );
         

@@ -78,4 +78,18 @@ public interface PurchaseOrderItemRepository extends JpaRepository<PurchaseOrder
            "  AND (po.status IS NULL OR po.status <> 'Cancelled') " +
            "ORDER BY po.poNo ASC, poi.lineNo ASC")
     List<PurchaseOrderItemEntity> findAllItemsByProjectId(@Param("projectId") String projectId);
+
+    /**
+     * Sum ordered quantity per item name across ALL POs raised under a quotation.
+     * Excludes cancelled/deleted POs. Used to enforce the cumulative per-line cap
+     * (sum of ordered qty per line must not exceed the quoted qty). Matches by item
+     * name scoped to the quotation (mirrors the order-book allocatedQty pattern).
+     * Returns rows of [itemName (String), orderedQty (BigDecimal)].
+     */
+    @Query("SELECT poi.itemName, SUM(poi.quantity) FROM PurchaseOrderItemEntity poi " +
+           "WHERE poi.purchaseOrder.quotationId = :quotationId " +
+           "  AND poi.purchaseOrder.deletedAt IS NULL " +
+           "  AND (poi.purchaseOrder.status IS NULL OR poi.purchaseOrder.status <> 'Cancelled') " +
+           "GROUP BY poi.itemName")
+    List<Object[]> sumOrderedQtyByItemForQuotation(@Param("quotationId") Long quotationId);
 }

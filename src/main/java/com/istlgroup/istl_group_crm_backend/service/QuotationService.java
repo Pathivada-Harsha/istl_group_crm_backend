@@ -4,11 +4,14 @@ import com.istlgroup.istl_group_crm_backend.entity.OrderBookEntity;
 import com.istlgroup.istl_group_crm_backend.entity.OrderBookItemEntity;
 import com.istlgroup.istl_group_crm_backend.entity.QuotationEntity;
 import com.istlgroup.istl_group_crm_backend.entity.QuotationItemEntity;
+import com.istlgroup.istl_group_crm_backend.entity.VendorEntity;
 import com.istlgroup.istl_group_crm_backend.repo.QuotationRepository;
 import com.istlgroup.istl_group_crm_backend.repo.OrderBookItemRepo;
 import com.istlgroup.istl_group_crm_backend.repo.OrderBookRepo;
 import com.istlgroup.istl_group_crm_backend.repo.QuotationItemRepository;
 import com.istlgroup.istl_group_crm_backend.repo.RoleHierarchyRepo;
+import com.istlgroup.istl_group_crm_backend.repo.VendorRepository;
+import java.util.Optional;
 import com.istlgroup.istl_group_crm_backend.service.ProjectAccessService;
 import com.istlgroup.istl_group_crm_backend.util.RoleNormalizer;
 import lombok.RequiredArgsConstructor;
@@ -40,6 +43,7 @@ public class QuotationService {
     private final OrderBookItemRepo orderBookItemRepo;
     private final ProjectAccessService projectAccessService;
     private final RoleHierarchyRepo roleHierarchyRepo;
+    private final VendorRepository vendorRepository;
     /**
      * Get quotations with role-based and project-based filtering
      */
@@ -160,6 +164,15 @@ public class QuotationService {
             // Set metadata
             quotation.setPreparedBy(userId);
             quotation.setUploadedAt(LocalDateTime.now());
+
+            // When the quotation is created under a NEW vendor (no vendorId but a vendorName
+            // was entered), create the vendor record now and link it — otherwise the vendor
+            // never lands in the vendors table and editing loses its category/type.
+            if (quotation.getVendorId() == null && quotation.getVendorName() != null
+                    && !quotation.getVendorName().trim().isEmpty()) {
+                Long newVendorId = findOrCreateVendorForQuotation(quotation, userId);
+                quotation.setVendorId(newVendorId);
+            }
             
             // Generate quotation number if not provided
             // Quotation number is derived from the DB-generated id (see below).
@@ -267,6 +280,41 @@ public class QuotationService {
         }
     }
     
+    /**
+     * Find an existing vendor by phone, or create a new one from the quotation's
+     * new-vendor fields (name, contact, category, type). Returns the vendor id.
+     */
+    private Long findOrCreateVendorForQuotation(QuotationEntity q, Long userId) {
+        String contact = q.getVendorContact() != null ? q.getVendorContact().trim() : "";
+        if (!contact.isEmpty()) {
+            Optional<VendorEntity> existing = vendorRepository.findByPhone(contact);
+            if (existing.isPresent()) {
+                log.info("Vendor already exists with contact {} — reusing id {}", contact, existing.get().getId());
+                return existing.get().getId();
+            }
+        }
+        String projectId = (q.getProjectId() == null || q.getProjectId().trim().isEmpty()) ? "DEFAULT" : q.getProjectId();
+        VendorEntity vendor = VendorEntity.builder()
+                .name(q.getVendorName().trim())
+                .phone(q.getVendorContact())
+                .rating(q.getVendorRating() != null ? q.getVendorRating().intValue() : 0)
+                .status("Active")
+                .groupName(q.getGroupName() != null ? q.getGroupName() : "Others")
+                .subGroupName(q.getSubGroupName() != null ? q.getSubGroupName() : "General")
+                .projectId(projectId)
+                .category(q.getVendorCategory() != null && !q.getVendorCategory().trim().isEmpty() ? q.getVendorCategory().trim() : "General")
+                .vendorType(q.getVendorType() != null && !q.getVendorType().trim().isEmpty() ? q.getVendorType().trim() : null)
+                .totalOrders(0)
+                .totalPurchaseValue(BigDecimal.ZERO)
+                .createdBy(userId)
+                .build();
+        VendorEntity saved = vendorRepository.save(vendor);
+        saved.setVendorCode(String.format("VEN-%06d", saved.getId()));
+        saved = vendorRepository.save(saved);
+        log.info("✅ Created vendor {} (id {}) from quotation", saved.getName(), saved.getId());
+        return saved.getId();
+    }
+
     /**
      * Update quotation
      */

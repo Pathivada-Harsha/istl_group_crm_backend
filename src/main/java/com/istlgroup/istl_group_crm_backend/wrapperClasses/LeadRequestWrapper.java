@@ -56,4 +56,8 @@ public class LeadRequestWrapper {
 
     // ── Lead Owner (name — from user dropdown or free-text 'Other') ──────────
     private String leadOwner;
+
+    // ── Keep-in-View callback date (yyyy-MM-dd) when a BD/Admin sets KIV from the
+    //    leads page. Mirrors the telecaller flow so the KIV badge shows on the lead. ─
+    private String kivReminderDate;
 }

@@ -398,6 +398,92 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
      * ✅ UPDATED: Create PO from quotation with custom data
      * Creates vendor IMMEDIATELY if new vendor, links vendorId right away
      */
+    /**
+     * Per-line ordering status for a quotation: quoted qty, qty already ordered across ALL
+     * (non-cancelled) POs raised under this quotation, and the remaining qty. Matching is by
+     * item name scoped to the quotation (mirrors the order-book allocatedQty pattern), so no
+     * line-item FK is needed. Two quotation lines sharing an item name would share a cap (rare).
+     */
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> getQuotationRemaining(Long quotationId) {
+        List<QuotationItemEntity> quotationItems = quotationItemRepository.findByQuotationId(quotationId);
+        Map<String, BigDecimal> orderedByName = new java.util.HashMap<>();
+        for (Object[] row : purchaseOrderItemRepository.sumOrderedQtyByItemForQuotation(quotationId)) {
+            if (row == null || row[0] == null) continue;
+            BigDecimal qty = row[1] != null ? new BigDecimal(row[1].toString()) : BigDecimal.ZERO;
+            orderedByName.merge(row[0].toString(), qty, BigDecimal::add);
+        }
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (QuotationItemEntity qi : quotationItems) {
+            BigDecimal quoted = qi.getQuantity() != null ? qi.getQuantity() : BigDecimal.ZERO;
+            BigDecimal ordered = orderedByName.getOrDefault(qi.getItemName(), BigDecimal.ZERO);
+            BigDecimal remaining = quoted.subtract(ordered);
+            if (remaining.compareTo(BigDecimal.ZERO) < 0) remaining = BigDecimal.ZERO;
+            Map<String, Object> m = new java.util.LinkedHashMap<>();
+            m.put("quotationItemId", qi.getId());
+            m.put("itemName", qi.getItemName());
+            m.put("quotedQty", quoted);
+            m.put("orderedQty", ordered);
+            m.put("remainingQty", remaining);
+            result.add(m);
+        }
+        return result;
+    }
+
+    /**
+     * Recompute a quotation's ordering status from the live PO quantities and persist it.
+     *
+     * The quotation has no stored "ordered/received qty" column — the ordering state lives in
+     * {@code QuotationEntity.status} ("Approved" → "Partially Ordered" → "PO Created"), while the
+     * actual numbers are derived on the fly from PO line items by {@link #getQuotationRemaining}.
+     * This keeps the stored status in sync whenever a PO under the quotation is created, EDITED,
+     * or removed — previously only the create path did this, so decreasing a PO's line quantities
+     * on edit (or deleting the PO) left a stale "PO Created" status behind.
+     *
+     * Only the ordering-driven statuses are managed; terminal/unrelated states
+     * (Rejected, Expired, New, Under Review, Shortlisted) are left untouched.
+     *   - every line fully ordered            → "PO Created"
+     *   - some (but not all) qty ordered      → "Partially Ordered"
+     *   - nothing ordered (e.g. PO deleted)   → "Approved" (and poId cleared)
+     */
+    public void syncQuotationOrderingStatus(Long quotationId) {
+        if (quotationId == null) return;
+        QuotationEntity quotation = quotationRepository.findById(quotationId).orElse(null);
+        if (quotation == null) return;
+
+        String current = quotation.getStatus();
+        boolean orderingStatus = "Approved".equals(current)
+                || "Partially Ordered".equals(current)
+                || "PO Created".equals(current);
+        if (!orderingStatus) {
+            // e.g. Rejected/Expired/New — don't resurrect the ordering flow
+            return;
+        }
+
+        List<Map<String, Object>> remaining = getQuotationRemaining(quotationId);
+        boolean hasLines = !remaining.isEmpty();
+        boolean anyOrdered = remaining.stream()
+                .anyMatch(r -> ((BigDecimal) r.get("orderedQty")).compareTo(BigDecimal.ZERO) > 0);
+        boolean fullyOrdered = hasLines && remaining.stream()
+                .allMatch(r -> ((BigDecimal) r.get("remainingQty")).compareTo(BigDecimal.ZERO) == 0);
+
+        String newStatus;
+        if (fullyOrdered) {
+            newStatus = "PO Created";
+        } else if (anyOrdered) {
+            newStatus = "Partially Ordered";
+        } else {
+            newStatus = "Approved";
+            quotation.setPoId(null); // no live PO left under this quotation
+        }
+
+        if (!newStatus.equals(current)) {
+            log.info("Quotation {} ordering status {} → {}", quotationId, current, newStatus);
+        }
+        quotation.setStatus(newStatus);
+        quotationRepository.save(quotation);
+    }
+
     @Transactional
     public PurchaseOrderEntity createPOFromQuotationWithCustomData(
             Long quotationId,
@@ -416,19 +502,41 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
             String shippingAddress,
             String notes,
             String status,
+            String documentType,
             List<Map<String, Object>> itemsData
     ) {
         try {
             log.info("Creating PO from quotation {} with custom data", quotationId);
-            
+
             // Get quotation
             QuotationEntity quotation = quotationRepository.findById(quotationId)
                     .orElseThrow(() -> new RuntimeException("Quotation not found"));
-            
-            if (!"Approved".equals(quotation.getStatus())) {
+
+            // Allow raising POs while the quotation is Approved OR still Partially Ordered
+            // (multiple POs may be raised until every line's quoted qty is exhausted).
+            if (!"Approved".equals(quotation.getStatus()) && !"Partially Ordered".equals(quotation.getStatus())) {
                 throw new RuntimeException("Only approved quotations can be converted to PO");
             }
-            
+
+            // Enforce cumulative per-line cap: for each item, the qty ordered across ALL POs
+            // under this quotation must not exceed the quoted qty. Computed from prior POs only
+            // (this PO not saved yet).
+            Map<String, BigDecimal> remainingByName = new java.util.HashMap<>();
+            for (Map<String, Object> r : getQuotationRemaining(quotationId)) {
+                remainingByName.merge((String) r.get("itemName"), (BigDecimal) r.get("remainingQty"), BigDecimal::add);
+            }
+            for (Map<String, Object> itemData : itemsData) {
+                String name = itemData.get("itemName") != null ? itemData.get("itemName").toString() : "";
+                BigDecimal req = safeToBigDecimal(itemData.get("quantity"), BigDecimal.ZERO);
+                BigDecimal rem = remainingByName.getOrDefault(name, BigDecimal.ZERO);
+                if (req.compareTo(rem) > 0) {
+                    throw new RuntimeException("Cannot order " + req.stripTrailingZeros().toPlainString()
+                        + " of '" + name + "' — only " + rem.stripTrailingZeros().toPlainString()
+                        + " remaining under this quotation.");
+                }
+                remainingByName.put(name, rem.subtract(req)); // cap duplicate lines within this PO too
+            }
+
             // ✅ CREATE VENDOR IMMEDIATELY if new vendor
             Long finalVendorId = vendorId;
             if (vendorId == null && vendorName != null && !vendorName.trim().isEmpty()) {
@@ -453,6 +561,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                     .orderDate(orderDate.atStartOfDay())
                     .expectedDelivery(expectedDelivery.atStartOfDay())
                     .status(status != null && !status.trim().isEmpty() ? status : "Draft")
+                    .documentType(documentType != null && !documentType.isBlank() ? documentType : "PURCHASE_ORDER")
                     .paymentStatus("Pending")
                     .groupName(groupName != null ? groupName : quotation.getGroupName())
                     .subGroupName(subGroupName != null ? subGroupName : quotation.getSubGroupName())
@@ -537,10 +646,17 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
             if (finalVendorId != null) {
                 vendorService.updateVendorOnPOCreation(finalVendorId, totalValue);
             }
-            
-            log.info("✅ Created PO {} with vendorId {} from quotation with {} items, total: {}", 
-                savedPO.getPoNo(), savedPO.getVendorId(), itemsData.size(), totalValue);
-            
+
+            // Link this PO to the quotation, then recompute its ordering status from the
+            // remaining quantities across all POs under it (recomputed AFTER saving this PO's
+            // items). Shared with the edit/delete paths so the status always stays in sync.
+            quotation.setPoId(savedPO.getId());
+            quotationRepository.save(quotation);
+            syncQuotationOrderingStatus(quotationId);
+
+            log.info("✅ Created PO {} with vendorId {} from quotation {} with {} items, total: {}",
+                savedPO.getPoNo(), savedPO.getVendorId(), quotationId, itemsData.size(), totalValue);
+
             return savedPO;
             
         } catch (Exception e) {
@@ -570,16 +686,18 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
             String notes,
             String status,
             String documentType,
+            String vendorCategory,
+            String vendorType,
             List<Map<String, Object>> itemsData
     ) {
         try {
             log.info("Creating PO from order books for project {}", projectId);
-            
+
             // ✅ CREATE VENDOR IMMEDIATELY if new vendor
             Long finalVendorId = vendorId;
             if (vendorId == null && vendorName != null && !vendorName.trim().isEmpty()) {
                 log.info("Creating new vendor immediately: {}", vendorName);
-                finalVendorId = createVendorNow(vendorName, vendorContact, groupName, subGroupName, projectId, userId);
+                finalVendorId = createVendorNow(vendorName, vendorContact, groupName, subGroupName, projectId, vendorCategory, vendorType, userId);
                 log.info("✅ Created vendor with ID: {}", finalVendorId);
             }
             
@@ -707,42 +825,59 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
             String projectId,
             Long userId
     ) {
+        return createVendorNow(vendorName, vendorContact, groupName, subGroupName, projectId, null, null, userId);
+    }
+
+    private Long createVendorNow(
+            String vendorName,
+            String vendorContact,
+            String groupName,
+            String subGroupName,
+            String projectId,
+            String vendorCategory,
+            String vendorType,
+            Long userId
+    ) {
         try {
             // Check if vendor already exists with this contact
-            Optional<VendorEntity> existingVendor = vendorRepository.findByPhone(vendorContact);
-            if (existingVendor.isPresent()) {
-                log.info("Vendor already exists with contact {}, returning existing vendor ID: {}", 
-                    vendorContact, existingVendor.get().getId());
-                return existingVendor.get().getId();
+            if (vendorContact != null && !vendorContact.trim().isEmpty()) {
+                Optional<VendorEntity> existingVendor = vendorRepository.findByPhone(vendorContact.trim());
+                if (existingVendor.isPresent()) {
+                    log.info("Vendor already exists with contact {}, returning existing vendor ID: {}",
+                        vendorContact, existingVendor.get().getId());
+                    return existingVendor.get().getId();
+                }
             }
-            
+
             // Handle null project_id
             String finalProjectId = projectId;
             if (projectId == null || projectId.trim().isEmpty()) {
                 finalProjectId = "DEFAULT";
             }
-            
+
             VendorEntity vendor = VendorEntity.builder()
                     .name(vendorName)
-                    .email("vendor_" + System.currentTimeMillis() + "@temp.com")
                     .phone(vendorContact)
-                    
+
                     .rating(0)
                     .status("Active")
                     .groupName(groupName != null ? groupName : "Others")
                     .subGroupName(subGroupName != null ? subGroupName : "General")
                     .projectId(finalProjectId)
-                    .category("General")
+                    .category(vendorCategory != null && !vendorCategory.trim().isEmpty() ? vendorCategory.trim() : "General")
+                    .vendorType(vendorType != null && !vendorType.trim().isEmpty() ? vendorType.trim() : null)
                     .totalOrders(0)
                     .totalPurchaseValue(BigDecimal.ZERO)
                     .createdBy(userId)
                     .build();
-            
+
             VendorEntity savedVendor = vendorRepository.save(vendor);
+            savedVendor.setVendorCode(String.format("VEN-%06d", savedVendor.getId()));
+            savedVendor = vendorRepository.save(savedVendor);
             log.info("✅ Created new vendor {} with ID: {}", vendorName, savedVendor.getId());
-            
+
             return savedVendor.getId();
-            
+
         } catch (Exception e) {
             log.error("Error creating vendor immediately: {}", e.getMessage(), e);
             throw new RuntimeException("Failed to create vendor: " + e.getMessage());
@@ -805,6 +940,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
         PurchaseOrderEntity po = getPurchaseOrderById(id);
         BigDecimal poTotal = po.getTotalValue();
         Long vendorId = po.getVendorId();
+        Long quotationId = po.getQuotationId();
 
         po.setDeletedAt(LocalDateTime.now());
         po.setStatus("Cancelled");
@@ -813,6 +949,13 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
         // Recalculate vendor stats so totals reflect the deletion immediately
         if (vendorId != null) {
             vendorService.updateVendorOnPODeletion(vendorId, poTotal);
+        }
+
+        // Roll the linked quotation's ordering status back now that this PO is cancelled
+        // (getQuotationRemaining excludes cancelled/deleted POs). Without this, the quotation
+        // would stay stuck on "PO Created"/"Partially Ordered" after its PO was removed.
+        if (quotationId != null) {
+            syncQuotationOrderingStatus(quotationId);
         }
 
         log.info("Soft deleted PO: {} (vendorId={}, value={})", po.getPoNo(), vendorId, poTotal);
@@ -1050,27 +1193,23 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                 }
             }
             
-            // ── FIX: Snapshot existing delivered quantities BEFORE deleting items.
-            // Previously, all new PO items were created with deliveredQty = ZERO,
-            // wiping out any delivery progress recorded by bills. Now we carry
-            // the old delivered qty forward when an item (matched by lineNo) still
-            // exists in the updated item list.
+            // ── Update PO items IN PLACE (upsert by line position) rather than delete-and-recreate.
+            // Bills link to a PO item by primary key (bill_items.po_item_id → purchase_order_items.id).
+            // The previous delete-all + re-insert assigned brand-new ids on every edit, ORPHANING any
+            // bill raised against this PO (BillService then throws "PO Item not found" on edit/delete,
+            // and delivered-qty reconciliation breaks). Reusing the existing row for each surviving
+            // line position keeps its id — and its delivered-qty history (set by bills) — intact.
             List<PurchaseOrderItemEntity> existingItems =
                     purchaseOrderItemRepository.findByPurchaseOrderId(poId);
-            // Build a map: lineNo → deliveredQty from the existing (pre-update) items
-            Map<Integer, BigDecimal> existingDeliveredByLineNo = new java.util.LinkedHashMap<>();
+            // Map: lineNo → existing row. Rows still matched by the new item list are updated in place;
+            // whatever remains here after the loop are removed lines, to be deleted.
+            Map<Integer, PurchaseOrderItemEntity> existingByLineNo = new java.util.LinkedHashMap<>();
             for (PurchaseOrderItemEntity ei : existingItems) {
                 if (ei.getLineNo() != null) {
-                    existingDeliveredByLineNo.put(ei.getLineNo(),
-                            ei.getDeliveredQty() != null ? ei.getDeliveredQty() : BigDecimal.ZERO);
+                    existingByLineNo.put(ei.getLineNo(), ei);
                 }
             }
 
-            // Now delete the old items
-            log.info("Deleting existing items for PO {}", poId);
-            purchaseOrderItemRepository.deleteByPurchaseOrderId(poId);
-
-            // Create new items
             BigDecimal totalValue = BigDecimal.ZERO;
             int totalItemsOrdered = 0;
             List<PurchaseOrderItemEntity> poItems = new ArrayList<>();
@@ -1099,41 +1238,56 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                     throw new RuntimeException("Unit price must be greater than 0 for item: " + itemData.get("itemName"));
                 }
 
-                // FIX: Preserve previously-recorded delivered qty for this line position.
-                // If the same line number existed before, carry its delivered qty forward
-                // so that delivery progress (set by bills) is not wiped on every PO edit.
                 int lineNo = i + 1;
-                BigDecimal preservedDelivered = existingDeliveredByLineNo.getOrDefault(
-                        lineNo, BigDecimal.ZERO);
 
-                // Cap at the new ordered quantity (can't have delivered > ordered)
-                if (preservedDelivered.compareTo(quantity) > 0) {
-                    log.warn("Capping preserved deliveredQty {} to new quantity {} for PO {} line {}",
-                             preservedDelivered, quantity, poId, lineNo);
-                    preservedDelivered = quantity;
+                // Reuse the existing row at this line position (preserves its id → keeps bill links
+                // and delivered-qty history); otherwise this is a newly-added line.
+                PurchaseOrderItemEntity poItem = existingByLineNo.remove(lineNo);
+                if (poItem == null) {
+                    poItem = new PurchaseOrderItemEntity();
+                    poItem.setPurchaseOrder(po);
+                    poItem.setLineNo(lineNo);
                 }
 
-                PurchaseOrderItemEntity poItem = PurchaseOrderItemEntity.builder()
-                        .purchaseOrder(po)
-                        .lineNo(lineNo)
-                        .itemName(itemData.get("itemName").toString())
-                        .unit(itemData.get("unit") != null ? itemData.get("unit").toString() : "Nos")
-                        .hsnCode(itemData.get("hsnCode") != null ? itemData.get("hsnCode").toString() : null)
-                        .description(itemData.containsKey("itemDescription")
-                            ? itemData.get("itemDescription").toString()
-                            : "")
-                        .quantity(quantity)
-                        .deliveredQty(preservedDelivered)   // ← FIX: was BigDecimal.ZERO
-                        .unitPrice(unitPrice)
-                        .taxPercent(gst)
-                        .build();
+                // Preserve previously-recorded delivered qty for this line. You cannot reduce a
+                // line below what has already been delivered/billed against it — that would
+                // silently discard real delivery & bill history. Reject the edit instead.
+                BigDecimal preservedDelivered = poItem.getDeliveredQty() != null
+                        ? poItem.getDeliveredQty() : BigDecimal.ZERO;
+                if (preservedDelivered.compareTo(quantity) > 0) {
+                    throw new RuntimeException(String.format(
+                        "Cannot reduce '%s' to %s: %s already delivered/billed against this line. " +
+                        "Reverse the delivery or bill before lowering the ordered quantity.",
+                        itemData.get("itemName"),
+                        quantity.stripTrailingZeros().toPlainString(),
+                        preservedDelivered.stripTrailingZeros().toPlainString()));
+                }
+
+                poItem.setItemName(itemData.get("itemName").toString());
+                poItem.setUnit(itemData.get("unit") != null ? itemData.get("unit").toString() : "Nos");
+                poItem.setHsnCode(itemData.get("hsnCode") != null ? itemData.get("hsnCode").toString() : null);
+                poItem.setDescription(itemData.containsKey("itemDescription")
+                        ? itemData.get("itemDescription").toString()
+                        : "");
+                poItem.setQuantity(quantity);
+                poItem.setDeliveredQty(preservedDelivered);
+                poItem.setUnitPrice(unitPrice);
+                poItem.setTaxPercent(gst);
 
                 poItems.add(poItem);
                 totalValue = totalValue.add(lineTotal);
                 totalItemsOrdered += quantity.intValue();
             }
 
-            // Save items
+            // Any existing rows still unmatched are lines removed in this edit — delete them.
+            // (A bill referencing a removed line will still surface via the poItemId, but the line
+            // truly no longer exists on the PO.)
+            if (!existingByLineNo.isEmpty()) {
+                log.info("Removing {} deleted line(s) from PO {}", existingByLineNo.size(), poId);
+                purchaseOrderItemRepository.deleteAll(existingByLineNo.values());
+            }
+
+            // Save items: existing rows → UPDATE (id preserved); new rows → INSERT
             List<PurchaseOrderItemEntity> savedItems = purchaseOrderItemRepository.saveAll(poItems);
             log.info("Saved {} updated items", savedItems.size());
 
@@ -1149,15 +1303,23 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
             po.setItems(savedItems);
             
             PurchaseOrderEntity updated = purchaseOrderRepository.save(po);
-            
+
             // ✅ Recalculate vendor stats from live PO data (guaranteed accuracy)
             if (finalVendorId != null) {
                 vendorService.recalculateVendorStatsFromPOs(finalVendorId);
             }
-            
-            log.info("✅ Updated PO {} with vendorId {}, {} items, total: {}", 
+
+            // Keep the linked quotation's ordering status in sync with the edited PO quantities.
+            // Decreasing (or increasing) line quantities can move it between "PO Created" and
+            // "Partially Ordered". Previously this was only done on PO create, so an edit left the
+            // quotation stuck showing "PO Created" even after the ordered qty dropped below quoted.
+            if (updated.getQuotationId() != null) {
+                syncQuotationOrderingStatus(updated.getQuotationId());
+            }
+
+            log.info("✅ Updated PO {} with vendorId {}, {} items, total: {}",
                 updated.getPoNo(), updated.getVendorId(), itemsData.size(), totalValue);
-            
+
             return updated;
             
         } catch (Exception e) {

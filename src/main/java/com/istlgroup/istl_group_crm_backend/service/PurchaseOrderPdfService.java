@@ -346,9 +346,22 @@ public class PurchaseOrderPdfService {
             sNo++;
         }
 
-        // GST row
-        addSpanSummaryRow(t, b, normal, bold,
-                "GST " + (r.getGstPercent() != null ? trimNum(r.getGstPercent()) + "%" : ""), money(r.getGstAmount()));
+        // GST rows — grouped by rate: one "GST @ x%" row per distinct rate present.
+        java.util.Map<Double, Double> gstGroups = new java.util.TreeMap<>();
+        for (PoLineItem it : items) {
+            if (it.getGstPercent() == null || it.getGstPercent() <= 0) continue;
+            double amt = it.getGstAmount() != null ? it.getGstAmount()
+                    : (it.getAmount() != null ? it.getAmount() : 0) * it.getGstPercent() / 100;
+            gstGroups.merge(it.getGstPercent(), amt, Double::sum);
+        }
+        if (!gstGroups.isEmpty()) {
+            gstGroups.forEach((pct, amt) ->
+                    addSpanSummaryRow(t, b, normal, bold, "GST @ " + trimNum(pct) + "%", money(amt)));
+        } else {
+            // Backward-compat: old single-rate payloads with only top-level GST.
+            addSpanSummaryRow(t, b, normal, bold,
+                    "GST" + (r.getGstPercent() != null ? " " + trimNum(r.getGstPercent()) + "%" : ""), money(r.getGstAmount()));
+        }
         // Total row
         addSpanSummaryRow(t, b, normal, bold, "Total Amount", money(r.getTotalAmount()));
 
@@ -369,7 +382,7 @@ public class PurchaseOrderPdfService {
         doc.add(t.setMarginBottom(6));
     }
 
-    // A summary row for the reordered layout [S.No, Description, Qty, Unit, Price, Amount]:
+    // A summary row for the layout [S.No, Description, Qty, Unit, Price, Amount]:
     // blank across S.No+Description, label spanning Qty+Unit+Price, value in AMOUNT.
     private void addSpanSummaryRow(Table t, Border b, PdfFont normal, PdfFont bold, String label, String value) {
         t.addCell(new Cell(1, 2).setBorder(b).setPadding(4)); // blank across first 2 cols

@@ -57,6 +57,14 @@ public class QuotationEntity {
     // NEW: Vendor contact number (max 10 digits)
     @Column(name = "vendor_contact", length = 20)
     private String vendorContact;
+
+    // Transient — supplied only when creating a quotation under a NEW vendor.
+    // Used to create the vendor record; not persisted as quotation columns.
+    @Transient
+    private String vendorCategory;
+
+    @Transient
+    private String vendorType;
     
     @Column(name = "rfq_id", length = 80)
     private String rfqId;

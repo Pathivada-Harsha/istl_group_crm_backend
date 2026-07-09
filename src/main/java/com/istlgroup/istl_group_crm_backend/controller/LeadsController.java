@@ -43,8 +43,11 @@ public class LeadsController {
             Map<String, Object> response = new HashMap<>();
 
             if (page >= 0) {
-                // Server-side paginated path
-                Pageable pageable = PageRequest.of(page, size);
+                // Server-side paginated path — most-recently-updated first (same default
+                // as /filter) so newly-changed leads surface at the top for every role.
+                Pageable pageable = PageRequest.of(page, size,
+                        Sort.by(Sort.Direction.DESC, "updatedAt")
+                            .and(Sort.by(Sort.Direction.DESC, "createdAt")));
                 Page<LeadWrapper> leadsPage = leadsService.getLeadsPaged(
                         userId, userRole, groupName, subGroupName, pageable);
 
@@ -107,8 +110,12 @@ public class LeadsController {
                         ? Sort.Direction.ASC : Sort.Direction.DESC;
                 pageable = PageRequest.of(page, size, Sort.by(dir, filterRequest.getSortBy()));
             } else {
-                // Default: newest first
-                pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
+                // Default: most recently updated first, so leads whose status/details just
+                // changed (e.g. just marked Interested) surface at the top instead of being
+                // buried by creation date. Ties fall back to newest-created.
+                pageable = PageRequest.of(page, size,
+                        Sort.by(Sort.Direction.DESC, "updatedAt")
+                            .and(Sort.by(Sort.Direction.DESC, "createdAt")));
             }
             Page<LeadWrapper> leadsPage = leadsService.getFilteredLeadsPaged(
                     userId, userRole, filterRequest, pageable);

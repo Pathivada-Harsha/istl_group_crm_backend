@@ -685,6 +685,18 @@ public class LeadsService {
             lead.setTelecallerReason(requestWrapper.getNotInterestedReason().trim());
         }
 
+        // ── Keep in View callback date (BD/Admin from the leads page) ──
+        if ("Keep in View".equalsIgnoreCase(requestWrapper.getStatus())
+                && requestWrapper.getKivReminderDate() != null
+                && !requestWrapper.getKivReminderDate().isBlank()) {
+            try {
+                lead.setKivReminderDate(java.time.LocalDate.parse(
+                        requestWrapper.getKivReminderDate().substring(0, 10)));
+            } catch (Exception ex) {
+                System.err.println("Invalid kivReminderDate '" + requestWrapper.getKivReminderDate() + "' for lead " + leadId);
+            }
+        }
+
 
         // ── Sync telecallerStatus to mirror main status (single source of truth) ──
         if (requestWrapper.getStatus() != null) {

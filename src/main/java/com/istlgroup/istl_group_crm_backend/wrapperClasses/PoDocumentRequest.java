@@ -79,6 +79,8 @@ public class PoDocumentRequest {
         private String unit;      // e.g. Nos, Kg, Set — replaces HSN column on the PDF
         private Double qty;
         private Double pricePerUnit;
+        private Double gstPercent; // per-line GST rate, e.g. 18
+        private Double gstAmount;  // per-line GST amount = amount * gstPercent/100
         private Double amount;
     }
 

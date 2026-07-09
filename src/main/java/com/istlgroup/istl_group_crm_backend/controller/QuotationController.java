@@ -8,6 +8,7 @@ import com.istlgroup.istl_group_crm_backend.repo.ProjectRepository;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.QuotationMapper;
 import com.istlgroup.istl_group_crm_backend.service.QuotationService;
 import com.istlgroup.istl_group_crm_backend.service.ProjectAccessService;
+import com.istlgroup.istl_group_crm_backend.service.PurchaseOrderService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import jakarta.servlet.http.HttpServletRequest;
@@ -38,6 +39,7 @@ public class QuotationController {
     private final QuotationRepository quotationRepository;
     private final VendorRepository vendorRepository;
     private final ProjectRepository projectRepository;
+    private final PurchaseOrderService purchaseOrderService;
 
     /** Enrich vendor name for quotations that have a vendorId but no vendorName stored */
     private void enrichVendorName(QuotationDTO dto) {
@@ -513,11 +515,14 @@ public class QuotationController {
             
             QuotationEntity quotation = quotationService.getQuotationById(id);
             quotation.setPoId(poId);
-            quotation.setStatus("PO Created");
-            
-            QuotationEntity updated = quotationService.updateQuotation(id, quotation);
-            QuotationDTO dto = QuotationMapper.toDTO(updated);
-            
+            quotationService.updateQuotation(id, quotation);
+
+            // Derive the ordering status from the actual PO quantities instead of blindly
+            // stamping "PO Created" — a partial order must land on "Partially Ordered".
+            purchaseOrderService.syncQuotationOrderingStatus(id);
+
+            QuotationDTO dto = QuotationMapper.toDTO(quotationService.getQuotationById(id));
+
             return ResponseEntity.ok(createSuccessResponse("PO linked successfully", dto));
             
         } catch (Exception e) {
