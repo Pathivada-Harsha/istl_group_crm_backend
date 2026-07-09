@@ -61,7 +61,7 @@ public class InvoiceService {
     private final RoleHierarchyRepo roleHierarchyRepo;
     private final NotificationService notificationService;
 
-    // ── Approval notification target (temporary hardcode — move to config later) ──
+   //  ── Approval notification target (temporary hardcode — move to config later) ──
     private static final String[] ACCOUNTS_NOTIFICATION_EMAILS = {
         "accounts@sesolaenergy.com",
         "arunkumar@sesolaenergy.com"
