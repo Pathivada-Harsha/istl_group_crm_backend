@@ -61,16 +61,9 @@ public class InvoiceService {
     private final RoleHierarchyRepo roleHierarchyRepo;
     private final NotificationService notificationService;
 
-   //  ── Approval notification target (temporary hardcode — move to config later) ──
-    private static final String[] ACCOUNTS_NOTIFICATION_EMAILS = {
-        "accounts@sesolaenergy.com",
-        "arunkumar@sesolaenergy.com"
-    };
-    
-//    private static final String[] ACCOUNTS_NOTIFICATION_EMAILS = {
-//            "vijayabhaskar@istlabs.in",
-//            "vbreddyvenna@gmail.com"
-//        };
+   //  ── Approval notification target — configured in application.properties ──
+    @org.springframework.beans.factory.annotation.Value("${invoice.approval.notification-emails:}")
+    private String[] accountsNotificationEmails;
 
     /**
      * ✅ UPDATED: Get invoices with customer details populated
@@ -1091,7 +1084,13 @@ public class InvoiceService {
                 + "<p style='color:#9ca3af;font-size:11px;margin-top:20px;'>SESOLA CRM — Automated Notification</p>"
                 + "</div>";
 
-            for (String email : ACCOUNTS_NOTIFICATION_EMAILS) {
+            if (accountsNotificationEmails == null || accountsNotificationEmails.length == 0) {
+                log.warn("invoice.approval.notification-emails is not configured — skipping pending-approval email for invoice {}", invoice.getInvoiceNo());
+                return;
+            }
+            for (String rawEmail : accountsNotificationEmails) {
+                String email = rawEmail == null ? "" : rawEmail.trim();
+                if (email.isEmpty()) continue;
                 try {
                     mailService.sendEmail(email, subject, body);
                     log.info("Pending approval email sent to {} for invoice {}", email, invoice.getInvoiceNo());
@@ -1205,7 +1204,9 @@ public class InvoiceService {
         }
         for (LoginEntity u : loginRepo.findAll()) {
             boolean active = (u.getIs_active() == null) || (u.getIs_active() == 1L);
-            boolean isApprover = isPrivilegedRole(u.getRole());
+            // Only users whose role starts with ACCOUNTS_ receive the pending-approval
+            // notification (Admin / Superadmin are intentionally excluded).
+            boolean isApprover = u.getRole() != null && u.getRole().toUpperCase().startsWith("ACCOUNTS_");
             boolean notCreator = invoice.getCreatedBy() == null || !u.getId().equals(invoice.getCreatedBy());
             if (active && isApprover && notCreator) {
                 try {
