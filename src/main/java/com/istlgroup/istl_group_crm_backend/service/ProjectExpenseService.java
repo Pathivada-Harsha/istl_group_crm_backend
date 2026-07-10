@@ -1081,6 +1081,16 @@ public class ProjectExpenseService {
 
         boolean hasBill = billRepo.existsByExpenseId(e.getId());
 
+        // Always resolve the "Paid By" name live from the users table so that
+        // renamed users are reflected. Fall back to the cached column only if
+        // the user record no longer exists.
+        String resolvedPaidByName = e.getPaidByName();
+        if (e.getPaidByUserId() != null) {
+            resolvedPaidByName = usersRepo.findById(e.getPaidByUserId())
+                .map(UsersEntity::getName)
+                .orElse(e.getPaidByName());
+        }
+
         return ProjectExpenseResponse.builder()
             .id(e.getId())
             .expenseCode(e.getExpenseCode())
@@ -1092,7 +1102,7 @@ public class ProjectExpenseService {
             .tripReason(e.getTripReason())
             .totalAmount(e.getTotalAmount())
             .paidByUserId(e.getPaidByUserId())
-            .paidByName(e.getPaidByName())
+            .paidByName(resolvedPaidByName)
             .status(e.getStatus())
             .receiptUrl(e.getReceiptUrl())
             .hasBill(hasBill)
