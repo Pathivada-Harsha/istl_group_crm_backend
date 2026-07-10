@@ -1,9 +1,13 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
+import java.time.temporal.TemporalAdjusters;
 import java.util.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -23,9 +27,15 @@ public class LeadAnalyticsService {
         "high", 3.0, "medium", 2.0, "low", 1.0
     );
 
-    /** Resolve a named range to [from, to). 'to' is exclusive (start of next day). */
-    public Map<String, Object> resolveRange(String range) {
-        LocalDate today = LocalDate.now();
+    // Business time zone — "now" and all date-window math resolve here so range
+    // edges/buckets don't drift with the JVM default zone (India-based business).
+    private static final ZoneId ZONE = ZoneId.of("Asia/Kolkata");
+
+    /** Resolve a named range to [from, to). 'to' is exclusive (start of next day).
+     *  For range == "custom", customFrom/customTo (ISO yyyy-MM-dd) define the window;
+     *  invalid/missing custom bounds fall back to last_12_months. */
+    public Map<String, Object> resolveRange(String range, String customFrom, String customTo) {
+        LocalDate today = LocalDate.now(ZONE);
         LocalDate fromD, toD;
         switch (range == null ? "" : range) {
             case "this_month":
@@ -34,12 +44,22 @@ public class LeadAnalyticsService {
                 YearMonth lm = YearMonth.from(today).minusMonths(1);
                 fromD = lm.atDay(1); toD = lm.atEndOfMonth().plusDays(1); break;
             case "last_3_months":
-                fromD = today.minusMonths(3); toD = today.plusDays(1); break;
+                // Current month + 2 prior, month-aligned → 3 clean monthly buckets.
+                fromD = today.withDayOfMonth(1).minusMonths(2); toD = today.plusDays(1); break;
             case "this_year":
                 fromD = today.withDayOfYear(1); toD = today.plusDays(1); break;
             case "last_year":
                 fromD = today.minusYears(1).withDayOfYear(1);
                 toD = LocalDate.of(today.getYear(), 1, 1); break;
+            case "custom": {
+                LocalDate cf = parseDate(customFrom), ct = parseDate(customTo);
+                if (cf != null && ct != null && !cf.isAfter(ct)) {
+                    fromD = cf; toD = ct.plusDays(1);
+                } else {
+                    fromD = today.minusMonths(11).withDayOfMonth(1); toD = today.plusDays(1);
+                }
+                break;
+            }
             case "last_12_months":
             default:
                 fromD = today.minusMonths(11).withDayOfMonth(1); toD = today.plusDays(1); break;
@@ -50,10 +70,27 @@ public class LeadAnalyticsService {
         return r;
     }
 
-    public Map<String, Object> buildLeadAnalytics(String range) {
-        Map<String, Object> rr = resolveRange(range);
+    private static LocalDate parseDate(String s) {
+        if (s == null || s.isBlank()) return null;
+        try { return LocalDate.parse(s.trim()); } catch (Exception e) { return null; }
+    }
+
+    /** Bucket width for the time series, driven by the range (custom by span). */
+    private String granularityFor(String range, LocalDateTime from, LocalDateTime to) {
+        String r = range == null ? "last_12_months" : range;
+        if (r.equals("this_month") || r.equals("last_month")) return "daily";
+        if (r.equals("custom")) {
+            long days = ChronoUnit.DAYS.between(from.toLocalDate(), to.toLocalDate()); // to exclusive → span
+            return days <= 92 ? "weekly" : "monthly";
+        }
+        return "monthly"; // last_3_months, this_year, last_year, last_12_months
+    }
+
+    public Map<String, Object> buildLeadAnalytics(String range, String customFrom, String customTo) {
+        Map<String, Object> rr = resolveRange(range, customFrom, customTo);
         LocalDateTime from = (LocalDateTime) rr.get("from");
         LocalDateTime to   = (LocalDateTime) rr.get("to");
+        String granularity = granularityFor(range, from, to);
 
         long generated = repo.countGenerated(from, to);
         long won       = repo.countWon(from, to);
@@ -63,6 +100,7 @@ public class LeadAnalyticsService {
         out.put("range", range == null ? "last_12_months" : range);
         out.put("from", from.toLocalDate().toString());
         out.put("to", to.toLocalDate().minusDays(1).toString());
+        out.put("granularity", granularity);
 
         // Headline KPIs
         out.put("leadsGenerated", generated);
@@ -105,12 +143,13 @@ public class LeadAnalyticsService {
         out.put("byPriority", priorityRows);
         out.put("weightedConversionRate", weightedDen == 0 ? 0.0 : round1(weightedNum / weightedDen));
 
-        // Weighted conversion by GROUP (group_name): each group's conversion rate
-        // weighted by the number of leads in that group. This answers "where does
-        // our conversion really come from" across business lines (EPC, IoT, etc).
+        // Conversion by subgroup + the UNWEIGHTED average of each subgroup's rate.
+        // (Volume-weighting each subgroup rate by its own volume algebraically
+        // collapses to the global conversion rate — a no-op; the plain mean instead
+        // treats every subgroup equally, surfacing small-but-high/low converters.)
         List<Object[]> grp = repo.groupTotalsAndWon(from, to);
         List<Map<String, Object>> groupRows = new ArrayList<>();
-        double gNum = 0.0, gDen = 0.0;
+        double rateSum = 0.0; int rateCnt = 0;
         for (Object[] row : grp) {
             String label = String.valueOf(row[0]);
             long total = ((Number) row[1]).longValue();
@@ -122,11 +161,11 @@ public class LeadAnalyticsService {
             gr.put("won", w);
             gr.put("rate", round1(rate));
             groupRows.add(gr);
-            gNum += total * rate;
-            gDen += total;
+            rateSum += rate;
+            rateCnt++;
         }
         out.put("byGroup", groupRows);
-        out.put("weightedConversionByGroup", gDen == 0 ? 0.0 : round1(gNum / gDen));
+        out.put("weightedConversionByGroup", rateCnt == 0 ? 0.0 : round1(rateSum / rateCnt));
 
         // Per-employee handling
         List<Object[]> emp = repo.employeeHandling(from, to);
@@ -143,15 +182,16 @@ public class LeadAnalyticsService {
         }
         out.put("byEmployee", empRows);
 
-        // Monthly time series, zero-filled across the window so the line has no gaps
-        out.put("monthly", buildMonthly(repo.monthlySeries(from, to), from, to));
+        // Time series — Generated (by creation date) vs Won (by win date), bucketed
+        // by granularity and zero-filled across the window so there are no gaps.
+        out.put("series", buildSeries(from, to, granularity));
 
-        // Time-to-convert (days) from lead_history
-        List<Object[]> hrs = repo.hoursToConvertPerLead(from, to);
+        // Time-to-convert (days) from lead_history, minute precision
+        List<Object[]> mins = repo.minutesToConvertPerLead(from, to);
         List<Double> days = new ArrayList<>();
-        for (Object[] row : hrs) {
+        for (Object[] row : mins) {
             if (row[1] == null) continue;
-            double d = ((Number) row[1]).doubleValue() / 24.0;
+            double d = ((Number) row[1]).doubleValue() / 1440.0;
             if (d < 0) d = 0;          // guard against clock skew in history rows
             days.add(d);
         }
@@ -217,29 +257,79 @@ public class LeadAnalyticsService {
         return list;
     }
 
-    private List<Map<String, Object>> buildMonthly(List<Object[]> rows, LocalDateTime from, LocalDateTime to) {
-        Map<String, long[]> got = new HashMap<>();
-        for (Object[] r : rows) {
-            got.put(String.valueOf(r[0]), new long[]{
-                ((Number) r[1]).longValue(),
-                r[2] == null ? 0 : ((Number) r[2]).longValue()
-            });
-        }
+    private static final DateTimeFormatter LBL_DAY   = DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH);
+    private static final DateTimeFormatter LBL_MONTH = DateTimeFormatter.ofPattern("MMMM yyyy", Locale.ENGLISH);
+
+    /** Generated (by creation date) vs Won (by win date), bucketed by granularity
+     *  and zero-filled across [from, to). Days are aggregated in SQL and rolled up
+     *  here, so bucket keys/labels are fully controlled in Java. */
+    private List<Map<String, Object>> buildSeries(LocalDateTime from, LocalDateTime to, String granularity) {
+        Map<LocalDate, Long> gen = dailyMap(repo.dailyGenerated(from, to));
+        Map<LocalDate, Long> won = dailyMap(repo.dailyWonByWinDate(from, to));
+        LocalDate start = from.toLocalDate();
+        LocalDate endEx = to.toLocalDate();               // 'to' is exclusive (start of next day)
         List<Map<String, Object>> series = new ArrayList<>();
-        DateTimeFormatter f = DateTimeFormatter.ofPattern("yyyy-MM");
-        YearMonth cur = YearMonth.from(from);
-        YearMonth end = YearMonth.from(to.minusDays(1));
-        while (!cur.isAfter(end)) {
-            String key = cur.format(f);
-            long[] v = got.getOrDefault(key, new long[]{0, 0});
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("month", key);
-            m.put("generated", v[0]);
-            m.put("won", v[1]);
-            series.add(m);
-            cur = cur.plusMonths(1);
+
+        if ("daily".equals(granularity)) {
+            for (LocalDate d = start; d.isBefore(endEx); d = d.plusDays(1)) {
+                series.add(bucket(d.toString(), d.format(LBL_DAY),
+                        gen.getOrDefault(d, 0L), won.getOrDefault(d, 0L)));
+            }
+        } else if ("weekly".equals(granularity)) {
+            LocalDate ws = start.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
+            for (; ws.isBefore(endEx); ws = ws.plusWeeks(1)) {
+                LocalDate we = ws.plusWeeks(1);
+                series.add(bucket(ws.toString(), ws.format(LBL_DAY),
+                        sumRange(gen, ws, we), sumRange(won, ws, we)));
+            }
+        } else { // monthly
+            YearMonth cur = YearMonth.from(start);
+            YearMonth last = YearMonth.from(endEx.minusDays(1));
+            while (!cur.isAfter(last)) {
+                LocalDate ms = cur.atDay(1);
+                LocalDate me = cur.plusMonths(1).atDay(1);
+                series.add(bucket(cur.toString(), ms.format(LBL_MONTH),
+                        sumRange(gen, ms, me), sumRange(won, ms, me)));
+                cur = cur.plusMonths(1);
+            }
         }
         return series;
+    }
+
+    private static Map<String, Object> bucket(String key, String label, long generated, long won) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("bucket", key);
+        m.put("label", label);
+        m.put("generated", generated);
+        m.put("won", won);
+        return m;
+    }
+
+    private static Map<LocalDate, Long> dailyMap(List<Object[]> rows) {
+        Map<LocalDate, Long> m = new HashMap<>();
+        for (Object[] r : rows) {
+            if (r[0] == null) continue;
+            m.put(toLocalDate(r[0]), r[1] == null ? 0L : ((Number) r[1]).longValue());
+        }
+        return m;
+    }
+
+    /** Sum daily counts whose date falls in [s, e). */
+    private static long sumRange(Map<LocalDate, Long> m, LocalDate s, LocalDate e) {
+        long sum = 0;
+        for (Map.Entry<LocalDate, Long> en : m.entrySet()) {
+            LocalDate d = en.getKey();
+            if (!d.isBefore(s) && d.isBefore(e)) sum += en.getValue();
+        }
+        return sum;
+    }
+
+    private static LocalDate toLocalDate(Object o) {
+        if (o instanceof java.sql.Date) return ((java.sql.Date) o).toLocalDate();
+        if (o instanceof LocalDate) return (LocalDate) o;
+        if (o instanceof java.sql.Timestamp) return ((java.sql.Timestamp) o).toLocalDateTime().toLocalDate();
+        String s = o.toString();
+        return LocalDate.parse(s.length() >= 10 ? s.substring(0, 10) : s);
     }
 
     private static double pct(long num, long den) { return den == 0 ? 0.0 : round1(100.0 * num / den); }

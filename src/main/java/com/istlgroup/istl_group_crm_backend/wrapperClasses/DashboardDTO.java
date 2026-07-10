@@ -153,7 +153,7 @@ public class DashboardDTO {
         private BigDecimal  revenue;
         private long        followupsDone;
         private long        followupsPending;
-        private int         conversionRate;
+        private double      conversionRate;
     }
 
     @Data @Builder @NoArgsConstructor @AllArgsConstructor

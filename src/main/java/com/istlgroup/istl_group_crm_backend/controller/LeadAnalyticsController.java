@@ -16,17 +16,20 @@ public class LeadAnalyticsController {
 
     /**
      * Lead analytics for the dashboard.
-     * range: this_month | last_month | last_3_months | this_year | last_year | last_12_months
+     * range: this_month | last_month | last_3_months | this_year | last_year | last_12_months | custom
+     * For range=custom, pass from &amp; to as ISO dates (yyyy-MM-dd); the window is [from, to] inclusive.
      */
     @GetMapping("/leads")
     public ResponseEntity<Map<String, Object>> leadAnalytics(
             @RequestParam(value = "range", required = false, defaultValue = "last_12_months") String range,
+            @RequestParam(value = "from", required = false) String from,
+            @RequestParam(value = "to", required = false) String to,
             @RequestHeader(value = "User-Id", required = false) Long userId,
             @RequestHeader(value = "User-Role", required = false) String userRole) {
         try {
             Map<String, Object> resp = new HashMap<>();
             resp.put("success", true);
-            resp.put("data", analyticsService.buildLeadAnalytics(range));
+            resp.put("data", analyticsService.buildLeadAnalytics(range, from, to));
             return ResponseEntity.ok(resp);
         } catch (Exception e) {
             Map<String, Object> err = new HashMap<>();

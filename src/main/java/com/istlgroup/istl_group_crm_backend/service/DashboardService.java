@@ -356,7 +356,7 @@ public class DashboardService {
                 .revenue(toBD(r[7]))
                 .followupsDone(toLong(r[8]))
                 .followupsPending(toLong(r[9]))
-                .conversionRate(convRate(leadsWon, leadsHandled))
+                .conversionRate(convRate1(leadsWon, leadsHandled))
                 .build();
         }).collect(Collectors.toList());
     }
@@ -457,6 +457,13 @@ public class DashboardService {
     private int convRate(long won, long total) {
         if (total == 0) return 0;
         return (int) Math.round((won * 100.0) / total);
+    }
+
+    // 1-decimal conversion % for the Team Performance block, matching the
+    // Team Lead Performance page's round1(100 * won / handled).
+    private double convRate1(long won, long total) {
+        if (total == 0) return 0.0;
+        return Math.round((won * 100.0) / total * 10.0) / 10.0;
     }
 
     private BigDecimal safeRevenue(BigDecimal v) {

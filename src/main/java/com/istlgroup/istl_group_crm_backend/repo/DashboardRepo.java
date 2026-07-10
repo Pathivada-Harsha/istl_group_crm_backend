@@ -182,7 +182,9 @@ public interface DashboardRepo extends JpaRepository<LeadsEntity, Long> {
             u.id                                                     AS userId,
             u.name                                                   AS userName,
             u.role                                                   AS userRole,
-            COUNT(DISTINCT l.id)                                     AS leadsHandled,
+            (SELECT COUNT(DISTINCT lh.id) FROM leads lh
+                WHERE lh.deleted_at IS NULL
+                  AND (lh.assigned_to = u.id OR lh.closed_by_user_id = u.id)) AS leadsHandled,
             COUNT(DISTINCT CASE
                 WHEN LOWER(lw.status)='closed won' THEN lw.id END)  AS leadsWon,
             COUNT(DISTINCT CASE WHEN UPPER(l.telecaller_status)='INTERESTED'
@@ -376,7 +378,9 @@ public interface DashboardRepo extends JpaRepository<LeadsEntity, Long> {
     @Query(value = """
         SELECT
             u.id, u.name, u.role,
-            COUNT(DISTINCT l.id)                                            AS leadsHandled,
+            (SELECT COUNT(DISTINCT lh.id) FROM leads lh
+                WHERE lh.deleted_at IS NULL
+                  AND (lh.assigned_to = u.id OR lh.closed_by_user_id = u.id)) AS leadsHandled,
             COUNT(DISTINCT CASE
                 WHEN LOWER(lw.status)='closed won' THEN lw.id END)         AS leadsWon,
             COUNT(DISTINCT CASE WHEN UPPER(l.telecaller_status)='INTERESTED'

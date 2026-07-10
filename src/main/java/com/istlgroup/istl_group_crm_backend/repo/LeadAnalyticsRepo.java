@@ -17,21 +17,31 @@ public interface LeadAnalyticsRepo extends JpaRepository<LeadsEntity, Long> {
     // ── Per-subgroup: total + won (how many leads came to each subgroup and
     //    how many converted). Falls back to group_name only when subgroup blank.
     @Query(value = "SELECT COALESCE(NULLIF(TRIM(sub_group_name),''), NULLIF(TRIM(group_name),''), 'Unknown') AS label, " +
-            "COUNT(*) AS total, SUM(CASE WHEN status='Closed Won' THEN 1 ELSE 0 END) AS won " +
+            "COUNT(*) AS total, SUM(CASE WHEN LOWER(TRIM(status))='closed won' THEN 1 ELSE 0 END) AS won " +
             "FROM leads WHERE deleted_at IS NULL AND created_at >= :from AND created_at < :to " +
             "GROUP BY label ORDER BY total DESC", nativeQuery = true)
     List<Object[]> groupTotalsAndWon(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
 
-    // ── Per-employee handling: leads assigned, won, and conversion ────────────
+    // ── Per-employee handling: leads handled, won, and conversion ─────────────
+    //    Attribution matches the Team Lead Performance page (teamLeadBreakdown):
+    //      HANDLED = assigned_to = u.id OR closed_by_user_id = u.id (DISTINCT)
+    //      WON     = Closed Won; closer gets the win, assignee only when no closer
+    //    Kept date-bounded on created_at so the Analytics range selector applies
+    //    (equals Team Lead Performance at all-time, narrows for shorter ranges).
     @Query(value =
         "SELECT u.id, u.name, " +
-        "  COUNT(l.id) AS handled, " +
-        "  SUM(CASE WHEN l.status='Closed Won' THEN 1 ELSE 0 END) AS won " +
+        "  (SELECT COUNT(DISTINCT lh.id) FROM leads lh " +
+        "     WHERE lh.deleted_at IS NULL " +
+        "       AND lh.created_at >= :from AND lh.created_at < :to " +
+        "       AND (lh.assigned_to = u.id OR lh.closed_by_user_id = u.id)) AS handled, " +
+        "  (SELECT COUNT(DISTINCT lw.id) FROM leads lw " +
+        "     WHERE lw.deleted_at IS NULL " +
+        "       AND lw.created_at >= :from AND lw.created_at < :to " +
+        "       AND LOWER(TRIM(lw.status)) = 'closed won' " +
+        "       AND (lw.closed_by_user_id = u.id " +
+        "            OR (lw.closed_by_user_id IS NULL AND lw.assigned_to = u.id))) AS won " +
         "FROM users u " +
-        "JOIN leads l ON l.assigned_to = u.id AND l.deleted_at IS NULL " +
-        "  AND l.created_at >= :from AND l.created_at < :to " +
         "WHERE u.is_active = 1 " +
-        "GROUP BY u.id, u.name " +
         "HAVING handled > 0 " +
         "ORDER BY handled DESC LIMIT 12", nativeQuery = true)
     List<Object[]> employeeHandling(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
@@ -79,12 +89,12 @@ public interface LeadAnalyticsRepo extends JpaRepository<LeadsEntity, Long> {
 
     @Query(value = "SELECT COUNT(*) FROM leads " +
             "WHERE deleted_at IS NULL AND created_at >= :from AND created_at < :to " +
-            "AND status = 'Closed Won'", nativeQuery = true)
+            "AND LOWER(TRIM(status)) = 'closed won'", nativeQuery = true)
     long countWon(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
 
     @Query(value = "SELECT COUNT(*) FROM leads " +
             "WHERE deleted_at IS NULL AND created_at >= :from AND created_at < :to " +
-            "AND status IN ('Closed Won','Closed Lost')", nativeQuery = true)
+            "AND LOWER(TRIM(status)) IN ('closed won','closed lost')", nativeQuery = true)
     long countClosed(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
 
     // ── Breakdown by status (the funnel / distribution) ──────────────────────
@@ -101,21 +111,42 @@ public interface LeadAnalyticsRepo extends JpaRepository<LeadsEntity, Long> {
 
     // ── Per-priority: total + won (drives weighted conversion) ────────────────
     @Query(value = "SELECT COALESCE(NULLIF(TRIM(priority),''),'Unknown') AS label, " +
-            "COUNT(*) AS total, SUM(CASE WHEN status='Closed Won' THEN 1 ELSE 0 END) AS won " +
+            "COUNT(*) AS total, SUM(CASE WHEN LOWER(TRIM(status))='closed won' THEN 1 ELSE 0 END) AS won " +
             "FROM leads WHERE deleted_at IS NULL AND created_at >= :from AND created_at < :to " +
             "GROUP BY label", nativeQuery = true)
     List<Object[]> priorityTotalsAndWon(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
 
-    // ── Monthly time series: generated vs won, last 12 months from :to ────────
-    // Avoid DATE_FORMAT here: its '%Y-%m' literal collides with Spring's native
-    // parameter parsing. Build the 'YYYY-MM' bucket from YEAR()/MONTH() instead,
-    // which contains no percent signs.
-    @Query(value = "SELECT CONCAT(YEAR(created_at), '-', LPAD(MONTH(created_at), 2, '0')) AS ym, " +
-            "COUNT(*) AS gen_count, " +
-            "SUM(CASE WHEN status='Closed Won' THEN 1 ELSE 0 END) AS won_count " +
+    // ── Time series (daily grain). We aggregate per-DAY in SQL and let the
+    //    service roll the days up into day/week/month buckets — this avoids
+    //    fragile SQL-vs-Java bucket-key format matching and keeps label control
+    //    (month names, full year) entirely in Java.
+    //
+    //    GENERATED is keyed by created_at; WON is keyed by the date the lead
+    //    actually became Closed Won (see dailyWonByWinDate), so a lead created
+    //    in one bucket but won in another shows Generated and Won in the right
+    //    periods (rather than both in the creation bucket).
+
+    // Leads generated per day.
+    @Query(value = "SELECT DATE(created_at) AS d, COUNT(*) AS cnt " +
             "FROM leads WHERE deleted_at IS NULL AND created_at >= :from AND created_at < :to " +
-            "GROUP BY ym ORDER BY ym", nativeQuery = true)
-    List<Object[]> monthlySeries(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
+            "GROUP BY DATE(created_at)", nativeQuery = true)
+    List<Object[]> dailyGenerated(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
+
+    // Wins per day, keyed by WIN DATE. Win date = the FIRST Closed-Won transition
+    // in lead_history; if a Closed-Won lead has no such history row, fall back to
+    // its created_at. Only wins whose win date falls in [from, to) are counted.
+    @Query(value =
+        "SELECT DATE(win_date) AS d, COUNT(*) AS cnt FROM ( " +
+        "  SELECT l.id AS lid, " +
+        "    COALESCE(MIN(CASE WHEN (h.action_type='STATUS_CHANGED' AND h.new_value='Closed Won') " +
+        "                       OR h.action_type IN ('CONVERTED_TO_CUSTOMER','CONVERTED') " +
+        "                  THEN h.created_at END), l.created_at) AS win_date " +
+        "  FROM leads l LEFT JOIN lead_history h ON h.lead_id = l.id " +
+        "  WHERE l.deleted_at IS NULL AND LOWER(TRIM(l.status)) = 'closed won' " +
+        "  GROUP BY l.id, l.created_at " +
+        ") t WHERE t.win_date >= :from AND t.win_date < :to " +
+        "GROUP BY DATE(win_date)", nativeQuery = true)
+    List<Object[]> dailyWonByWinDate(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
 
     // ── Top states (geographic spread) ────────────────────────────────────────
     // ── Top states (geographic spread). Excludes leads with no state captured
@@ -128,18 +159,20 @@ public interface LeadAnalyticsRepo extends JpaRepository<LeadsEntity, Long> {
             "GROUP BY LOWER(TRIM(state)) ORDER BY cnt DESC LIMIT 8", nativeQuery = true)
     List<Object[]> countByState(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
 
-    // ── Time-to-convert: days between lead creation and the FIRST transition to
-    //    Closed Won, per lead, using lead_history. Leads created already-won
-    //    resolve to ~0 days. Only leads whose creation falls in the window count.
+    // ── Time-to-convert: minutes between lead creation and the FIRST transition
+    //    to Closed Won, per lead, using lead_history. Minute precision (÷1440 in
+    //    the service) so sub-hour conversions are not truncated to 0. Leads
+    //    created already-won resolve to ~0. Only leads whose creation falls in
+    //    the window count.
     @Query(value =
         "SELECT l.id, " +
-        "  TIMESTAMPDIFF(HOUR, l.created_at, MIN(h.created_at)) AS hours " +
+        "  TIMESTAMPDIFF(MINUTE, l.created_at, MIN(h.created_at)) AS minutes " +
         "FROM leads l " +
         "JOIN lead_history h ON h.lead_id = l.id " +
         "WHERE l.deleted_at IS NULL AND l.created_at >= :from AND l.created_at < :to " +
-        "  AND l.status = 'Closed Won' " +
+        "  AND LOWER(TRIM(l.status)) = 'closed won' " +
         "  AND ( (h.action_type = 'STATUS_CHANGED' AND h.new_value = 'Closed Won') " +
         "        OR h.action_type IN ('CONVERTED_TO_CUSTOMER','CONVERTED') ) " +
         "GROUP BY l.id, l.created_at", nativeQuery = true)
-    List<Object[]> hoursToConvertPerLead(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
+    List<Object[]> minutesToConvertPerLead(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
 }
