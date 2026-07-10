@@ -205,9 +205,10 @@ public class LoginService {
 	    // the client did not send forceLogin=true — the frontend then shows the
 	    // "Maximum Active Sessions Reached" dialog and retries with the flag.
 	    boolean forceLogin = "true".equalsIgnoreCase(credentials.get("forceLogin"));
+	    boolean logoutAllDevices = "true".equalsIgnoreCase(credentials.get("logoutAllDevices"));
 	    UserSessionEntity sessionRow;
 	    try {
-	        sessionRow = sessionRegistryService.registerLogin(response, request, credentials, forceLogin);
+	        sessionRow = sessionRegistryService.registerLogin(response, request, credentials, forceLogin, logoutAllDevices);
 	    } catch (SessionLimitException e) {
 	        // Do not leave a half-authenticated session behind on 409
 	        SecurityContextHolder.clearContext();
