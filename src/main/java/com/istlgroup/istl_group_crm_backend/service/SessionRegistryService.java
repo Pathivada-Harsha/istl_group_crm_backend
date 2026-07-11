@@ -89,6 +89,15 @@ public class SessionRegistryService {
                                            HttpServletRequest request,
                                            Map<String, String> clientContext,
                                            boolean forceLogin) {
+        return registerLogin(user, request, clientContext, forceLogin, false);
+    }
+
+    @Transactional
+    public UserSessionEntity registerLogin(LoginEntity user,
+                                           HttpServletRequest request,
+                                           Map<String, String> clientContext,
+                                           boolean forceLogin,
+                                           boolean logoutAllDevices) {
 
         LocalDateTime now = LocalDateTime.now(IST);
 
@@ -116,16 +125,25 @@ public class SessionRegistryService {
         }
 
         if (live.size() >= maxActiveSessions) {
-            if (!forceLogin) {
+            if (!forceLogin && !logoutAllDevices) {
                 List<ActiveSessionDto> dtos = live.stream().map(s -> toDto(s, null)).toList();
                 throw new SessionLimitException(
                         "Your account is already active on " + maxActiveSessions + " devices.", dtos);
             }
-            // User confirmed "Continue Login" → evict the OLDEST session
-            UserSessionEntity oldest = live.get(0); // query orders by loginAt ASC
-            closeSessionRow(oldest, UserSessionEntity.STATUS_EVICTED, "NEW_DEVICE_LOGIN", now);
-            invalidateCache(oldest.getSessionHash());
-            log.info("Evicted oldest session {} for user {} (new device login)", oldest.getId(), user.getId());
+            if (logoutAllDevices) {
+                // User chose "Logout from all devices" → close EVERY live session
+                for (UserSessionEntity s : live) {
+                    closeSessionRow(s, UserSessionEntity.STATUS_EVICTED, "USER_LOGOUT_ALL_ON_LOGIN", now);
+                    invalidateCache(s.getSessionHash());
+                }
+                log.info("Evicted ALL {} sessions for user {} (logout-all on new login)", live.size(), user.getId());
+            } else {
+                // User confirmed "Continue Login" → evict the OLDEST session
+                UserSessionEntity oldest = live.get(0); // query orders by loginAt ASC
+                closeSessionRow(oldest, UserSessionEntity.STATUS_EVICTED, "NEW_DEVICE_LOGIN", now);
+                invalidateCache(oldest.getSessionHash());
+                log.info("Evicted oldest session {} for user {} (new device login)", oldest.getId(), user.getId());
+            }
         }
 
         // ── Create the new registry row ──────────────────────────────────
