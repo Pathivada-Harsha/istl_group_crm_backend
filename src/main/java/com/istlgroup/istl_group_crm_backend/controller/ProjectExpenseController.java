@@ -58,6 +58,7 @@ public class ProjectExpenseController {
             @RequestParam(required = false) String dateFrom,
             @RequestParam(required = false) String dateTo,
             @RequestParam(required = false) String search,
+            @RequestParam(required = false, defaultValue = "false") boolean bdOnly,
             @RequestParam(required = false, defaultValue = "tripDate") String sortBy,
             @RequestParam(required = false, defaultValue = "desc")     String sortDir,
             @RequestParam(defaultValue = "0")  int page,
@@ -82,6 +83,7 @@ public class ProjectExpenseController {
         filter.setStatus(nullIfAll(status));
         filter.setPaymentMode(nullIfAll(paymentMode));
         filter.setSearch(nullIfBlank(search));
+        filter.setBdOnly(bdOnly);
         filter.setSortBy(sortBy);
         filter.setSortDir(sortDir);
         filter.setPage(page);

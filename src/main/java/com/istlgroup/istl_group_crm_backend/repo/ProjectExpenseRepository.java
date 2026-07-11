@@ -66,6 +66,7 @@ public interface ProjectExpenseRepository extends JpaRepository<ProjectExpense, 
         SELECT DISTINCT e FROM ProjectExpense e
         LEFT JOIN e.expenseItems i
         WHERE e.isDeleted = false
+          AND (:bdOnly = FALSE OR e.projectId IS NULL)
           AND (:groupName    IS NULL OR e.groupName    = :groupName)
           AND (:subGroupName IS NULL OR e.subGroupName = :subGroupName)
           AND (:projectId    IS NULL OR e.projectId    = :projectId)
@@ -97,6 +98,7 @@ public interface ProjectExpenseRepository extends JpaRepository<ProjectExpense, 
         @Param("search")        String    search,
         @Param("viewerUserId")  Long      viewerUserId,
         @Param("teamMemberIds") List<Long> teamMemberIds,
+        @Param("bdOnly")        boolean   bdOnly,
         Pageable pageable
     );
 
@@ -108,7 +110,10 @@ public interface ProjectExpenseRepository extends JpaRepository<ProjectExpense, 
         SELECT DISTINCT e FROM ProjectExpense e
         LEFT JOIN e.expenseItems i
         WHERE e.isDeleted = false
-          AND e.projectId IN :projectIds
+          AND ( e.projectId IN :projectIds
+                OR (e.projectId IS NULL
+                    AND (e.createdBy = :viewerUserId OR e.paidByUserId = :viewerUserId)) )
+          AND (:bdOnly = FALSE OR e.projectId IS NULL)
           AND (:groupName    IS NULL OR e.groupName    = :groupName)
           AND (:subGroupName IS NULL OR e.subGroupName = :subGroupName)
           AND (:status       IS NULL OR e.status       = :status)
@@ -124,6 +129,7 @@ public interface ProjectExpenseRepository extends JpaRepository<ProjectExpense, 
     """)
     Page<ProjectExpense> findWithFiltersAndVisibilityByProjects(
         @Param("projectIds")    List<String> projectIds,
+        @Param("viewerUserId")  Long      viewerUserId,
         @Param("groupName")     String    groupName,
         @Param("subGroupName")  String    subGroupName,
         @Param("category")      String    category,
@@ -132,8 +138,18 @@ public interface ProjectExpenseRepository extends JpaRepository<ProjectExpense, 
         @Param("dateFrom")      LocalDate dateFrom,
         @Param("dateTo")        LocalDate dateTo,
         @Param("search")        String    search,
+        @Param("bdOnly")        boolean   bdOnly,
         Pageable pageable
     );
+
+    // Total Business Development (project-less) expenses. viewerUserId null → all
+    // (admin); otherwise scoped to the viewer's own created/paid-by BD rows.
+    @Query("""
+        SELECT SUM(e.totalAmount) FROM ProjectExpense e
+        WHERE e.isDeleted=false AND e.projectId IS NULL
+          AND (:viewerUserId IS NULL OR e.createdBy=:viewerUserId OR e.paidByUserId=:viewerUserId)
+    """)
+    BigDecimal sumBusinessDevelopment(@Param("viewerUserId") Long viewerUserId);
 
     // ─── Project-level aggregates (use totalAmount on parent) ─────────────────
     @Query("SELECT SUM(e.totalAmount) FROM ProjectExpense e WHERE e.projectId=:pid AND e.status='Approved' AND e.isDeleted=false")

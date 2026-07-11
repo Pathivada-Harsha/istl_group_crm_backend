@@ -19,6 +19,8 @@ public class ProjectExpenseStatsResponse {
     private BigDecimal approvedThisMonth;
     private BigDecimal totalAdvances;
     private BigDecimal unsettledAdvances;
+    // Total Business Development (project-less) expenses visible to the caller.
+    private BigDecimal businessDevelopment;
 
     // Per-user breakdown
     private List<UserExpenseSummary> userBreakdown;
