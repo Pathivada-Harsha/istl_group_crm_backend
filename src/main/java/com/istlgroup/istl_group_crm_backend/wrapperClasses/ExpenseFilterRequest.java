@@ -18,6 +18,8 @@ public class ExpenseFilterRequest {
     private LocalDate dateFrom;
     private LocalDate dateTo;
     private String    search;
+    /** true → only Business Development (project-less, project_id IS NULL) expenses. */
+    private boolean   bdOnly;
 
     // ── Sorting ───────────────────────────────────────────────────────────────
     private String    sortBy  = "tripDate";

@@ -44,6 +44,14 @@ public class ProjectExpenseService {
     private static final List<String> ALLOWED_BILL_TYPES = Arrays.asList(
         "application/pdf", "image/jpeg", "image/jpg", "image/png", "image/webp");
 
+    // Business Development / site-visit expenses have NO project → project_id is
+    // stored as NULL (the FK to projects allows NULL). The history table's
+    // project_id is NOT NULL with no FK, so BD history rows use this label.
+    private static final String BD_MARKER = "BD";
+
+    // History project_id is NOT NULL — substitute the BD label for project-less rows.
+    private static String histProjectId(String pid) { return pid != null ? pid : BD_MARKER; }
+
     // =========================================================================
     // EXPENSE CRUD
     // =========================================================================
@@ -148,7 +156,7 @@ public class ProjectExpenseService {
         // cycle with no @JsonIgnore, so serializing `saved` causes Jackson to
         // recurse infinitely: expense->items->expense->items->... (depth 1001).
         logHistory(ProjectExpenseHistory.ReferenceType.EXPENSE, saved.getId(),
-            saved.getProjectId(), "CREATED", userId, userName,
+            histProjectId(saved.getProjectId()), "CREATED", userId, userName,
             null, saved.getStatus(), null, saved.getTotalAmount(),
             "Expense created: " + code + " — submitted for approval", code);
 
@@ -176,6 +184,7 @@ public class ProjectExpenseService {
             // Non-admin with project grants — scope to those projects
             page = expenseRepo.findWithFiltersAndVisibilityByProjects(
                 accessibleProjectIds,
+                filter.getViewerUserId(),   // also surfaces the viewer's own BD (project-less) rows
                 blankToNull(filter.getGroupName()),
                 blankToNull(filter.getSubGroupName()),
                 nullIfAll(filter.getCategory()),
@@ -184,6 +193,7 @@ public class ProjectExpenseService {
                 filter.getDateFrom(),
                 filter.getDateTo(),
                 blankToNull(filter.getSearch()),
+                filter.isBdOnly(),
                 pageable
             );
         } else {
@@ -203,6 +213,7 @@ public class ProjectExpenseService {
                 blankToNull(filter.getSearch()),
                 viewerUserId,
                 effectiveTeam,
+                filter.isBdOnly(),
                 pageable
             );
         }
@@ -223,7 +234,9 @@ public class ProjectExpenseService {
         List<String> projectIds = projectAccessService.getAccessibleProjectIds(userId, userRole);
         if (projectIds != null && !projectIds.isEmpty()) {
             filter.setAccessibleProjectIds(projectIds);
-            filter.setViewerUserId(null);
+            // Keep the viewer id so project-scoped users still see their OWN
+            // Business Development (project-less) expenses via the BD marker.
+            filter.setViewerUserId(userId);
             filter.setTeamMemberIds(null);
         } else {
             // No project grants at all — fall back to own records (createdBy = userId)
@@ -284,15 +297,16 @@ public class ProjectExpenseService {
         }
 
         ProjectExpense saved = expenseRepo.save(expense);
+        boolean projectChanged = !java.util.Objects.equals(saved.getProjectId(), oldProjectId);
         logHistory(ProjectExpenseHistory.ReferenceType.EXPENSE, saved.getId(),
-            saved.getProjectId(), "UPDATED", userId, userName,
+            histProjectId(saved.getProjectId()), "UPDATED", userId, userName,
             oldStatus, saved.getStatus(), oldAmount, saved.getTotalAmount(),
-            "Expense updated" + (!saved.getProjectId().equals(oldProjectId)
+            "Expense updated" + (projectChanged
                 ? " (project changed from " + oldProjectId + " to " + saved.getProjectId() + ")" : ""),
             saved);
 
         updateProjectExpenseStats(saved.getProjectId());
-        if (!saved.getProjectId().equals(oldProjectId)) {
+        if (projectChanged) {
             updateProjectExpenseStats(oldProjectId);
         }
         return toExpenseResponse(saved);
@@ -747,6 +761,7 @@ public class ProjectExpenseService {
             .approvedThisMonth(approvedMonth)
             .totalAdvances(totalAdv)
             .unsettledAdvances(unsettledAdv)
+            .businessDevelopment(BigDecimal.ZERO)  // per-project view: BD is not a project cost
             .userBreakdown(userBreakdown)
             .categoryBreakdown(categoryBreakdown)
             .build();
@@ -855,6 +870,8 @@ public class ProjectExpenseService {
 
         BigDecimal totalExpenses = approved.add(pending);
         BigDecimal advances = safe(expenseRepo.sumAllAdvances(gn, sgn));
+        // BD total: null viewer (admin) → all BD; otherwise the viewer's own BD.
+        BigDecimal bd = safe(expenseRepo.sumBusinessDevelopment(viewerUserId));
 
         return ProjectExpenseStatsResponse.builder()
             .totalExpenses(totalExpenses)
@@ -864,6 +881,7 @@ public class ProjectExpenseService {
             .travelAndSiteVisit(travelSite)
             .totalCommission(commission)
             .totalAdvances(advances)
+            .businessDevelopment(bd)
             .build();
     }
 
@@ -895,6 +913,7 @@ public class ProjectExpenseService {
             .travelAndSiteVisit(BigDecimal.ZERO)
             .totalCommission(BigDecimal.ZERO)
             .totalAdvances(BigDecimal.ZERO)
+            .businessDevelopment(BigDecimal.ZERO)
             .build();
     }
 
@@ -949,6 +968,9 @@ public class ProjectExpenseService {
     // =========================================================================
 
     private void updateProjectExpenseStats(String projectId) {
+        // Business Development (project-less) expenses aren't a project cost —
+        // there's no project row to roll them up into, so skip.
+        if (projectId == null || BD_MARKER.equals(projectId)) return;
         try {
             BigDecimal approved     = safe(expenseRepo.sumApprovedByProject(projectId));
             Long       pendingCnt   = expenseRepo.countPending(projectId);
