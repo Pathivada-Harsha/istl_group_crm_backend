@@ -19,13 +19,17 @@ public interface UsersRepo extends JpaRepository<UsersEntity, Long> {
     @Query("SELECT c FROM UsersEntity c WHERE c.user_id = :userid")
     UsersEntity isUserIdExist(@Param("userid") String userid);
 
-    // Duplicate-email check that excludes the user being edited
-    @Query("SELECT u FROM UsersEntity u WHERE LOWER(u.email) = LOWER(:email) AND u.id <> :excludeId")
-    Optional<UsersEntity> findByEmailExcludingId(@Param("email") String email, @Param("excludeId") Long excludeId);
+    // Duplicate-email check that excludes the user being edited.
+    // COUNT-based (returns boolean) — an Optional<UsersEntity> here throws
+    // NonUniqueResultException ("2 results were returned") the moment the DB
+    // already contains duplicate emails, crashing the very check meant to
+    // catch them. A count can never throw, whatever state the data is in.
+    @Query("SELECT COUNT(u) > 0 FROM UsersEntity u WHERE LOWER(u.email) = LOWER(:email) AND u.id <> :excludeId")
+    boolean existsByEmailExcludingId(@Param("email") String email, @Param("excludeId") Long excludeId);
 
-    // Duplicate-phone check that excludes the user being edited
-    @Query("SELECT u FROM UsersEntity u WHERE u.phone = :phone AND u.id <> :excludeId")
-    Optional<UsersEntity> findByPhoneExcludingId(@Param("phone") String phone, @Param("excludeId") Long excludeId);
+    // Duplicate-phone check that excludes the user being edited (same reason)
+    @Query("SELECT COUNT(u) > 0 FROM UsersEntity u WHERE u.phone = :phone AND u.id <> :excludeId")
+    boolean existsByPhoneExcludingId(@Param("phone") String phone, @Param("excludeId") Long excludeId);
 
     @Query("SELECT DISTINCT u.role FROM UsersEntity u ORDER BY u.role")
     List<String> findDistinctRoles();

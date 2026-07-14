@@ -89,7 +89,16 @@ public class SessionFilter implements Filter {
         // A null status means the session predates this module — allowed.
         String registryStatus = sessionRegistryService.statusOf(session.getId());
         if (registryStatus != null && !UserSessionEntity.STATUS_ACTIVE.equals(registryStatus)) {
-            session.invalidate();
+            // Parallel requests from the same browser can race here: both see the
+            // EVICTED/ADMIN_TERMINATED status, and whichever thread loses the race
+            // calls invalidate() on an already-invalidated session, which makes
+            // Tomcat throw IllegalStateException. The losing thread should still
+            // return the same 401 JSON below, so we just swallow the exception.
+            try {
+                session.invalidate();
+            } catch (IllegalStateException ignored) {
+                // Session was already invalidated by a concurrent request — fine.
+            }
             res.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
             res.setContentType("application/json");
             res.setCharacterEncoding("UTF-8");

@@ -68,7 +68,7 @@ public class UsersService {
         // toast instead of a generic error (previously the DB unique
         // constraint blew up into a 500).
         if (newData.getEmail() != null
-                && usersRepo.findByEmailExcludingId(newData.getEmail().trim(), id).isPresent()) {
+                && usersRepo.existsByEmailExcludingId(newData.getEmail().trim(), id)) {
             return ResponseEntity.status(HttpStatus.CONFLICT)
                     .body("Email already exists. Please use a different email.");
         }
@@ -81,7 +81,7 @@ public class UsersService {
         }
 
         // Duplicate phone → 409 CONFLICT (warning on frontend), same as email
-        if (usersRepo.findByPhoneExcludingId(phone, id).isPresent()) {
+        if (usersRepo.existsByPhoneExcludingId(phone, id)) {
             return ResponseEntity.status(HttpStatus.CONFLICT)
                     .body("Mobile number already exists. Please use a different mobile number.");
         }
@@ -239,7 +239,7 @@ public class UsersService {
 	    // ---------------- DUPLICATE EMAIL → 409 (warning on frontend) ----------------
 	    // Previously the DB unique constraint threw a raw SQL exception
 	    // ("Duplicate entry ... for key 'users.email'") that leaked to the UI.
-	    if (usersRepo.findByEmailExcludingId(user.getEmail().trim(), -1L).isPresent()) {
+	    if (usersRepo.existsByEmailExcludingId(user.getEmail().trim(), -1L)) {
 	        return ResponseEntity.status(HttpStatus.CONFLICT)
 	                .body("Email already exists. Please use a different email.");
 	    }
@@ -253,7 +253,7 @@ public class UsersService {
 	    user.setPhone(cleanPhone);
 
 	    // ---------------- DUPLICATE PHONE → 409 (warning on frontend) ----------------
-	    if (usersRepo.findByPhoneExcludingId(cleanPhone, -1L).isPresent()) {
+	    if (usersRepo.existsByPhoneExcludingId(cleanPhone, -1L)) {
 	        return ResponseEntity.status(HttpStatus.CONFLICT)
 	                .body("Mobile number already exists. Please use a different mobile number.");
 	    }
