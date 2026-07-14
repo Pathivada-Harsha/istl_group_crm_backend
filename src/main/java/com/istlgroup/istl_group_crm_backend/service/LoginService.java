@@ -110,7 +110,8 @@ public class LoginService {
 	        sessionRegistryService.recordFailedLogin(username, null,
 	                com.istlgroup.istl_group_crm_backend.entity.LoginHistoryBase.STATUS_FAILED_USER_NOT_FOUND,
 	                "Username not found", request, credentials);
-	        throw new CustomException("Invalid Credentials");
+	        // Specific message: the username itself doesn't exist
+	        throw new CustomException("Username is wrong. No account found with this username.");
 	    }
 
 	    // 🔹 STEP 2: Password Validation (Supports Plain + BCrypt)
@@ -134,7 +135,8 @@ public class LoginService {
 	        sessionRegistryService.recordFailedLogin(username, response,
 	                com.istlgroup.istl_group_crm_backend.entity.LoginHistoryBase.STATUS_FAILED_INVALID_PASSWORD,
 	                "Invalid password", request, credentials);
-	        throw new CustomException("Invalid Credentials");
+	        // Specific message: username exists but the password didn't match
+	        throw new CustomException("Password is wrong. Please check your password and try again.");
 	    }
 
 	    // 🔹 STEP 3: Get Creator Details (needed for inactive message)
