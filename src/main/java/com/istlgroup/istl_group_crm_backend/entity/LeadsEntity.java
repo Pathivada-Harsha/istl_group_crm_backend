@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.entity;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 import jakarta.persistence.Column;
@@ -244,4 +245,8 @@ public class LeadsEntity {
 	    protected void onUpdate() {
 	        this.updatedAt = LocalDateTime.now();
 	    }
+
+    // Proposed selling price used by the Budget Estimation feature.
+    @Column(name = "proposed_selling_price")
+    private BigDecimal proposedSellingPrice;
 }

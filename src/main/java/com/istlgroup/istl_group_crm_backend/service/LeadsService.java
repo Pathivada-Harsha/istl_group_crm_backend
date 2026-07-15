@@ -26,11 +26,17 @@ import com.istlgroup.istl_group_crm_backend.repo.LeadAccessRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadsRepo;
 import com.istlgroup.istl_group_crm_backend.repo.TeamRepository;
 import com.istlgroup.istl_group_crm_backend.repo.UsersRepo;
+import com.istlgroup.istl_group_crm_backend.constants.LeadStatusRank;
 import com.istlgroup.istl_group_crm_backend.constants.NotificationConstants.Module;
 import com.istlgroup.istl_group_crm_backend.constants.NotificationConstants.Type;
 
 @Service
 public class LeadsService {
+
+    // ── Lead funnel ranking lives in constants/LeadStatusRank — shared with
+    //    TelecallerLeadService and mirrored by src/constants/leadStatus.js on the
+    //    frontend. See that class for why "Keep in View" / "Closed Lost" are
+    //    deliberately unranked and why "Not Interested" is ranked.
 
     @Autowired
     private LeadsRepo leadsRepo;
@@ -636,6 +642,23 @@ public class LeadsService {
         String oldPriority  = lead.getPriority();
         String oldSource    = lead.getSource();
 
+        // ── Downgrade guard — moving a lead BACKWARD in the funnel is allowed, but
+        //    only with a reason. Applies to every user (no admin bypass). Negative
+        //    exits ("Not Interested" / "Closed Lost") are unranked, so they never
+        //    reach here and keep their own reason requirements above. ─────────────
+        boolean isStatusDowngrade =
+                requestWrapper.getStatus() != null
+                && !requestWrapper.getStatus().equalsIgnoreCase(oldStatus)
+                && LeadStatusRank.isDowngrade(oldStatus, requestWrapper.getStatus());
+
+        if (isStatusDowngrade
+                && (requestWrapper.getStatusDowngradeReason() == null
+                    || requestWrapper.getStatusDowngradeReason().trim().isEmpty())) {
+            throw new CustomException(
+                "Moving this lead back from \"" + oldStatus + "\" to \"" + requestWrapper.getStatus()
+                + "\" requires a reason. Please provide one.");
+        }
+
         if (requestWrapper.getCustomerId()   != null) lead.setCustomerId(requestWrapper.getCustomerId());
         if (requestWrapper.getName()         != null) lead.setName(requestWrapper.getName());
         if (requestWrapper.getEmail()        != null) lead.setEmail(requestWrapper.getEmail());
@@ -751,6 +774,23 @@ public class LeadsService {
                 );
             } catch (Exception e) {
                 System.err.println("Failed to add history: " + e.getMessage());
+            }
+        }
+
+        if (isStatusDowngrade
+                && requestWrapper.getStatusDowngradeReason() != null
+                && !requestWrapper.getStatusDowngradeReason().trim().isEmpty()) {
+            String downgradeReason = requestWrapper.getStatusDowngradeReason().trim();
+            try {
+                leadHistoryService.addHistory(
+                    leadId, "STATUS_DOWNGRADE_REASON", "status",
+                    oldStatus, requestWrapper.getStatus(),
+                    "Reason for moving back from " + oldStatus + " to "
+                        + requestWrapper.getStatus() + ": " + downgradeReason,
+                    userId
+                );
+            } catch (Exception e) {
+                System.err.println("Failed to add status-downgrade-reason history: " + e.getMessage());
             }
         }
 

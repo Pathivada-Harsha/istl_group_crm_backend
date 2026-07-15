@@ -23,6 +23,12 @@ public class LeadRequestWrapper {
     //    telecallers must give via /telecaller/lead/{id}/status. ───────────────
     private String notInterestedReason;
 
+    // ── Reason required when a lead is moved BACKWARD in the funnel (a
+    //    "downgrade", e.g. Proposal Sent → Interested). Enforced in
+    //    LeadsService.updateLead and recorded in lead history. Negative exits
+    //    ("Not Interested" / "Closed Lost") keep their own reason fields above. ──
+    private String statusDowngradeReason;
+
     // ── Closed Won attribution ────────────────────────────────────────────────
     private Long   closedByUserId;
     private String closedByName;

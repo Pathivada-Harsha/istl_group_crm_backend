@@ -28,12 +28,18 @@ public class DropdownProjectController {
     public ResponseEntity<List<Map<String, Object>>> getAllProjects(
             @RequestParam(required = false) String search,
             @RequestParam(required = false) String groupId,
-            @RequestParam(required = false) String subGroupName) {
+            @RequestParam(required = false) String subGroupName,
+            @RequestParam(required = false) String status) {
 
         List<Map<String, Object>> all = filterService.getAllActiveProjects();
 
         return ResponseEntity.ok(all.stream()
             .filter(p -> {
+                // Status filter — case-insensitive exact match on project status
+                if (status != null && !status.isBlank()) {
+                    String st = String.valueOf(p.getOrDefault("status", ""));
+                    if (!status.equalsIgnoreCase(st)) return false;
+                }
                 // Search filter — checks projectName and projectUniqueId
                 if (search != null && !search.isBlank()) {
                     String q    = search.toLowerCase();
@@ -41,10 +47,14 @@ public class DropdownProjectController {
                     String id   = String.valueOf(p.getOrDefault("projectUniqueId", "")).toLowerCase();
                     if (!name.contains(q) && !id.contains(q)) return false;
                 }
-                // Group filter
+                // Group filter — match either the raw group_id or the resolved
+                // group name, so callers passing a group name (Projects list
+                // dropdown) and callers passing a raw id (access/task dropdowns)
+                // both work.
                 if (groupId != null && !groupId.isBlank()) {
-                    String g = String.valueOf(p.getOrDefault("groupId", ""));
-                    if (!groupId.equals(g)) return false;
+                    String g  = String.valueOf(p.getOrDefault("groupId", ""));
+                    String gn = String.valueOf(p.getOrDefault("groupName", ""));
+                    if (!groupId.equals(g) && !groupId.equalsIgnoreCase(gn)) return false;
                 }
                 // SubGroup filter
                 if (subGroupName != null && !subGroupName.isBlank()) {

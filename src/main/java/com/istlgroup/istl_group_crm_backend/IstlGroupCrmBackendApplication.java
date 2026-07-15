@@ -15,4 +15,4 @@ public class IstlGroupCrmBackendApplication {
 		SpringApplication.run(IstlGroupCrmBackendApplication.class, args);
 	}
 
-}
+} 

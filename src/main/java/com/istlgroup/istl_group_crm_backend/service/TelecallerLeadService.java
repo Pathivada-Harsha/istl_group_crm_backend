@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
+import com.istlgroup.istl_group_crm_backend.constants.LeadStatusRank;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.LeadAccessEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
@@ -38,6 +39,22 @@ public class TelecallerLeadService {
     // update these and leads at these stages are hidden from the telecaller board.
     private static final List<String> BD_OWNED_STATUSES =
             Arrays.asList("Contacted", "In Discussion", "Proposal Sent", "Closed Won", "Closed Lost");
+
+    /**
+     * Maps an UPPER_SNAKE telecaller status onto the main leads.status value.
+     * Callers must validate against VALID_STATUSES first.
+     */
+    private static String toMainStatus(String telecallerStatus) {
+        return switch (telecallerStatus) {
+            case "NEW"            -> "New";
+            case "INTERESTED"     -> "Interested";
+            case "NOT_RESPONDED"  -> "Not Responded";
+            case "KEEP_IN_VIEW"   -> "Keep in View";
+            case "NOT_INTERESTED" -> "Not Interested";
+            default -> throw new IllegalStateException(
+                    "Unmapped telecaller status: " + telecallerStatus);
+        };
+    }
 
     private static final DateTimeFormatter FMT =
             DateTimeFormatter.ofPattern("dd-MM-yyyy HH:mm");
@@ -246,14 +263,32 @@ public class TelecallerLeadService {
 
         String oldStatus = lead.getTelecallerStatus();
 
+        // ── Downgrade guard — moving a lead BACKWARD in the funnel is allowed, but
+        //    only with a reason. The TC status values are UPPER_SNAKE, so compare
+        //    the MAIN statuses: the lead may sit at a main stage (e.g. "Prospect")
+        //    that has no telecaller_status equivalent.
+        //
+        //    The telecaller modal has a single `reason` textarea (already mandatory
+        //    for NOT_INTERESTED), so that field doubles as the downgrade reason —
+        //    deliberately NOT a second prompt.
+        //
+        //    Unranked holds/exits ("Keep in View", "Closed Lost") never reach here.
+        String oldMainStatus = lead.getStatus();
+        String newMainStatus = toMainStatus(newStatus);
+
+        boolean isStatusDowngrade =
+                LeadStatusRank.isDowngrade(oldMainStatus, newMainStatus);
+        String downgradeReason =
+                (req.getReason() == null || req.getReason().isBlank())
+                        ? null : req.getReason().trim();
+
+        if (isStatusDowngrade && downgradeReason == null)
+            throw new CustomException(
+                "Moving this lead back from \"" + oldMainStatus + "\" to \"" + newMainStatus
+                + "\" requires a reason. Please provide one.");
+
         // Write the status directly to the main leads.status column (single status)
-        switch (newStatus) {
-            case "NEW"            -> lead.setStatus("New");
-            case "INTERESTED"     -> lead.setStatus("Interested");
-            case "NOT_RESPONDED"  -> lead.setStatus("Not Responded");
-            case "KEEP_IN_VIEW"   -> lead.setStatus("Keep in View");
-            case "NOT_INTERESTED" -> lead.setStatus("Not Interested");
-        }
+        lead.setStatus(newMainStatus);
         // Mirror to telecaller_status for audit/history continuity
         lead.setTelecallerStatus(newStatus);
         lead.setTelecallerStatusUpdatedAt(LocalDateTime.now());
@@ -391,6 +426,20 @@ public class TelecallerLeadService {
                 description, userId);
         } catch (Exception e) {
             log.warn("History save failed for lead {}: {}", leadId, e.getMessage());
+        }
+
+        // Mirrors LeadsService — record WHY the lead was moved back in the funnel.
+        if (isStatusDowngrade && downgradeReason != null) {
+            try {
+                leadHistoryService.addHistory(
+                    leadId, "STATUS_DOWNGRADE_REASON", "status",
+                    oldMainStatus, newMainStatus,
+                    "Reason for moving back from " + oldMainStatus + " to "
+                        + newMainStatus + ": " + downgradeReason,
+                    userId);
+            } catch (Exception e) {
+                log.warn("Status-downgrade-reason history save failed for lead {}: {}", leadId, e.getMessage());
+            }
         }
     }
 

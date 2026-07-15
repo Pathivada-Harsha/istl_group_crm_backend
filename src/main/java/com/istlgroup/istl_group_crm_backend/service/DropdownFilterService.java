@@ -6,6 +6,8 @@ import com.istlgroup.istl_group_crm_backend.wrapperClasses.DropdownSubGroupWrapp
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadsUserWrapper;
 import com.istlgroup.istl_group_crm_backend.entity.DropdownProjectEntity;
 import com.istlgroup.istl_group_crm_backend.entity.UsersEntity;
+import com.istlgroup.istl_group_crm_backend.entity.CustomersEntity;
+import com.istlgroup.istl_group_crm_backend.repo.CustomersRepo;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownGroupRepository;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownProjectRepository;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownSubGroupRepository;
@@ -33,6 +35,7 @@ public class DropdownFilterService {
     private final DropdownGroupRepository groupRepository;
     private final DropdownSubGroupRepository subGroupRepository;
     private final DropdownProjectRepository projectRepository;
+    private final CustomersRepo customersRepo;
     private final RoleHierarchyService roleHierarchyService;
 
     public List<DropdownGroupWrapper> getAllGroups() {
@@ -66,15 +69,39 @@ public class DropdownFilterService {
             .sorted(Comparator.comparing(p -> p.getProjectName() != null ? p.getProjectName() : ""))
             .map(p -> {
                 Map<String, Object> m = new LinkedHashMap<>();
-                m.put("projectUniqueId", p.getProjectUniqueId());
-                m.put("projectName",     p.getProjectName());
-                m.put("status",          p.getStatus() != null ? p.getStatus().name() : null);
-                m.put("location",        p.getLocation());
-                m.put("groupId",         p.getGroup_id());
-                m.put("subGroupName",    p.getSubGroupName());
+                m.put("projectUniqueId",     p.getProjectUniqueId());
+                m.put("projectName",         p.getProjectName());
+                m.put("status",              p.getStatus() != null ? p.getStatus().name() : null);
+                m.put("location",            p.getLocation());
+                m.put("groupId",             p.getGroup_id());
+                m.put("groupName",           resolveGroupName(p));
+                m.put("subGroupName",        p.getSubGroupName());
+                m.put("customerId",          p.getCustomerCode());
+                m.put("customerName",        resolveCustomerName(p.getCustomerCode()));
+                m.put("budget",              p.getBudget());
+                m.put("progressPercentage",  p.getProgressPercentage());
+                m.put("startDate",           p.getStartDate());
+                m.put("endDate",             p.getEndDate());
                 return m;
             })
             .collect(Collectors.toList());
+    }
+
+    /** Group name via the subGroup → group relation (both EAGER); null-safe. */
+    private String resolveGroupName(DropdownProjectEntity p) {
+        if (p.getSubGroup() != null && p.getSubGroup().getGroup() != null) {
+            return p.getSubGroup().getGroup().getGroupName();
+        }
+        return null;
+    }
+
+    /** Customer display name (company name, falling back to name) by customer code; null-safe. */
+    private String resolveCustomerName(String customerCode) {
+        if (customerCode == null || customerCode.isBlank()) return null;
+        CustomersEntity c = customersRepo.findByCustomerCode(customerCode);
+        if (c == null) return null;
+        return c.getCompanyName() != null && !c.getCompanyName().isBlank()
+            ? c.getCompanyName() : c.getName();
     }
 
     /**
