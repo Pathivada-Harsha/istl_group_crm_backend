@@ -11,10 +11,14 @@ import org.springframework.web.bind.annotation.*;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.service.LeadScopeService;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.BomSaveRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.BudgetCategoryRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.BudgetItemRequest;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.ExtrasSaveRequest;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.MarginRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.ScopeHeaderRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.ScopeItemRequest;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.ScopeItemsBulkRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.SellingPriceRequest;
 
 /**
@@ -67,6 +71,25 @@ public class LeadScopeController {
             return error(HttpStatus.BAD_REQUEST, e.getMessage());
         } catch (Exception e) {
             return error(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to save scope item: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Whole-list replace of the lead's scope lines — what the Technical Scope tab
+     * saves with. The per-item POST/DELETE below remain for older callers.
+     */
+    @PutMapping("/{leadId}/scope/items")
+    public ResponseEntity<Map<String, Object>> saveScopeItems(
+            @PathVariable Long leadId,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @RequestBody ScopeItemsBulkRequest body) {
+        try {
+            return ok(leadScopeService.saveScopeItems(leadId, body, userId, userRole));
+        } catch (CustomException e) {
+            return error(HttpStatus.BAD_REQUEST, e.getMessage());
+        } catch (Exception e) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to save scope items: " + e.getMessage());
         }
     }
 
@@ -166,6 +189,87 @@ public class LeadScopeController {
         }
     }
 
+    // ── BOM ──────────────────────────────────────────────────────────────────
+
+    @GetMapping("/{leadId}/bom")
+    public ResponseEntity<Map<String, Object>> getBom(@PathVariable Long leadId) {
+        try {
+            return ok(leadScopeService.getBom(leadId));
+        } catch (Exception e) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, e.getMessage());
+        }
+    }
+
+    @PutMapping("/{leadId}/bom")
+    public ResponseEntity<Map<String, Object>> saveBom(
+            @PathVariable Long leadId,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @RequestBody BomSaveRequest body) {
+        try {
+            return ok(leadScopeService.saveBom(leadId, body, userId, userRole));
+        } catch (CustomException e) {
+            return error(HttpStatus.BAD_REQUEST, e.getMessage());
+        } catch (Exception e) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to save BOM: " + e.getMessage());
+        }
+    }
+
+    // ── Extra allocations ────────────────────────────────────────────────────
+
+    @GetMapping("/{leadId}/budget/extras")
+    public ResponseEntity<Map<String, Object>> getExtras(@PathVariable Long leadId) {
+        try {
+            return ok(leadScopeService.getExtras(leadId));
+        } catch (Exception e) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, e.getMessage());
+        }
+    }
+
+    @PutMapping("/{leadId}/budget/extras")
+    public ResponseEntity<Map<String, Object>> saveExtras(
+            @PathVariable Long leadId,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @RequestBody ExtrasSaveRequest body) {
+        try {
+            return ok(leadScopeService.saveExtras(leadId, body, userId, userRole));
+        } catch (CustomException e) {
+            return error(HttpStatus.BAD_REQUEST, e.getMessage());
+        } catch (Exception e) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to save extra allocations: " + e.getMessage());
+        }
+    }
+
+    // ── Suggestion (scope + BOM from capacity & project type) ────────────────
+
+    @GetMapping("/{leadId}/scope/suggest")
+    public ResponseEntity<Map<String, Object>> suggest(
+            @PathVariable Long leadId,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @RequestParam(value = "target", required = false, defaultValue = "both") String target) {
+        try {
+            return ok(leadScopeService.suggestScopeAndBom(leadId, target, userId, userRole));
+        } catch (CustomException e) {
+            return error(HttpStatus.BAD_REQUEST, e.getMessage());
+        } catch (Exception e) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to build suggestion: " + e.getMessage());
+        }
+    }
+
+    /** Whether a template exists for this lead's project type (for the Load button). */
+    @GetMapping("/{leadId}/scope/template-info")
+    public ResponseEntity<Map<String, Object>> templateInfo(@PathVariable Long leadId) {
+        try {
+            return ok(leadScopeService.templateInfo(leadId));
+        } catch (CustomException e) {
+            return error(HttpStatus.BAD_REQUEST, e.getMessage());
+        } catch (Exception e) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, e.getMessage());
+        }
+    }
+
     // ── Estimation summary / selling price ───────────────────────────────────
 
     @GetMapping("/{leadId}/estimation-summary")
@@ -177,6 +281,23 @@ public class LeadScopeController {
         }
     }
 
+    /** Set the profit markup % — the proposal price is derived from cost. */
+    @PutMapping("/{leadId}/margin")
+    public ResponseEntity<Map<String, Object>> updateMargin(
+            @PathVariable Long leadId,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @RequestBody MarginRequest body) {
+        try {
+            return ok(leadScopeService.updateMargin(leadId, body.getMarginPercent(), userId, userRole));
+        } catch (CustomException e) {
+            return error(HttpStatus.BAD_REQUEST, e.getMessage());
+        } catch (Exception e) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to update margin: " + e.getMessage());
+        }
+    }
+
+    /** Set a negotiated target price — the markup % is back-computed from cost. */
     @PutMapping("/{leadId}/selling-price")
     public ResponseEntity<Map<String, Object>> updateSellingPrice(
             @PathVariable Long leadId,
