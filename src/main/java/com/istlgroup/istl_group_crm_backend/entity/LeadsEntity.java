@@ -246,7 +246,13 @@ public class LeadsEntity {
 	        this.updatedAt = LocalDateTime.now();
 	    }
 
-    // Proposed selling price used by the Budget Estimation feature.
+    // Proposed selling price used by the Budget Estimation feature. Kept in sync
+    // as the price DERIVED from cost + margin; margin is the source of truth.
     @Column(name = "proposed_selling_price")
     private BigDecimal proposedSellingPrice;
+
+    // Profit markup applied to the project cost (BOM + extras). The proposal
+    // price = cost × (1 + this/100). The lever that moves during negotiation.
+    @Column(name = "proposed_margin_percent")
+    private BigDecimal proposedMarginPercent;
 }

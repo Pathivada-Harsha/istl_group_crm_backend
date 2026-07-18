@@ -44,7 +44,9 @@ public class LeadAnalyticsService {
                 YearMonth lm = YearMonth.from(today).minusMonths(1);
                 fromD = lm.atDay(1); toD = lm.atEndOfMonth().plusDays(1); break;
             case "last_3_months":
-                // Current month + 2 prior, month-aligned → 3 clean monthly buckets.
+                // Current month + 2 prior, month-aligned. Bucketed WEEKLY (~13 buckets)
+                // by granularityFor — the window stays month-aligned so the weekly
+                // buckets group cleanly under whole months on the chart's x-axis.
                 fromD = today.withDayOfMonth(1).minusMonths(2); toD = today.plusDays(1); break;
             case "this_year":
                 fromD = today.withDayOfYear(1); toD = today.plusDays(1); break;
@@ -75,15 +77,24 @@ public class LeadAnalyticsService {
         try { return LocalDate.parse(s.trim()); } catch (Exception e) { return null; }
     }
 
-    /** Bucket width for the time series, driven by the range (custom by span). */
+    /**
+     * Bucket width for the time series, driven by the range (custom by span).
+     *
+     * Governing principle: never let the chart exceed ~30 buckets per series —
+     * the tiers below enforce that for every possible window.
+     */
     private String granularityFor(String range, LocalDateTime from, LocalDateTime to) {
         String r = range == null ? "last_12_months" : range;
         if (r.equals("this_month") || r.equals("last_month")) return "daily";
+        if (r.equals("last_3_months")) return "weekly";      // ~13 weekly buckets
         if (r.equals("custom")) {
             long days = ChronoUnit.DAYS.between(from.toLocalDate(), to.toLocalDate()); // to exclusive → span
-            return days <= 92 ? "weekly" : "monthly";
+            if (days <= 31)  return "daily";
+            if (days <= 92)  return "weekly";
+            if (days <= 730) return "monthly";
+            return "quarterly";
         }
-        return "monthly"; // last_3_months, this_year, last_year, last_12_months
+        return "monthly"; // this_year, last_year, last_12_months
     }
 
     public Map<String, Object> buildLeadAnalytics(String range, String customFrom, String customTo) {
@@ -259,6 +270,8 @@ public class LeadAnalyticsService {
 
     private static final DateTimeFormatter LBL_DAY   = DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH);
     private static final DateTimeFormatter LBL_MONTH = DateTimeFormatter.ofPattern("MMMM yyyy", Locale.ENGLISH);
+    /** Short month name for the month-grouped weekly x-axis (e.g. "Jun"). */
+    private static final DateTimeFormatter LBL_MON_SHORT = DateTimeFormatter.ofPattern("MMM", Locale.ENGLISH);
 
     /** Generated (by creation date) vs Won (by win date), bucketed by granularity
      *  and zero-filled across [from, to). Days are aggregated in SQL and rolled up
@@ -279,8 +292,32 @@ public class LeadAnalyticsService {
             LocalDate ws = start.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
             for (; ws.isBefore(endEx); ws = ws.plusWeeks(1)) {
                 LocalDate we = ws.plusWeeks(1);
-                series.add(bucket(ws.toString(), ws.format(LBL_DAY),
-                        sumRange(gen, ws, we), sumRange(won, ws, we)));
+                Map<String, Object> b = bucket(ws.toString(), ws.format(LBL_DAY),
+                        sumRange(gen, ws, we), sumRange(won, ws, we));
+                // Month context so the frontend can group the x-axis by month and
+                // label only the first week of each month. `bucket`/`label` are
+                // deliberately left unchanged.
+                LocalDate firstMondayOfMonth =
+                        ws.withDayOfMonth(1).with(TemporalAdjusters.nextOrSame(DayOfWeek.MONDAY));
+                int weekOfMonth = (int) ChronoUnit.WEEKS.between(firstMondayOfMonth, ws) + 1;
+                b.put("month", ws.format(LBL_MON_SHORT));
+                b.put("weekOfMonth", weekOfMonth);
+                b.put("isFirstWeekOfMonth", weekOfMonth == 1);
+                series.add(b);
+            }
+        } else if ("quarterly".equals(granularity)) {
+            // NOTE: must stay ABOVE the final else — that else is an unguarded
+            // monthly fallback and would swallow this granularity silently.
+            YearMonth cur = YearMonth.from(start)
+                    .withMonth(((YearMonth.from(start).getMonthValue() - 1) / 3) * 3 + 1);
+            YearMonth last = YearMonth.from(endEx.minusDays(1));   // undo the exclusive 'to'
+            while (!cur.isAfter(last)) {
+                LocalDate qs = cur.atDay(1);
+                LocalDate qe = cur.plusMonths(3).atDay(1);
+                int q = (cur.getMonthValue() - 1) / 3 + 1;
+                series.add(bucket(cur.toString(), "Q" + q + " " + cur.getYear(),
+                        sumRange(gen, qs, qe), sumRange(won, qs, qe)));
+                cur = cur.plusMonths(3);
             }
         } else { // monthly
             YearMonth cur = YearMonth.from(start);

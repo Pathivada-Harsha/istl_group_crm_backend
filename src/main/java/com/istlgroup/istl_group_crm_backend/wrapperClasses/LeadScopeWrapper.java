@@ -1,6 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.wrapperClasses;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 import lombok.Data;
 
@@ -58,9 +59,66 @@ public class LeadScopeWrapper {
         private String notes;
     }
 
-    /** PUT /leads/{leadId}/selling-price */
+    /** PUT /leads/{leadId}/selling-price — a negotiated target price. */
     @Data
     public static class SellingPriceRequest {
         private BigDecimal sellingPrice;
+    }
+
+    /** PUT /leads/{leadId}/margin — the profit markup % on cost. */
+    @Data
+    public static class MarginRequest {
+        private BigDecimal marginPercent;
+    }
+
+    /**
+     * PUT /leads/{leadId}/scope/items — whole-list replace.
+     * Lines absent from {@code items} are soft-deleted.
+     */
+    @Data
+    public static class ScopeItemsBulkRequest {
+        private List<ScopeItemRequest> items;
+    }
+
+    /** A single line of PUT /leads/{leadId}/bom */
+    @Data
+    public static class BomLineRequest {
+        private Long id;            // null → create, else update
+        private Long scopeItemId;   // the scope activity this material is for (optional)
+        private Integer seqNo;
+        private String category;
+        private String itemName;
+        private String make;
+        private String specification;
+        private String unit;
+        private BigDecimal quantity;
+        private BigDecimal unitRate;
+        private BigDecimal amount;  // optional override; derived from qty × rate when absent
+        private String notes;
+    }
+
+    /** PUT /leads/{leadId}/bom — whole-list replace. */
+    @Data
+    public static class BomSaveRequest {
+        private List<BomLineRequest> lines;
+    }
+
+    /** A single line of PUT /leads/{leadId}/budget/extras */
+    @Data
+    public static class ExtraLineRequest {
+        private Long id;            // null → create, else update
+        private Integer seqNo;
+        private String name;
+        private String basis;       // FIXED | PERCENT
+        private BigDecimal rateValue;
+        private String notes;
+        // No amount: FIXED uses rateValue as-is, PERCENT derives from the BOM
+        // subtotal. The client never gets to set the stored figure.
+    }
+
+    /** PUT /leads/{leadId}/budget/extras — whole-list replace. */
+    @Data
+    public static class ExtrasSaveRequest {
+        private List<ExtraLineRequest> lines;
     }
 }
