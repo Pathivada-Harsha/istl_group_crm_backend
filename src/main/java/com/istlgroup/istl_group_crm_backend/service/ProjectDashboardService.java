@@ -166,15 +166,18 @@ public class ProjectDashboardService {
             totalQuotationCount+= p.getTotalQuotationCount() != null ? p.getTotalQuotationCount() : 0;
             totalInvoiceCount  += p.getTotalInvoiceCount()   != null ? p.getTotalInvoiceCount()   : 0;
 
-            if (p.getStatus() != null) {
-                switch (p.getStatus()) {
-                    case NOT_STARTED-> notStartedProjects++;
-                    case COMPLETED  -> completedProjects++;
-                    case IN_PROGRESS-> inProgressProjects++;
-                    case PLANNING   -> planningProjects++;
-                    case ON_HOLD    -> onHoldProjects++;
-                    case CANCELLED  -> cancelledProjects++;
-                }
+            // if/else instead of switch: an enum switch makes javac emit a synthetic
+            // ProjectDashboardService$1 switch-map class that spring-boot-devtools' restart
+            // classloader can fail to load (NoClassDefFoundError on /dashboard/aggregate).
+            // No switch, no synthetic class, nothing for devtools to trip over.
+            ProjectEntity.ProjectStatus status = p.getStatus();
+            if (status != null) {
+                if      (status == ProjectEntity.ProjectStatus.NOT_STARTED) notStartedProjects++;
+                else if (status == ProjectEntity.ProjectStatus.COMPLETED)   completedProjects++;
+                else if (status == ProjectEntity.ProjectStatus.IN_PROGRESS) inProgressProjects++;
+                else if (status == ProjectEntity.ProjectStatus.PLANNING)    planningProjects++;
+                else if (status == ProjectEntity.ProjectStatus.ON_HOLD)     onHoldProjects++;
+                else if (status == ProjectEntity.ProjectStatus.CANCELLED)   cancelledProjects++;
             }
         }
 

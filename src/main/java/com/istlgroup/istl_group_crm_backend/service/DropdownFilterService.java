@@ -194,6 +194,23 @@ public class DropdownFilterService {
     }
 
     /**
+     * GET /filters/bd-executives
+     * ─────────────────────────────────────────────────────────────────────────
+     * Returns all active BD executives (id, name, avatar, phone), sorted by name.
+     * Used by the "change BD" picker on the leads page. Role match is delegated to
+     * UsersRepo.findActiveBDIds() which normalises "BD Executive"/"BD_EXECUTIVE".
+     */
+    public List<LeadsUserWrapper> getBdExecutives() {
+        List<Long> ids = usersRepo.findActiveBDIds();
+        if (ids == null || ids.isEmpty()) return List.of();
+        return usersRepo.findAllById(ids).stream()
+            .map(this::toWrapper)
+            .sorted(Comparator.comparing(
+                w -> w.getName() == null ? "" : w.getName().toLowerCase()))
+            .collect(Collectors.toList());
+    }
+
+    /**
      * GET /filters/followup-assignees
      * ─────────────────────────────────────────────────────────────────────────
      * Returns users the caller can assign a follow-up to.

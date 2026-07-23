@@ -286,6 +286,48 @@ public class LeadsController {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // PUT /leads/{leadId}/bd  — change or remove the BD executive on a lead.
+    // Body: { "bdAssignedTo": <userId> }  (null / omitted → remove the BD)
+    // ─────────────────────────────────────────────────────────────────────────
+    @PutMapping("/{leadId}/bd")
+    public ResponseEntity<Map<String, Object>> reassignBd(
+            @PathVariable Long leadId,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @RequestBody Map<String, Object> body) {
+        try {
+            Long newBdId = null;
+            Object raw = body != null ? body.get("bdAssignedTo") : null;
+            if (raw != null) {
+                newBdId = Long.valueOf(String.valueOf(raw).trim());
+            }
+
+            LeadWrapper updatedLead = leadsService.reassignBd(leadId, newBdId, userId, userRole);
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", newBdId == null ? "BD removed" : "BD updated");
+            response.put("data", updatedLead);
+            return ResponseEntity.ok(response);
+        } catch (NumberFormatException e) {
+            Map<String, Object> err = new HashMap<>();
+            err.put("success", false);
+            err.put("message", "Invalid bdAssignedTo value");
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(err);
+        } catch (CustomException e) {
+            Map<String, Object> err = new HashMap<>();
+            err.put("success", false);
+            err.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(err);
+        } catch (Exception e) {
+            Map<String, Object> err = new HashMap<>();
+            err.put("success", false);
+            err.put("message", "Failed to update BD");
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(err);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // DELETE /leads/delete/{leadId}
     // ─────────────────────────────────────────────────────────────────────────
     @DeleteMapping("/delete/{leadId}")

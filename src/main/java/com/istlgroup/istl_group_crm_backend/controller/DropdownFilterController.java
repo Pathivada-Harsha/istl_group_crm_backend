@@ -141,4 +141,14 @@ public class DropdownFilterController {
             @RequestHeader(value = "User-Role", required = false) String userRole) {
         return ResponseEntity.ok(filterService.getFollowupAssignees(userId, userRole));
     }
+
+    /**
+     * GET /filters/bd-executives
+     * ─────────────────────────────────────────────────────────────────────────
+     * All active BD executives — used by the "change BD" picker on the leads page.
+     */
+    @GetMapping("/bd-executives")
+    public ResponseEntity<List<LeadsUserWrapper>> getBdExecutives() {
+        return ResponseEntity.ok(filterService.getBdExecutives());
+    }
 }

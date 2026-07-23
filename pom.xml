@@ -121,6 +121,13 @@
 		    <version>7.2.5</version>
 		    <type>pom</type>
 		</dependency>
+
+		<!-- Apache PDFBox 3.x — text extraction for Tender NIT/PDF auto-fill -->
+		<dependency>
+		    <groupId>org.apache.pdfbox</groupId>
+		    <artifactId>pdfbox</artifactId>
+		    <version>3.0.3</version>
+		</dependency>
 		    </dependencies>
 
     <!-- Build Configuration -->

@@ -22,6 +22,7 @@ import com.istlgroup.istl_group_crm_backend.wrapperClasses.CustomerWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadFilterRequestWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadRequestWrapper;
 import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
+import com.istlgroup.istl_group_crm_backend.entity.TeamEntity;
 import com.istlgroup.istl_group_crm_backend.repo.LeadAccessRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadsRepo;
 import com.istlgroup.istl_group_crm_backend.repo.TeamRepository;
@@ -104,6 +105,46 @@ public class LeadsService {
             return Collections.singletonList(userId);
         }
         return memberIds;
+    }
+
+    /**
+     * True when the given user belongs to at least one team whose name ends with
+     * "_AffiliateTeam" (case-insensitive). Leads created by such users are never
+     * auto-routed to a telecaller or a BD — they stay with a lead handler picked
+     * at creation, or with the creator. See createLead / updateLead.
+     */
+    public boolean isAffiliateTeamCreator(Long userId) {
+        return affiliateTeamNameOf(userId) != null;
+    }
+
+    /**
+     * Returns the matched affiliate team name for the user, or null.
+     * Checks BOTH sources of team membership so it works regardless of how the
+     * user was put on the team:
+     *   1. the team_members junction (Teams screen), and
+     *   2. the denormalized users.team column (set directly on the user profile).
+     */
+    private String affiliateTeamNameOf(Long userId) {
+        if (userId == null) return null;
+        // 1. Teams via the team_members junction
+        for (TeamEntity t : teamRepository.findByMemberId(userId)) {
+            if (isAffiliateTeamName(t.getName())) return t.getName();
+        }
+        // 2. Denormalized users.team column
+        String team = usersRepo.findById(userId).map(u -> u.getTeam()).orElse(null);
+        if (isAffiliateTeamName(team)) return team;
+        return null;
+    }
+
+    /**
+     * A team name is an affiliate team when, ignoring case and any separators
+     * (spaces, underscores, hyphens), it ends with "affiliateteam". This matches
+     * "XYZ_AffiliateTeam", "XYZ Affiliate Team", "xyz-affiliate-team", etc.
+     */
+    private static boolean isAffiliateTeamName(String name) {
+        if (name == null) return false;
+        String norm = name.toLowerCase().replaceAll("[^a-z0-9]", "");
+        return norm.endsWith("affiliateteam");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -400,6 +441,15 @@ public class LeadsService {
         // ── Assignment logic ───────────────────────────────────────────────────
         Long assignedTo = requestWrapper.getAssignedTo();
 
+        // Affiliate-team leads are never auto-routed to a telecaller or a BD.
+        String affiliateTeam = affiliateTeamNameOf(createdBy);
+        boolean affiliateCreator = affiliateTeam != null;
+        String rawTeam = usersRepo.findById(createdBy).map(u -> u.getTeam()).orElse(null);
+        System.out.println("[LeadsService.createLead] createdBy=" + createdBy
+                + " affiliateCreator=" + affiliateCreator
+                + " matchedTeam=" + affiliateTeam
+                + " users.team=" + rawTeam);
+
         boolean isClosedWon = "Closed Won".equalsIgnoreCase(requestWrapper.getStatus());
         boolean isReferral   = "Referral".equalsIgnoreCase(requestWrapper.getSource());
         // Leads created at BD+ pipeline stages don't need a telecaller
@@ -408,7 +458,14 @@ public class LeadsService {
                         "Proposal Sent", "Closed Won", "Closed Lost")
                         .contains(requestWrapper.getStatus());
 
-        if (assignedTo != null && !isClosedWon && !isReferral) {
+        if (affiliateCreator) {
+            // Affiliate-team lead: honour a "lead handler" explicitly picked at
+            // creation; otherwise the lead simply stays with its creator. No
+            // telecaller round-robin, no BD — a manager can reassign later.
+            lead.setAssignedTo(assignedTo != null ? assignedTo : createdBy);
+            lead.setBdAssignedTo(null);
+
+        } else if (assignedTo != null && !isClosedWon && !isReferral) {
             // Explicit assignment selected in the form.
             // Branch on the ASSIGNEE's role so that a direct assignment to a
             // BD or a senior user is NOT mistaken for a telecaller assignment.
@@ -553,7 +610,7 @@ public class LeadsService {
         // finalSavedLead is a snapshot after all re-assignments; required because
         // lambdas can only capture effectively-final variables.
         final LeadsEntity finalSavedLead = savedLead;
-        if (!suppressEmail && finalSavedLead.getAssignedTo() != null) {
+        if (!suppressEmail && !affiliateCreator && finalSavedLead.getAssignedTo() != null) {
             try {
                 usersRepo.findById(finalSavedLead.getAssignedTo()).ifPresent(telecaller -> {
                     // Only send the "New Lead Assigned" telecaller email when the
@@ -599,7 +656,115 @@ public class LeadsService {
 
         return convertToWrapper(finalSavedLead);
     }
-     
+
+    /**
+     * Change or remove the BD executive assigned to a lead. Works on ANY lead,
+     * regardless of how the BD got there (auto round-robin or manual).
+     *
+     *   newBdId == null  → REMOVE the current BD (clears bdAssignedTo/at + access).
+     *   newBdId != null  → assign/change to that user (must be an active BD).
+     *
+     * Writes lead history (BD_REMOVED / BD_REASSIGNED) and, on assign, notifies
+     * the new BD in-app and by email (best effort).
+     */
+    public LeadWrapper reassignBd(Long leadId, Long newBdId, Long actingUserId, String actingRole)
+            throws CustomException {
+        LeadsEntity lead = leadsRepo.findById(leadId)
+                .orElseThrow(() -> new CustomException("Lead not found with ID: " + leadId));
+        if (lead.getDeletedAt() != null) {
+            throw new CustomException("Cannot modify a deleted lead");
+        }
+        if (!hasAccessToLead(lead, actingUserId, actingRole)) {
+            throw new CustomException("Access denied to change the BD for this lead");
+        }
+
+        Long oldBdId = lead.getBdAssignedTo();
+
+        // ── Remove the current BD ────────────────────────────────────────────
+        if (newBdId == null) {
+            if (oldBdId == null) {
+                return convertToWrapper(lead); // nothing to remove
+            }
+            String oldBdName = usersRepo.findById(oldBdId).map(u -> u.getName()).orElse("Unknown");
+            lead.setBdAssignedTo(null);
+            lead.setBdAssignedAt(null);
+            leadsRepo.save(lead);
+
+            // Drop any BD access rows for this lead
+            leadAccessRepo.deleteAll(leadAccessRepo.findByLeadIdAndRole(leadId, "BD"));
+
+            try {
+                leadHistoryService.addHistory(leadId, "BD_REMOVED", "bdAssignedTo",
+                        oldBdName, "Unassigned",
+                        "BD " + oldBdName + " removed from the lead", actingUserId);
+            } catch (Exception e) {
+                System.err.println("Failed to add BD_REMOVED history: " + e.getMessage());
+            }
+            return convertToWrapper(lead);
+        }
+
+        // ── Assign / change the BD ───────────────────────────────────────────
+        if (!usersRepo.findActiveBDIds().contains(newBdId)) {
+            throw new CustomException("Selected user is not an active BD executive");
+        }
+        if (newBdId.equals(oldBdId)) {
+            return convertToWrapper(lead); // no change
+        }
+
+        String newBdName = usersRepo.findById(newBdId).map(u -> u.getName()).orElse("Unknown");
+        String oldBdName = oldBdId != null
+                ? usersRepo.findById(oldBdId).map(u -> u.getName()).orElse("Unknown")
+                : "Unassigned";
+
+        lead.setBdAssignedTo(newBdId);
+        lead.setBdAssignedAt(LocalDateTime.now());
+        leadsRepo.save(lead);
+
+        // Refresh BD access rows: remove previous BD row(s), add the new one
+        leadAccessRepo.deleteAll(leadAccessRepo.findByLeadIdAndRole(leadId, "BD"));
+        if (!leadAccessRepo.existsByLeadIdAndUserId(leadId, newBdId)) {
+            com.istlgroup.istl_group_crm_backend.entity.LeadAccessEntity bdAccess =
+                    new com.istlgroup.istl_group_crm_backend.entity.LeadAccessEntity();
+            bdAccess.setLeadId(leadId);
+            bdAccess.setUserId(newBdId);
+            bdAccess.setRole("BD");
+            leadAccessRepo.save(bdAccess);
+        }
+
+        try {
+            leadHistoryService.addHistory(leadId, "BD_REASSIGNED", "bdAssignedTo",
+                    oldBdName, newBdName,
+                    "BD changed from " + oldBdName + " to " + newBdName, actingUserId);
+        } catch (Exception e) {
+            System.err.println("Failed to add BD_REASSIGNED history: " + e.getMessage());
+        }
+
+        // Notify the new BD (in-app) + best-effort email
+        try {
+            if (!newBdId.equals(actingUserId)) {
+                notificationService.createNotification(newBdId,
+                        "Lead assigned to you",
+                        "Lead " + lead.getLeadCode() + " (" + lead.getName()
+                                + ") has been assigned to you as BD.",
+                        Module.LEAD, lead.getId(), Type.LEAD_ASSIGNED);
+            }
+        } catch (Exception e) {
+            System.err.println("[LeadsService] BD reassign notification error: " + e.getMessage());
+        }
+        try {
+            String bdEmail = usersRepo.findUserMailWithUserId(newBdId);
+            if (bdEmail != null && !bdEmail.isBlank()) {
+                String subject = "Lead Assigned to You – " + lead.getLeadCode();
+                String body = buildSingleLeadEmailBody(newBdName, lead);
+                mailService.sendEmail(bdEmail, subject, body);
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to send BD reassignment email: " + e.getMessage());
+        }
+
+        return convertToWrapper(lead);
+    }
+
     public void addProposalHistory(Long leadId, String proposalNo, Long createdBy) {
         try {
             String description = "Proposal created: " + proposalNo;
@@ -742,7 +907,9 @@ public class LeadsService {
         // ── Auto-assign BD when source is changed TO "Referral" ───────────────
         boolean sourceChangedToReferral = "Referral".equalsIgnoreCase(requestWrapper.getSource())
                 && !("Referral".equalsIgnoreCase(oldSource));
-        if (sourceChangedToReferral && lead.getBdAssignedTo() == null) {
+        // Affiliate-team leads must never be auto-assigned to a BD, at any status.
+        if (sourceChangedToReferral && lead.getBdAssignedTo() == null
+                && !isAffiliateTeamCreator(lead.getCreatedBy())) {
             try {
                 Long nextBD = roundRobinService.getNextBD(lead.getGroupName(), lead.getSubGroupName());
                 if (nextBD != null) {

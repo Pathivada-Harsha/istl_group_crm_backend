@@ -12,12 +12,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.entity.BomItemVariantEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadBomTemplateItemEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadScopeTemplateEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadScopeTemplateItemEntity;
+import com.istlgroup.istl_group_crm_backend.entity.TemplateLineVariantEntity;
+import com.istlgroup.istl_group_crm_backend.repo.BomItemVariantRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadBomTemplateItemRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadScopeTemplateItemRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadScopeTemplateRepo;
+import com.istlgroup.istl_group_crm_backend.repo.TemplateLineVariantRepo;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadTemplateWrapper.TemplateBomLineRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadTemplateWrapper.TemplateBomLinesRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadTemplateWrapper.TemplateHeaderRequest;
@@ -39,6 +43,8 @@ public class LeadAdminService {
     private final LeadScopeTemplateRepo templateRepo;
     private final LeadScopeTemplateItemRepo scopeItemRepo;
     private final LeadBomTemplateItemRepo bomItemRepo;
+    private final BomItemVariantRepo bomItemVariantRepo;
+    private final TemplateLineVariantRepo templateLineVariantRepo;
 
     // ── Header ─────────────────────────────────────────────────────────────────
 
@@ -218,6 +224,7 @@ public class LeadAdminService {
             b.setCategory(r.getCategory());
             b.setItemName(r.getItemName().trim());
             b.setMatchKey(normalizeKey(r.getItemName()));
+            b.setBomItemId(r.getBomItemId());
             b.setMake(r.getMake());
             b.setSpecification(r.getSpecification());
             b.setUnit(r.getUnit());
@@ -227,8 +234,39 @@ public class LeadAdminService {
             b.setSiteVisitField(blankToNull(r.getSiteVisitField()));
             b.setDefaultUnitRate(r.getDefaultUnitRate());
             b.setNotes(r.getNotes());
+
+            // Pick-a-make: when a catalog item + allowed variants are attached, the
+            // default variant's make/spec become the line's snapshot — this is what
+            // the Suggest engine reads (t.getMake()), so the engine stays untouched.
+            List<Long> allowedIds = r.getBomItemId() != null && r.getAllowedVariantIds() != null
+                    ? r.getAllowedVariantIds() : List.of();
+            Long defaultVariantId = r.getDefaultVariantId();
+            if (!allowedIds.isEmpty()) {
+                if (defaultVariantId == null || !allowedIds.contains(defaultVariantId)) {
+                    defaultVariantId = allowedIds.get(0); // sensible fallback default
+                }
+                BomItemVariantEntity dv = bomItemVariantRepo.findById(defaultVariantId).orElse(null);
+                if (dv != null) {
+                    b.setMake(variantMakeLabel(dv.getMake(), dv.getModel()));
+                    if (dv.getDescription() != null && !dv.getDescription().isBlank()) {
+                        b.setSpecification(dv.getDescription());
+                    }
+                }
+            }
+
             LeadBomTemplateItemEntity saved = bomItemRepo.save(b);
             kept.add(saved.getId());
+
+            // Replace this line's allowed-variant set (curated subset + default flag).
+            templateLineVariantRepo.deleteByTemplateItemId(saved.getId());
+            for (Long vid : allowedIds) {
+                if (vid == null) continue;
+                TemplateLineVariantEntity tlv = new TemplateLineVariantEntity();
+                tlv.setTemplateItemId(saved.getId());
+                tlv.setVariantId(vid);
+                tlv.setIsDefault(vid.equals(defaultVariantId));
+                templateLineVariantRepo.save(tlv);
+            }
             out.add(bomLineMap(saved));
         }
         LocalDateTime now = LocalDateTime.now();
@@ -259,6 +297,17 @@ public class LeadAdminService {
 
     private static String blankToNull(String s) {
         return (s == null || s.isBlank()) ? null : s.trim();
+    }
+
+    /** Display label for a variant snapshot: "make model" (either part may be blank). */
+    private static String variantMakeLabel(String make, String model) {
+        StringBuilder sb = new StringBuilder();
+        if (make != null && !make.isBlank()) sb.append(make.trim());
+        if (model != null && !model.isBlank()) {
+            if (sb.length() > 0) sb.append(' ');
+            sb.append(model.trim());
+        }
+        return sb.length() == 0 ? null : sb.toString();
     }
 
     private Map<String, Object> headerMap(LeadScopeTemplateEntity t) {
@@ -299,6 +348,19 @@ public class LeadAdminService {
         m.put("siteVisitField", b.getSiteVisitField());
         m.put("defaultUnitRate", b.getDefaultUnitRate());
         m.put("notes", b.getNotes());
+
+        // Pick-a-make: catalog link + this line's curated allowed makes + default.
+        m.put("bomItemId", b.getBomItemId());
+        List<Long> allowed = new ArrayList<>();
+        Long def = null;
+        if (b.getId() != null) {
+            for (TemplateLineVariantEntity x : templateLineVariantRepo.findByTemplateItemId(b.getId())) {
+                allowed.add(x.getVariantId());
+                if (Boolean.TRUE.equals(x.getIsDefault())) def = x.getVariantId();
+            }
+        }
+        m.put("allowedVariantIds", allowed);
+        m.put("defaultVariantId", def);
         return m;
     }
 }

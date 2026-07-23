@@ -14,8 +14,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.entity.BomItemVariantEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadBomEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadBomTemplateItemEntity;
+import com.istlgroup.istl_group_crm_backend.entity.TemplateLineVariantEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadBudgetEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadBudgetExtraEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadBudgetItemEntity;
@@ -26,9 +28,11 @@ import com.istlgroup.istl_group_crm_backend.entity.LeadScopeTemplateItemEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
 import com.istlgroup.istl_group_crm_backend.entity.ScopeActivitySuggestionEntity;
 import com.istlgroup.istl_group_crm_backend.entity.SiteVisitEntity;
+import com.istlgroup.istl_group_crm_backend.repo.BomItemVariantRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadAccessRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadBomRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadBomTemplateItemRepo;
+import com.istlgroup.istl_group_crm_backend.repo.TemplateLineVariantRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadBudgetExtraRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadBudgetItemRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadBudgetRepo;
@@ -87,6 +91,12 @@ public class LeadScopeService {
 
     @Autowired
     private LeadBomTemplateItemRepo leadBomTemplateItemRepo;
+
+    @Autowired
+    private BomItemVariantRepo bomItemVariantRepo;
+
+    @Autowired
+    private TemplateLineVariantRepo templateLineVariantRepo;
 
     @Autowired
     private SiteVisitRepo siteVisitRepo;
@@ -499,6 +509,8 @@ public class LeadScopeService {
             line.setMake(r.getMake());
             line.setSpecification(r.getSpecification());
             line.setUnit(r.getUnit());
+            line.setBomItemId(r.getBomItemId());
+            line.setVariantId(r.getVariantId());
 
             BigDecimal qty = r.getQuantity() != null ? r.getQuantity() : BigDecimal.ZERO;
             BigDecimal rate = r.getUnitRate() != null ? r.getUnitRate() : BigDecimal.ZERO;
@@ -783,7 +795,12 @@ public class LeadScopeService {
         if (hasTemplate) {
             source = "TEMPLATE";
             if (wantScope) scopeItems = resolveTemplateScope(templateScope, templateBom);
-            if (wantBom)   bomLines = suggestionEngine.expandTemplateBom(templateBom, cap, siteVisit, warnings);
+            if (wantBom) {
+                bomLines = suggestionEngine.expandTemplateBom(templateBom, cap, siteVisit, warnings);
+                // Pick-a-make: attach each line's allowed makes + default, additively,
+                // WITHOUT touching the engine (its output is 1:1 with templateBom).
+                attachVariantChoices(bomLines, templateBom);
+            }
         } else if (mined != null) {
             source = "MINED";
             data.put("sourceLeadId", mined.leadId);
@@ -986,6 +1003,71 @@ public class LeadScopeService {
         m.put("unitRate", l.getUnitRate());
         m.put("amount", l.getAmount());
         m.put("notes", l.getNotes());
+        // Pick-a-make: chosen variant + catalog link, plus the item's active makes
+        // so the constrained dropdown can repopulate on reload.
+        m.put("bomItemId", l.getBomItemId());
+        m.put("variantId", l.getVariantId());
+        if (l.getBomItemId() != null) {
+            List<Map<String, Object>> variants = new ArrayList<>();
+            for (BomItemVariantEntity v : bomItemVariantRepo
+                    .findByBomItemIdAndIsActiveTrueOrderByMakeAsc(l.getBomItemId())) {
+                variants.add(variantChoiceMap(v));
+            }
+            m.put("variants", variants);
+        }
+        return m;
+    }
+
+    /**
+     * Attach each suggested BOM line's allowed makes + default, correlating the
+     * engine output to its template line by index (expandTemplateBom is 1:1 and
+     * order-preserving). Additive only — the engine is not modified.
+     */
+    private void attachVariantChoices(List<Map<String, Object>> bomLines,
+                                      List<LeadBomTemplateItemEntity> templateBom) {
+        int n = Math.min(bomLines.size(), templateBom.size());
+        for (int i = 0; i < n; i++) {
+            LeadBomTemplateItemEntity tl = templateBom.get(i);
+            if (tl.getBomItemId() == null || tl.getId() == null) continue;
+
+            List<TemplateLineVariantEntity> tlvs = templateLineVariantRepo.findByTemplateItemId(tl.getId());
+            if (tlvs.isEmpty()) continue;
+
+            Set<Long> allowed = new HashSet<>();
+            Long defId = null;
+            for (TemplateLineVariantEntity x : tlvs) {
+                allowed.add(x.getVariantId());
+                if (Boolean.TRUE.equals(x.getIsDefault())) defId = x.getVariantId();
+            }
+
+            List<Map<String, Object>> variants = new ArrayList<>();
+            for (BomItemVariantEntity v : bomItemVariantRepo
+                    .findByBomItemIdAndIsActiveTrueOrderByMakeAsc(tl.getBomItemId())) {
+                if (allowed.contains(v.getId())) variants.add(variantChoiceMap(v));
+            }
+            if (variants.isEmpty()) continue;
+
+            // Default must be an active allowed make; else fall back to the first.
+            boolean defActive = false;
+            for (Map<String, Object> vm : variants) {
+                if (vm.get("variantId").equals(defId)) { defActive = true; break; }
+            }
+            if (!defActive) defId = (Long) variants.get(0).get("variantId");
+
+            Map<String, Object> line = bomLines.get(i);
+            line.put("bomItemId", tl.getBomItemId());
+            line.put("variants", variants);
+            line.put("defaultVariantId", defId);
+            line.put("variantId", defId);
+        }
+    }
+
+    private Map<String, Object> variantChoiceMap(BomItemVariantEntity v) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("variantId", v.getId());
+        m.put("make", v.getMake());
+        m.put("model", v.getModel());
+        m.put("description", v.getDescription());
         return m;
     }
 

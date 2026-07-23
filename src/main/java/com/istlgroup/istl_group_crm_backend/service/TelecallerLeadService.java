@@ -68,6 +68,10 @@ public class TelecallerLeadService {
     @Autowired private LeadHistoryService          leadHistoryService;
     @Autowired private RoundRobinAssignmentService roundRobinService;
     @Autowired private MailService                 mailService;
+    // Used only to test whether a lead's creator is on a "_AffiliateTeam" — such
+    // leads must never be auto-assigned to a BD. Field injection, and LeadsService
+    // does not depend on this service, so there is no circular-dependency risk.
+    @Autowired private LeadsService                leadsService;
 
     // ── Get paginated leads for telecaller ────────────────────────────────────
     /**
@@ -368,8 +372,12 @@ public class TelecallerLeadService {
                 seniorOwner = ownerRole != null
                         && !"TELECALLER".equalsIgnoreCase(ownerRole);
             }
+            //   (c) the lead was created by an affiliate-team member — those leads
+            //       are never auto-routed to a BD (defensive: they also never
+            //       reach a telecaller, so this branch is a safety net).
+            boolean affiliateLead = leadsService.isAffiliateTeamCreator(lead.getCreatedBy());
 
-            Long bdUserId = (bdAlreadyAssigned || seniorOwner)
+            Long bdUserId = (bdAlreadyAssigned || seniorOwner || affiliateLead)
                     ? null
                     : roundRobinService.getNextBD(lead.getGroupName(), lead.getSubGroupName());
             if (bdUserId != null) {
@@ -599,6 +607,29 @@ public class TelecallerLeadService {
         if (fields.containsKey("subGroupName"))   lead.setSubGroupName(nullIfBlank(fields.get("subGroupName")));
         if (fields.containsKey("solarScheme"))    lead.setSolarScheme(nullIfBlank(fields.get("solarScheme")));
         if (fields.containsKey("subsidyRequired")) lead.setSubsidyRequired(nullIfBlank(fields.get("subsidyRequired")));
+
+        // ── Telecaller requirement / site-visit details ──────────────────────────
+        // Moved here from the "Interested" status popup so the whole record is
+        // edited in one place. All optional; only overwritten when the key is sent.
+        if (fields.containsKey("tcPropertyType"))         lead.setTcPropertyType(nullIfBlank(fields.get("tcPropertyType")));
+        if (fields.containsKey("tcMonthlyBill"))          lead.setTcMonthlyBill(nullIfBlank(fields.get("tcMonthlyBill")));
+        if (fields.containsKey("tcExistingContractLoad")) lead.setTcExistingContractLoad(nullIfBlank(fields.get("tcExistingContractLoad")));
+        if (fields.containsKey("tcRequiredContractLoad")) lead.setTcRequiredContractLoad(nullIfBlank(fields.get("tcRequiredContractLoad")));
+        if (fields.containsKey("tcQuotedPrice"))          lead.setTcQuotedPrice(nullIfBlank(fields.get("tcQuotedPrice")));
+        if (fields.containsKey("tcAddons"))               lead.setTcAddons(nullIfBlank(fields.get("tcAddons")));
+        if (fields.containsKey("tcOtherComments"))        lead.setTcOtherComments(nullIfBlank(fields.get("tcOtherComments")));
+        if (fields.containsKey("tcSiteVisitDate")) {
+            String d = nullIfBlank(fields.get("tcSiteVisitDate"));
+            if (d == null) {
+                lead.setTcSiteVisitDate(null);
+            } else {
+                try {
+                    lead.setTcSiteVisitDate(LocalDate.parse(d.substring(0, Math.min(10, d.length()))));
+                } catch (Exception ex) {
+                    throw new CustomException("Invalid site visit date");
+                }
+            }
+        }
 
         leadsRepo.save(lead);
 

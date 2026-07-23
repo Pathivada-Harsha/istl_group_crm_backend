@@ -48,6 +48,13 @@ public class LeadBomEntity {
     @Column(name = "specification", columnDefinition = "TEXT")
     private String specification;
 
+    /** Catalog item + chosen make (pick-a-make). Nullable = free-text/legacy line. */
+    @Column(name = "bom_item_id")
+    private Long bomItemId;
+
+    @Column(name = "variant_id")
+    private Long variantId;
+
     @Column(name = "unit", length = 50)
     private String unit;
 

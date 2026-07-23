@@ -56,6 +56,10 @@ public class LeadTemplateWrapper {
         private String siteVisitField;
         private BigDecimal defaultUnitRate;
         private String notes;
+        // Pick-a-make: catalog link + curated allowed makes + which is the default.
+        private Long bomItemId;
+        private List<Long> allowedVariantIds;
+        private Long defaultVariantId;
     }
 
     /** PUT /admin/lead-templates/{id}/bom-items — whole-list replace. */
