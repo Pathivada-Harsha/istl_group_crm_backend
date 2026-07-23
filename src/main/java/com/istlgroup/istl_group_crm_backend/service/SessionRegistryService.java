@@ -51,6 +51,11 @@ public class SessionRegistryService {
     @Autowired
     private LoginHistoryRepo loginHistoryRepo;
 
+    /** Real-time "you were signed out" push (WebSocket). Lazy to avoid startup cycles. */
+    @Autowired
+    @org.springframework.context.annotation.Lazy
+    private SessionEventPublisher sessionEventPublisher;
+
     @Value("${login-activity.max-active-sessions:2}")
     private int maxActiveSessions;
 
@@ -138,11 +143,25 @@ public class SessionRegistryService {
                 }
                 log.info("Evicted ALL {} sessions for user {} (logout-all on new login)", live.size(), user.getId());
             } else {
-                // User confirmed "Continue Login" → evict the OLDEST session
-                UserSessionEntity oldest = live.get(0); // query orders by loginAt ASC
-                closeSessionRow(oldest, UserSessionEntity.STATUS_EVICTED, "NEW_DEVICE_LOGIN", now);
-                invalidateCache(oldest.getSessionHash());
-                log.info("Evicted oldest session {} for user {} (new device login)", oldest.getId(), user.getId());
+                // User confirmed "Continue Login".
+                // If the login dialog sent terminateSessionId, evict THAT
+                // specific device (the user may pick any of their live
+                // sessions, not just the oldest). Falls back to the oldest
+                // when no valid selection was sent (old clients / safety).
+                UserSessionEntity victim = null;
+                Long selectedId = parseLong(clientContext.get("terminateSessionId"));
+                if (selectedId != null) {
+                    victim = live.stream()
+                            .filter(x -> selectedId.equals(x.getId()))
+                            .findFirst().orElse(null);
+                }
+                if (victim == null) {
+                    victim = live.get(0); // query orders by loginAt ASC → oldest
+                }
+                closeSessionRow(victim, UserSessionEntity.STATUS_EVICTED, "NEW_DEVICE_LOGIN", now);
+                invalidateCache(victim.getSessionHash());
+                log.info("Evicted session {} for user {} (selected on new device login)",
+                        victim.getId(), user.getId());
             }
         }
 
@@ -359,6 +378,17 @@ public class SessionRegistryService {
         s.setLogoutReason(reason);
         sessionRepo.save(s);
 
+        // 🔔 Real-time force-logout push to the terminated browser. Only for
+        // terminations the affected browser did NOT initiate itself:
+        //   EVICTED (login-page eviction), ADMIN_TERMINATED (admin/profile/
+        //   login-activity remote sign-out), EXPIRED (idle timeout sweep).
+        // Not for LOGGED_OUT (that browser pressed Logout / re-logged-in).
+        if (UserSessionEntity.STATUS_EVICTED.equals(status)
+                || UserSessionEntity.STATUS_ADMIN_TERMINATED.equals(status)
+                || UserSessionEntity.STATUS_EXPIRED.equals(status)) {
+            sessionEventPublisher.publishTerminated(s.getUserId(), s.getId(), status, reason);
+        }
+
         loginHistoryRepo.findBySessionRowId(s.getId()).ifPresent(h -> {
             h.setLogoutAt(at);
             if (h.getLoginAt() != null) {
@@ -495,6 +525,14 @@ public class SessionRegistryService {
     private static String trim(String v, int max) {
         if (v == null || v.isBlank()) return null;
         return v.length() > max ? v.substring(0, max) : v;
+    }
+
+    private static Long parseLong(String v) {
+        try {
+            return v == null || v.isBlank() ? null : Long.parseLong(v.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private static Double parseDouble(String v) {
