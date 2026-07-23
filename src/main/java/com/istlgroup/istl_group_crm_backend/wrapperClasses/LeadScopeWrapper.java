@@ -95,6 +95,9 @@ public class LeadScopeWrapper {
         private BigDecimal unitRate;
         private BigDecimal amount;  // optional override; derived from qty × rate when absent
         private String notes;
+        // Pick-a-make: catalog link + chosen variant snapshotted onto the line.
+        private Long bomItemId;
+        private Long variantId;
     }
 
     /** PUT /leads/{leadId}/bom — whole-list replace. */

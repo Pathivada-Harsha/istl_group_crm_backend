@@ -7,6 +7,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Optional;
 
 @Repository
 public interface BomItemsMasterRepo extends JpaRepository<BomItemsMasterEntity, Long> {
@@ -38,4 +39,18 @@ public interface BomItemsMasterRepo extends JpaRepository<BomItemsMasterEntity, 
     // Get distinct categories
     @Query("SELECT DISTINCT b.category FROM BomItemsMasterEntity b WHERE b.isActive = true")
     List<String> findDistinctCategories();
+
+    // Admin master-data list — includes INACTIVE items (so they can be reactivated),
+    // optional category + free-text filter over name/spec/make.
+    @Query("SELECT b FROM BomItemsMasterEntity b WHERE " +
+           "(:category IS NULL OR :category = '' OR b.category = :category) AND " +
+           "(:term IS NULL OR :term = '' OR " +
+           " LOWER(b.itemName) LIKE LOWER(CONCAT('%', :term, '%')) OR " +
+           " LOWER(b.specification) LIKE LOWER(CONCAT('%', :term, '%')) OR " +
+           " LOWER(b.makeBrand) LIKE LOWER(CONCAT('%', :term, '%'))) " +
+           "ORDER BY b.category ASC, b.itemName ASC")
+    List<BomItemsMasterEntity> adminSearch(@Param("category") String category, @Param("term") String term);
+
+    // Reuse-on-adopt: find an existing catalog item by exact name (case-insensitive).
+    Optional<BomItemsMasterEntity> findFirstByItemNameIgnoreCase(String itemName);
 }

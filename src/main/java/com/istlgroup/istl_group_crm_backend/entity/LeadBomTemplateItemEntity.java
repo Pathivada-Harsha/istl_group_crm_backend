@@ -55,6 +55,11 @@ public class LeadBomTemplateItemEntity {
     @Column(name = "match_key", length = 300)
     private String matchKey;
 
+    /** Catalog item this line represents (bom_items_master.id); null = free-text legacy line. */
+    @Column(name = "bom_item_id")
+    private Long bomItemId;
+
+    /** Make snapshot — for a catalog-linked line this is the default variant's make label. */
     @Column(name = "make", length = 150)
     private String make;
 

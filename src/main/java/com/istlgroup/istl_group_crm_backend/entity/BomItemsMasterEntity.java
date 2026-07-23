@@ -40,6 +40,13 @@ public class BomItemsMasterEntity {
     @Column(name = "make_brand")
     private String makeBrand;
 
+    // Variant-attribute schema for this item, as a JSON array of field defs:
+    //   [{key,label,type:"text"|"dropdown"|"number",options?,unit?,required}]
+    // Stored as a JSON string (house convention, cf. ProposalsEntity.bomItems);
+    // validated/normalized in the service. Null = item has no schema (legacy items).
+    @Column(name = "variant_attributes", columnDefinition = "JSON")
+    private String variantAttributes;
+
     @Column(name = "hsn_code", length = 50)
     private String hsnCode;
 
