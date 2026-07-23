@@ -37,9 +37,10 @@ public class TenderPdfAiExtractor {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     // The headline fields (NIT summary / IFT) sit at the front of these documents,
-    // which can run to hundreds of pages. Cap the text we send (~28k chars ≈ 7k
-    // tokens) to stay well inside Groq's per-request limits.
-    private static final int MAX_CHARS = 28000;
+    // which can run to hundreds of pages. Cap the text we send (~36k chars ≈ 9k
+    // tokens) to stay inside Groq's per-request limits while still covering
+    // tenders that carry a long cover/index before the summary table.
+    private static final int MAX_CHARS = 36000;
 
     private static final Set<String> SCALAR_KEYS = Set.of(
             "tenderNumber", "tenderName", "issuingAuthority",
@@ -59,10 +60,29 @@ public class TenderPdfAiExtractor {
         if (text == null || text.isBlank()) return Map.of();
         String clipped = text.length() > MAX_CHARS ? text.substring(0, MAX_CHARS) : text;
 
-        String raw = groqClient.complete(SYSTEM_PROMPT, USER_PREFIX + clipped, 2000, 0.0);
+        // Primary: headline scalars + best-effort BOQ / eligibility arrays.
+        Map<String, Object> out = runExtraction(SYSTEM_PROMPT, clipped, 4000);
+        if (out != null && !out.isEmpty()) return out;
+
+        // The reply wasn't usable JSON — almost always a response truncated
+        // mid-array on a content-heavy tender. Retry once for the scalars only:
+        // a small, bounded payload that can't overflow the token budget.
+        log.warn("AI tender parse: unusable JSON — retrying scalars-only");
+        out = runExtraction(SCALARS_ONLY_PROMPT, clipped, 1200);
+        if (out != null && !out.isEmpty()) return out;
+
+        throw new IllegalStateException("the AI did not return usable JSON for this document");
+    }
+
+    /** One LLM round-trip → field map, or null when the reply isn't usable JSON. */
+    private Map<String, Object> runExtraction(String systemPrompt, String clipped, int maxTokens) {
+        String raw = groqClient.complete(systemPrompt, USER_PREFIX + clipped, maxTokens, 0.0);
         JsonNode root = parseJson(raw);
         if (root == null || !root.isObject()) {
-            throw new IllegalStateException("LLM did not return a JSON object");
+            String preview = raw == null ? "null"
+                    : raw.substring(0, Math.min(240, raw.length())).replaceAll("\\s+", " ");
+            log.warn("AI tender parse: non-JSON reply (first 240 chars): {}", preview);
+            return null;
         }
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -139,7 +159,8 @@ public class TenderPdfAiExtractor {
 
     private static final String USER_PREFIX = "Tender document text:\n\n";
 
-    private static final String SYSTEM_PROMPT =
+    /** Shared instructions + field list, used by both the full and fallback prompts. */
+    private static final String RULES =
             "You are a precise data-extraction engine for Indian government tender / NIT documents. "
           + "From the tender text, extract the fields below and return ONLY a single JSON object — "
           + "no prose, no markdown, no code fences.\n\n"
@@ -163,12 +184,21 @@ public class TenderPdfAiExtractor {
           + "clientContactEmail, clientContactPhone, clientAddress, clientCity, clientState, sector, "
           + "tenderType, source, portalLink, location, district, state, financialYear, estimatedValue, "
           + "emdAmount, performanceSecurityPct, submissionDeadline, technicalOpeningDate, "
-          + "financialOpeningDate.\n\n"
-          + "Also, best-effort, ONLY if clearly present:\n"
-          + "- boqItems: array of { itemNo, scope, description, unit, quantity } — the main Bill of "
-          + "Quantities / scope-of-work line items.\n"
-          + "- eligibilityCriteria: array of { category, criterionName, requiredValue, operator }, "
-          + "where category is one of Financial/Technical/Legal and operator is one of "
-          + "gte, lte, contains, boolean, eq.\n\n"
-          + "Return the JSON object only.";
+          + "financialOpeningDate.\n\n";
+
+    private static final String SYSTEM_PROMPT = RULES
+          + "Also, best-effort, ONLY if clearly present. Keep these SHORT — the JSON must always be "
+          + "complete and valid, never truncated mid-array:\n"
+          + "- boqItems: AT MOST 15 items, array of { itemNo, scope, description, unit, quantity } — "
+          + "the main Bill of Quantities / scope-of-work lines. Keep description under 120 chars.\n"
+          + "- eligibilityCriteria: AT MOST 10 items, array of "
+          + "{ category, criterionName, requiredValue, operator }, where category is one of "
+          + "Financial/Technical/Legal and operator is one of gte, lte, contains, boolean, eq.\n\n"
+          + "Return the complete JSON object only.";
+
+    /** Fallback when the full reply came back truncated or unparseable: scalars only. */
+    private static final String SCALARS_ONLY_PROMPT = RULES
+          + "Do NOT include boqItems or eligibilityCriteria. Return the scalar fields only, so the "
+          + "JSON stays short and complete.\n\n"
+          + "Return the complete JSON object only.";
 }

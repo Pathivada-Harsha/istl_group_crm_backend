@@ -8,8 +8,10 @@ import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,7 +44,10 @@ public class TenderService {
     @Autowired private TenderPdfAiExtractor pdfAiExtractor;
 
     private static final Logger log = LoggerFactory.getLogger(TenderService.class);
-    private static final long MAX_PDF_BYTES = 10L * 1024 * 1024; // 10 MB, mirrors BillService
+    // Matches spring.servlet.multipart.max-file-size (50MB). A lower cap here just
+    // rejects big tenders before Spring ever complains — and government NIT packs
+    // routinely run to 150–200 pages.
+    private static final long MAX_PDF_BYTES = 50L * 1024 * 1024;
 
     // ── reads ────────────────────────────────────────────────────────────
     @Transactional(readOnly = true)
@@ -106,15 +111,66 @@ public class TenderService {
         } catch (IOException e) {
             throw new CustomException("Could not read the PDF: " + e.getMessage());
         }
+        // A PDF with no text layer (a scan/photocopy) yields nothing for either
+        // parser — say so plainly instead of reporting "no fields recognised".
+        if (text.strip().length() < 200) {
+            throw new CustomException(
+                    "This PDF has no readable text layer (it looks like a scan), so fields "
+                  + "can't be extracted automatically. Please enter them manually.");
+        }
+
+        // 1) Free path first — PDFBox text + deterministic regex. Costs no tokens,
+        //    and on a template it recognises it is as good as the LLM.
+        Map<String, Object> regex = pdfExtractor.extractFromText(text);
+        if (isSufficient(regex)) {
+            log.info("Tender parse: regex got {} field(s) — LLM not needed", regex.size());
+            return regex;
+        }
+
+        // 2) Regex couldn't handle this template — only now spend tokens.
+        log.info("Tender parse: regex got only {} field(s); calling the AI extractor", regex.size());
+        String aiError;
         try {
             Map<String, Object> ai = pdfAiExtractor.extractFromText(text);
-            if (ai != null && !ai.isEmpty()) return ai;
-            log.warn("AI tender parse returned nothing; falling back to regex");
+            if (ai != null && !ai.isEmpty()) {
+                // Keep anything regex found that the AI missed; AI wins conflicts.
+                Map<String, Object> merged = new LinkedHashMap<>(regex);
+                merged.putAll(ai);
+                return merged;
+            }
+            aiError = "the AI returned no recognisable fields";
+            log.warn("AI tender parse returned nothing");
         } catch (Exception e) {
-            log.warn("AI tender parse failed ({}); falling back to regex", e.getMessage());
+            aiError = e.getMessage();
+            log.warn("AI tender parse failed: {}", e.getMessage());
         }
-        return pdfExtractor.extractFromText(text);
+
+        // 3) Both paths came up short — a partial regex result still beats nothing.
+        if (!regex.isEmpty()) return regex;
+        throw new CustomException("Could not extract fields from this PDF — " + aiError + ".");
     }
+
+    /**
+     * Is a regex result good enough to skip the LLM?
+     *
+     * <p>Deliberately NOT "found at least one field": on an unfamiliar template the
+     * regex still scrapes stray matches (it will pull "Karnataka" into {@code state}
+     * from almost any Karnataka tender), and treating that as success would save
+     * tokens by silently importing an almost-empty tender. So we require the core
+     * identity of the tender plus at least one commercial/date detail — the shape
+     * only a genuinely recognised template produces.
+     */
+    private boolean isSufficient(Map<String, Object> m) {
+        if (m == null || m.isEmpty()) return false;
+        long core = CORE_FIELDS.stream().filter(m::containsKey).count();
+        boolean hasDetail = DETAIL_FIELDS.stream().anyMatch(m::containsKey);
+        return core >= 2 && hasDetail;
+    }
+
+    private static final Set<String> CORE_FIELDS =
+            Set.of("tenderNumber", "tenderName", "issuingAuthority");
+    private static final Set<String> DETAIL_FIELDS =
+            Set.of("estimatedValue", "emdAmount", "submissionDeadline");
 
     /** Store the uploaded PDF bytes on the tender row (mirrors OrderBook PO). */
     @Transactional
@@ -149,7 +205,7 @@ public class TenderService {
 
     private void validatePdf(MultipartFile file) throws CustomException {
         if (file == null || file.isEmpty()) throw new CustomException("No file provided");
-        if (file.getSize() > MAX_PDF_BYTES) throw new CustomException("File exceeds the 10 MB limit");
+        if (file.getSize() > MAX_PDF_BYTES) throw new CustomException("File exceeds the 50 MB limit");
         String mime = file.getContentType();
         String name = file.getOriginalFilename() != null ? file.getOriginalFilename().toLowerCase() : "";
         boolean isPdf = (mime != null && mime.toLowerCase().contains("pdf")) || name.endsWith(".pdf");
