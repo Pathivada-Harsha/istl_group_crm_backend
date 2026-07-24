@@ -124,7 +124,7 @@ public class TenderService {
         Map<String, Object> regex = pdfExtractor.extractFromText(text);
         if (isSufficient(regex)) {
             log.info("Tender parse: regex got {} field(s) — LLM not needed", regex.size());
-            return regex;
+            return tidyNames(regex);
         }
 
         // 2) Regex couldn't handle this template — only now spend tokens.
@@ -136,7 +136,7 @@ public class TenderService {
                 // Keep anything regex found that the AI missed; AI wins conflicts.
                 Map<String, Object> merged = new LinkedHashMap<>(regex);
                 merged.putAll(ai);
-                return merged;
+                return tidyNames(merged);
             }
             aiError = "the AI returned no recognisable fields";
             log.warn("AI tender parse returned nothing");
@@ -146,8 +146,24 @@ public class TenderService {
         }
 
         // 3) Both paths came up short — a partial regex result still beats nothing.
-        if (!regex.isEmpty()) return regex;
+        if (!regex.isEmpty()) return tidyNames(regex);
         throw new CustomException("Could not extract fields from this PDF — " + aiError + ".");
+    }
+
+    /**
+     * Trim the work title however it was produced. The LLM in particular tends to
+     * hand back the whole cover page — description, tender reference, agency,
+     * address, phone, email, URL and the bidder's signature line as one string —
+     * so the same tidy-up is applied to every path rather than trusting the prompt.
+     */
+    private Map<String, Object> tidyNames(Map<String, Object> fields) {
+        Object name = fields.get("tenderName");
+        if (name instanceof String) {
+            String tidy = TenderPdfExtractor.tidyTenderName((String) name);
+            if (tidy == null || tidy.isEmpty()) fields.remove("tenderName");
+            else fields.put("tenderName", tidy);
+        }
+        return fields;
     }
 
     /**
@@ -300,28 +316,32 @@ public class TenderService {
 
     // ── mapping ────────────────────────────────────────────────────────────
     private void applyScalars(TenderEntity t, TenderWrapper w) {
-        t.setTenderNumber(w.getTenderNumber());
-        t.setTenderName(w.getTenderName());
-        t.setIssuingAuthority(w.getIssuingAuthority());
-        t.setClientCompany(w.getClientCompany());
-        t.setClientType(w.getClientType());
-        t.setClientGstin(w.getClientGstin());
-        t.setClientPan(w.getClientPan());
-        t.setClientCin(w.getClientCin());
-        t.setClientContactPerson(w.getClientContactPerson());
-        t.setClientContactEmail(w.getClientContactEmail());
-        t.setClientContactPhone(w.getClientContactPhone());
-        t.setClientAddress(w.getClientAddress());
-        t.setClientCity(w.getClientCity());
-        t.setClientState(w.getClientState());
-        t.setSector(w.getSector());
-        t.setTenderType(w.getTenderType());
-        t.setSource(w.getSource());
-        t.setPortalLink(w.getPortalLink());
-        t.setLocation(w.getLocation());
-        t.setDistrict(w.getDistrict());
-        t.setState(w.getState());
-        t.setFinancialYear(w.getFinancialYear());
+        // Values scraped out of a PDF can be far longer than the column allows
+        // (NIT titles run to several hundred characters). Clip to the mapped
+        // length so an over-long field is saved shortened rather than failing the
+        // whole insert with "Data too long for column".
+        t.setTenderNumber(clip(w.getTenderNumber(), 255));
+        t.setTenderName(clip(w.getTenderName(), 1000));
+        t.setIssuingAuthority(clip(w.getIssuingAuthority(), 500));
+        t.setClientCompany(clip(w.getClientCompany(), 500));
+        t.setClientType(clip(w.getClientType(), 255));
+        t.setClientGstin(clip(w.getClientGstin(), 255));
+        t.setClientPan(clip(w.getClientPan(), 255));
+        t.setClientCin(clip(w.getClientCin(), 255));
+        t.setClientContactPerson(clip(w.getClientContactPerson(), 255));
+        t.setClientContactEmail(clip(w.getClientContactEmail(), 255));
+        t.setClientContactPhone(clip(w.getClientContactPhone(), 255));
+        t.setClientAddress(w.getClientAddress());   // TEXT
+        t.setClientCity(clip(w.getClientCity(), 255));
+        t.setClientState(clip(w.getClientState(), 255));
+        t.setSector(clip(w.getSector(), 255));
+        t.setTenderType(clip(w.getTenderType(), 255));
+        t.setSource(clip(w.getSource(), 255));
+        t.setPortalLink(w.getPortalLink());         // TEXT
+        t.setLocation(clip(w.getLocation(), 500));
+        t.setDistrict(clip(w.getDistrict(), 255));
+        t.setState(clip(w.getState(), 255));
+        t.setFinancialYear(clip(w.getFinancialYear(), 255));
         t.setEstimatedValue(bd(w.getEstimatedValue()));
         t.setEmdAmount(bd(w.getEmdAmount()));
         t.setPerformanceSecurityPct(bd(w.getPerformanceSecurityPct()));
@@ -521,6 +541,13 @@ public class TenderService {
         try { return LocalDateTime.parse(t); } catch (Exception ignored) { }
         try { return Instant.parse(t).atZone(ZoneId.systemDefault()).toLocalDateTime(); } catch (Exception ignored) { }
         return LocalDateTime.now();
+    }
+
+    /** Trim a value to the mapped column length (null-safe, whitespace-trimmed). */
+    private String clip(String v, int max) {
+        if (v == null) return null;
+        String t = v.trim();
+        return t.length() <= max ? t : t.substring(0, max).trim();
     }
 
     private String s(BigDecimal b) { return b == null ? null : b.toPlainString(); }

@@ -212,4 +212,11 @@ public interface VendorAdvanceRepository extends JpaRepository<VendorAdvanceEnti
         @Param("paymentDateFrom") java.time.LocalDate paymentDateFrom,
         @Param("paymentDateTo") java.time.LocalDate paymentDateTo
     );
+
+    // ── Batched roll-up for the Projects LIST ────────────────────────────────
+    // (project_id, SUM(amount)) — batched twin of sumAdvanceAmountByProjectId.
+    @Query(value = "SELECT project_id, COALESCE(SUM(amount), 0) FROM vendor_advances "
+                 + "WHERE deleted_at IS NULL AND project_id IS NOT NULL "
+                 + "GROUP BY project_id", nativeQuery = true)
+    List<Object[]> sumAdvanceAmountGroupedByProject();
 }

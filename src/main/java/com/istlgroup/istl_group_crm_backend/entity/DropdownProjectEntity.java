@@ -101,7 +101,7 @@ public class DropdownProjectEntity {
     
     @Column(name = "assigned_to")
     private Long assignedTo;
-    
+
     public enum ProjectStatus {
         NOT_STARTED, PLANNING, IN_PROGRESS, COMPLETED, ON_HOLD, CANCELLED
     }

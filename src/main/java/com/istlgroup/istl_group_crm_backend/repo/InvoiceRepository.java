@@ -644,4 +644,12 @@ public interface InvoiceRepository extends JpaRepository<InvoiceEntity, Long> {
 
     @Query("SELECT i FROM InvoiceEntity i WHERE i.groupId = :groupId AND i.subGroupId = :subGroupId AND i.projectId IN :projectIds AND i.deletedAt IS NULL ORDER BY i.invoiceDate DESC")
     List<InvoiceEntity> findAllForOutstandingsBySubGroupAndAccessibleProjects(@Param("groupId") String groupId, @Param("subGroupId") String subGroupId, @Param("projectIds") List<String> projectIds);
+
+    // ── Batched roll-up for the Projects LIST ────────────────────────────────
+    // (project_id, SUM(total_amount)) over live invoices — same filter as
+    // findByProjectIdAndDeletedAtIsNull, done in one query for all projects.
+    @Query(value = "SELECT project_id, COALESCE(SUM(total_amount), 0) FROM invoices "
+                 + "WHERE deleted_at IS NULL AND project_id IS NOT NULL "
+                 + "GROUP BY project_id", nativeQuery = true)
+    List<Object[]> sumInvoiceValueGroupedByProject();
 }

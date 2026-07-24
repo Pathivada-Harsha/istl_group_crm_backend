@@ -547,4 +547,14 @@ public interface ReceiptRepository extends JpaRepository<ReceiptEntity, Long> {
         @Param("paymentMethodFilter") String paymentMethodFilter,
         @Param("searchTerm") String searchTerm
     );
+
+    // ── Batched roll-up for the Projects LIST ────────────────────────────────
+    // One row per project: (project_id, SUM(amount)). Mirrors
+    // sumReceiptAmountByProjectIdAndType for ADVANCE + INVOICE_PAYMENT so the
+    // list and the project dashboard report the SAME "amount received".
+    @Query(value = "SELECT project_id, COALESCE(SUM(amount), 0) FROM receipts "
+                 + "WHERE deleted_at IS NULL AND project_id IS NOT NULL "
+                 + "AND receipt_type IN ('ADVANCE', 'INVOICE_PAYMENT') "
+                 + "GROUP BY project_id", nativeQuery = true)
+    List<Object[]> sumReceiptAmountGroupedByProject();
 }
