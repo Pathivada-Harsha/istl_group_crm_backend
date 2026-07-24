@@ -489,4 +489,13 @@ public interface BillRepository extends JpaRepository<BillEntity, Long> {
     List<BillEntity> findAllForOutstandingsBySubGroupAndAccessibleProjects(@Param("groupId") String groupId,
                                                                             @Param("subGroupId") String subGroupId,
                                                                             @Param("projectIds") List<String> projectIds);
+
+    // ── Batched roll-up for the Projects LIST ────────────────────────────────
+    // (project_id, SUM(total_amount)) over live, non-cancelled bills — same
+    // filter as findByProjectIdAndStatusNot(projectId, "Cancelled").
+    @Query(value = "SELECT project_id, COALESCE(SUM(total_amount), 0) FROM bills "
+                 + "WHERE deleted_at IS NULL AND project_id IS NOT NULL "
+                 + "AND (status IS NULL OR status <> 'Cancelled') "
+                 + "GROUP BY project_id", nativeQuery = true)
+    List<Object[]> sumBillValueGroupedByProject();
 }

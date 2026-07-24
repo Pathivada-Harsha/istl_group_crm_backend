@@ -25,14 +25,18 @@ public class TenderEntity {
     @Column(name = "tender_number")
     private String tenderNumber;
 
-    @Column(name = "tender_name")
+    // Government NIT titles are full sentences — the KPTCL sub-station tender runs
+    // ~440 chars ("Establishing 2x20MVA, 110/11kV Sub-Station at Gholanoor and
+    // construction of 110kV LILO line …"). The default varchar(255) truncated the
+    // insert; these lengths must match the widened columns in the DB.
+    @Column(name = "tender_name", length = 1000)
     private String tenderName;
 
-    @Column(name = "issuing_authority")
+    @Column(name = "issuing_authority", length = 500)
     private String issuingAuthority;
 
     // ── client / developer KYC ──
-    @Column(name = "client_company")
+    @Column(name = "client_company", length = 500)
     private String clientCompany;
 
     @Column(name = "client_type")
@@ -78,7 +82,7 @@ public class TenderEntity {
     @Column(name = "portal_link", columnDefinition = "TEXT")
     private String portalLink;
 
-    @Column(name = "location")
+    @Column(name = "location", length = 500)
     private String location;
 
     @Column(name = "district")
@@ -204,7 +208,7 @@ public class TenderEntity {
     @Column(name = "source_pdf_data", columnDefinition = "LONGBLOB")
     private byte[] sourcePdfData;
 
-    @Column(name = "source_pdf_name")
+    @Column(name = "source_pdf_name", length = 500)
     private String sourcePdfName;
 
     @Column(name = "source_pdf_mime_type", length = 100)

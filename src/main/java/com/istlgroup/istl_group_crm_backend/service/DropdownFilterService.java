@@ -18,6 +18,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -37,6 +38,7 @@ public class DropdownFilterService {
     private final DropdownProjectRepository projectRepository;
     private final CustomersRepo customersRepo;
     private final RoleHierarchyService roleHierarchyService;
+    private final ProjectFinancialsSummaryService financialsSummaryService;
 
     public List<DropdownGroupWrapper> getAllGroups() {
         return groupRepository.findByIsActiveTrue().stream()
@@ -64,6 +66,12 @@ public class DropdownFilterService {
     }
 
     public List<Map<String, Object>> getAllActiveProjects() {
+        // Money in / money out for EVERY project in 5 batched queries, computed
+        // live from receipts/invoices/bills — same source as the project
+        // dashboard, so the list and the dashboard never disagree.
+        Map<String, ProjectFinancialsSummaryService.Financials> fin =
+            financialsSummaryService.getFinancialsByProject();
+
         return projectRepository.findAll().stream()
             .filter(p -> Boolean.TRUE.equals(p.getIsActive()))
             .sorted(Comparator.comparing(p -> p.getProjectName() != null ? p.getProjectName() : ""))
@@ -82,6 +90,23 @@ public class DropdownFilterService {
                 m.put("progressPercentage",  p.getProgressPercentage());
                 m.put("startDate",           p.getStartDate());
                 m.put("endDate",             p.getEndDate());
+
+                // Live financials — keys kept identical to the dashboard's
+                // financial block so the frontend reads one vocabulary:
+                //   totalInvoiceValue = billed on the customer
+                //   paidInvoiceValue  = received (cash in, from receipts)
+                //   totalBillValue    = payable to vendors
+                //   paidBillValue     = spent (cash out)
+                //   balance           = received − spent
+                ProjectFinancialsSummaryService.Financials f =
+                    fin.getOrDefault(p.getProjectUniqueId(), ProjectFinancialsSummaryService.empty());
+                m.put("totalInvoiceValue",   f.getBilled());
+                m.put("paidInvoiceValue",    f.getReceived());
+                m.put("totalBillValue",      f.getPayable());
+                m.put("paidBillValue",       f.getSpent());
+                m.put("pendingReceipts",     f.getPendingReceipts());
+                m.put("pendingPaymentValue", f.getPendingPayments());
+                m.put("balance",             f.getBalance());
                 return m;
             })
             .collect(Collectors.toList());

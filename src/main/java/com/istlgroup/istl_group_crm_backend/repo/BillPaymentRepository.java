@@ -49,4 +49,16 @@ public interface BillPaymentRepository extends JpaRepository<BillPaymentEntity, 
                    "         AND bp.reference_number NOT LIKE 'VPAY-%'))",
            nativeQuery = true)
     java.math.BigDecimal sumDirectPaymentAmountByProjectId(@Param("projectId") String projectId);
+
+    // ── Batched roll-up for the Projects LIST ────────────────────────────────
+    // (project_id, SUM(amount)) — batched twin of sumDirectPaymentAmountByProjectId,
+    // keeping the VADV-/VPAY- exclusion so vendor_advances is not double-counted.
+    @Query(value = "SELECT b.project_id, COALESCE(SUM(bp.amount), 0) FROM bill_payments bp "
+                 + "INNER JOIN bills b ON bp.bill_id = b.id "
+                 + "WHERE b.deleted_at IS NULL AND b.project_id IS NOT NULL "
+                 + "AND (bp.reference_number IS NULL "
+                 + "     OR (bp.reference_number NOT LIKE 'VADV-%' "
+                 + "         AND bp.reference_number NOT LIKE 'VPAY-%')) "
+                 + "GROUP BY b.project_id", nativeQuery = true)
+    java.util.List<Object[]> sumDirectPaymentAmountGroupedByProject();
 }
