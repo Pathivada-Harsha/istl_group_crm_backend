@@ -1,0 +1,601 @@
+package com.istlgroup.istl_group_crm_backend.service;
+
+import java.io.IOException;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.entity.BorrowerEntity;
+import com.istlgroup.istl_group_crm_backend.entity.BorrowerSanctionEntity;
+import com.istlgroup.istl_group_crm_backend.repo.BorrowerRepo;
+import com.istlgroup.istl_group_crm_backend.repo.BorrowerSanctionRepo;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.BorrowerSanctionWrapper;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.BorrowerWrapper;
+
+/**
+ * Borrower Registry service.
+ *
+ * <p>The import is stateless by design, mirroring {@code TenderService.parsePdf}:
+ * {@link #parseSanction} reads a file and returns a field map without touching
+ * the database. Nothing is written until the user has seen the review screen and
+ * posted the values back through {@link #saveSanction}, because an extractor
+ * will occasionally misread a figure and silently persisting that is worse than
+ * not importing at all.
+ */
+@Service
+public class BorrowerService {
+
+    private static final Logger log = LoggerFactory.getLogger(BorrowerService.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private static final long MAX_FILE_BYTES = 15L * 1024 * 1024;
+    private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm");
+
+    /** The seven identity fields the registry counts for completeness. */
+    private static final int IDENTITY_TOTAL = 7;
+
+    @Autowired private BorrowerRepo borrowerRepo;
+    @Autowired private BorrowerSanctionRepo sanctionRepo;
+    @Autowired private SanctionDocExtractor docExtractor;
+    @Autowired private SanctionDocAiExtractor aiExtractor;
+    @Autowired private SanctionDerivedCalculator derived;
+    @Autowired private SanctionDocHtmlRenderer htmlRenderer;
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Import — stateless parse
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Read a sanction letter and return a partial field map. Writes nothing.
+     *
+     * <p>Two tiers: the deterministic extractor first, because on a table-driven
+     * letter it is as good as the LLM and costs no tokens; Groq only when that
+     * comes back short.
+     */
+    public Map<String, Object> parseSanction(MultipartFile file) throws CustomException {
+        validateFile(file);
+
+        String name = file.getOriginalFilename();
+        String ct   = file.getContentType();
+        boolean docx = SanctionDocExtractor.isDocx(name, ct);
+
+        byte[] bytes;
+        try {
+            bytes = file.getBytes();
+        } catch (Exception e) {
+            throw new CustomException("Could not read the uploaded file: " + e.getMessage());
+        }
+
+        Map<String, Object> deterministic;
+        String text;
+        try {
+            text = SanctionDocExtractor.loadText(bytes, docx);
+            deterministic = docx
+                    ? docExtractor.extractDocx(bytes)
+                    : docExtractor.extractFromPdfText(text);
+        } catch (Exception e) {
+            throw new CustomException("Could not read the document: " + e.getMessage());
+        }
+
+        // A PDF with no text layer yields nothing for either tier. Say so plainly
+        // rather than reporting "no fields recognised".
+        if (!docx && text.strip().length() < 200) {
+            throw new CustomException(
+                    "This PDF has no readable text layer (it looks like a scan), so fields "
+                  + "can't be extracted automatically. Please enter them manually.");
+        }
+
+        String engine = docx ? "TABLE" : "REGEX";
+
+        if (docExtractor.isSufficient(deterministic)) {
+            log.info("Sanction parse: {} tier got {} field(s) — LLM not needed",
+                     engine, deterministic.size());
+            return withMeta(deterministic, engine, List.of());
+        }
+
+        log.info("Sanction parse: {} tier got only {} field(s); calling the AI extractor",
+                 engine, deterministic.size());
+        try {
+            Map<String, Object> ai = aiExtractor.extractFromText(text);
+            if (ai != null && !ai.isEmpty()) {
+                // Keep what the deterministic pass found; it is the more
+                // trustworthy of the two, so it wins conflicts.
+                List<String> aiOnly = new ArrayList<>();
+                Map<String, Object> merged = new LinkedHashMap<>(ai);
+                merged.putAll(deterministic);
+                for (String k : ai.keySet()) {
+                    if (!deterministic.containsKey(k)) aiOnly.add(k);
+                }
+                return withMeta(merged, deterministic.isEmpty() ? "AI" : "MIXED", aiOnly);
+            }
+        } catch (Exception e) {
+            log.warn("AI sanction parse failed: {}", e.getMessage());
+        }
+
+        if (deterministic.isEmpty()) {
+            throw new CustomException(
+                    "No fields could be read from this document. Please enter the details manually.");
+        }
+        return withMeta(deterministic, engine, List.of());
+    }
+
+    /**
+     * Attach parse metadata the review screen uses: which engine ran, and which
+     * fields came from the LLM so the user's eye goes to those first.
+     */
+    private Map<String, Object> withMeta(Map<String, Object> fields,
+                                         String engine, List<String> lowConfidence) {
+        Map<String, Object> out = new LinkedHashMap<>(fields);
+        out.put("_extractionEngine", engine);
+        out.put("_lowConfidenceFields", lowConfidence);
+        // Flag a ref no. already on file so the review screen can warn before save.
+        Object ref = fields.get("refNo");
+        if (ref != null) {
+            boolean dup = sanctionRepo
+                    .findByRefNoIgnoreCaseAndDeletedAtIsNull(String.valueOf(ref))
+                    .isPresent();
+            out.put("_duplicateRefNo", dup);
+        }
+        return out;
+    }
+
+    private void validateFile(MultipartFile file) throws CustomException {
+        if (file == null || file.isEmpty()) {
+            throw new CustomException("No file uploaded");
+        }
+        if (file.getSize() > MAX_FILE_BYTES) {
+            throw new CustomException("File too large (max 15 MB)");
+        }
+        String name = file.getOriginalFilename();
+        String ct   = file.getContentType();
+        if (!SanctionDocExtractor.isDocx(name, ct) && !SanctionDocExtractor.isPdf(name, ct)) {
+            throw new CustomException("Unsupported file type. Upload a PDF or a Word (.docx) file.");
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Borrowers
+    // ════════════════════════════════════════════════════════════════════════
+
+    public List<BorrowerWrapper> getAll(String search, String category) {
+        // One query handles all four states; blank means "don't filter".
+        String q = SanctionValueParser.isBlank(search) ? null : search.trim();
+        String c = SanctionValueParser.isBlank(category) ? null : category.trim();
+        List<BorrowerEntity> rows = borrowerRepo.search(q, c);
+
+        List<BorrowerWrapper> out = new ArrayList<>();
+        for (BorrowerEntity b : rows) {
+            BorrowerWrapper w = toWrapper(b);
+            List<BorrowerSanctionEntity> sanctions =
+                    sanctionRepo.findByBorrowerIdAndDeletedAtIsNullOrderBySanctionDateDesc(b.getId());
+            if (!sanctions.isEmpty()) {
+                BorrowerSanctionEntity latest = sanctions.get(0);
+                BorrowerSanctionWrapper lw = toWrapper(latest);
+                w.getSanctions().add(lw);
+                w.setLatestRefNo(latest.getRefNo());
+                w.setLatestSanctionedAmount(SanctionValueParser.formatCrore(latest.getSanctionedAmount()));
+                w.setLatestCategory(latest.getCategory());
+                w.setLatestScheduledCod(SanctionValueParser.formatDate(latest.getScheduledCod()));
+                w.setLatestCodStatus(lw.getDerivedCodStatus());
+            }
+            out.add(w);
+        }
+        return out;
+    }
+
+    public BorrowerWrapper getById(Long id) throws CustomException {
+        BorrowerEntity b = borrowerRepo.findByIdAndDeletedAtIsNull(id)
+                .orElseThrow(() -> new CustomException("Borrower not found"));
+        BorrowerWrapper w = toWrapper(b);
+        for (BorrowerSanctionEntity s :
+                sanctionRepo.findByBorrowerIdAndDeletedAtIsNullOrderBySanctionDateDesc(id)) {
+            w.getSanctions().add(toWrapper(s));
+        }
+        return w;
+    }
+
+    @Transactional
+    public BorrowerWrapper createBorrower(BorrowerWrapper in, Long userId) throws CustomException {
+        if (SanctionValueParser.isBlank(in.getBorrowerName())) {
+            throw new CustomException("Borrower name is required");
+        }
+        assertCinFree(in.getCin(), null);
+
+        BorrowerEntity b = new BorrowerEntity();
+        applyBorrower(b, in);
+        b.setCreatedBy(userId);
+        return toWrapper(borrowerRepo.save(b));
+    }
+
+    @Transactional
+    public BorrowerWrapper updateBorrower(Long id, BorrowerWrapper in, Long userId)
+            throws CustomException {
+        BorrowerEntity b = borrowerRepo.findByIdAndDeletedAtIsNull(id)
+                .orElseThrow(() -> new CustomException("Borrower not found"));
+        if (SanctionValueParser.isBlank(in.getBorrowerName())) {
+            throw new CustomException("Borrower name is required");
+        }
+        assertCinFree(in.getCin(), id);
+
+        applyBorrower(b, in);
+        b.setUpdatedBy(userId);
+        return getById(borrowerRepo.save(b).getId());
+    }
+
+    @Transactional
+    public void deleteBorrower(Long id, Long userId) throws CustomException {
+        BorrowerEntity b = borrowerRepo.findByIdAndDeletedAtIsNull(id)
+                .orElseThrow(() -> new CustomException("Borrower not found"));
+        b.setDeletedAt(LocalDateTime.now());
+        b.setUpdatedBy(userId);
+        borrowerRepo.save(b);
+        // Soft-delete the letters with it, so a re-import of the same ref no.
+        // isn't blocked by a row nobody can see.
+        for (BorrowerSanctionEntity s :
+                sanctionRepo.findByBorrowerIdAndDeletedAtIsNullOrderBySanctionDateDesc(id)) {
+            s.setDeletedAt(LocalDateTime.now());
+            sanctionRepo.save(s);
+        }
+    }
+
+    private void assertCinFree(String cin, Long selfId) throws CustomException {
+        if (SanctionValueParser.isBlank(cin)) return;
+        Optional<BorrowerEntity> other =
+                borrowerRepo.findByCinIgnoreCaseAndDeletedAtIsNull(cin.trim());
+        if (other.isPresent() && !other.get().getId().equals(selfId)) {
+            throw new CustomException(
+                    "That CIN already belongs to " + other.get().getBorrowerName());
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Sanctions
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Save a reviewed sanction. Creates the borrower when the name is new, or
+     * attaches the letter to the existing borrower when it isn't — a company
+     * takes more than one facility over its life.
+     */
+    @Transactional
+    public BorrowerWrapper saveSanction(BorrowerSanctionWrapper in, Long userId,
+                                        String rawExtractedJson) throws CustomException {
+
+        if (SanctionValueParser.isBlank(in.getRefNo())) {
+            throw new CustomException("Reference number is required");
+        }
+
+        Optional<BorrowerSanctionEntity> dup =
+                sanctionRepo.findByRefNoIgnoreCaseAndDeletedAtIsNull(in.getRefNo().trim());
+        if (dup.isPresent() && !dup.get().getId().equals(in.getId())) {
+            throw new CustomException(
+                    "Sanction letter " + in.getRefNo() + " has already been imported.");
+        }
+
+        Long borrowerId = in.getBorrowerId();
+        if (borrowerId == null) {
+            throw new CustomException("A borrower must be selected or created first");
+        }
+        BorrowerEntity borrower = borrowerRepo.findByIdAndDeletedAtIsNull(borrowerId)
+                .orElseThrow(() -> new CustomException("Borrower not found"));
+
+        BorrowerSanctionEntity e = in.getId() == null
+                ? new BorrowerSanctionEntity()
+                : sanctionRepo.findByIdAndDeletedAtIsNull(in.getId())
+                        .orElseThrow(() -> new CustomException("Sanction not found"));
+
+        boolean isNew = e.getId() == null;
+        applySanction(e, in);
+        e.setBorrowerId(borrower.getId());
+
+        if (isNew) {
+            e.setCreatedBy(userId);
+            if (rawExtractedJson != null) {
+                e.setRawExtractedJson(rawExtractedJson);
+            }
+        } else {
+            e.setUpdatedBy(userId);
+            // A user has touched imported values; record that for the audit trail.
+            if ("IMPORTED".equals(e.getSource())) {
+                e.setSource("IMPORTED_EDITED");
+            }
+        }
+
+        validateSanction(e);
+        sanctionRepo.save(e);
+        return getById(borrower.getId());
+    }
+
+    /**
+     * Find an existing borrower by name, or create one. Called by the review
+     * screen once the user has confirmed which company the letter belongs to.
+     */
+    @Transactional
+    public BorrowerWrapper resolveBorrower(String borrowerName, Long userId) throws CustomException {
+        if (SanctionValueParser.isBlank(borrowerName)) {
+            throw new CustomException("Borrower name is required");
+        }
+        String name = borrowerName.trim();
+        Optional<BorrowerEntity> existing =
+                borrowerRepo.findByBorrowerNameIgnoreCaseAndDeletedAtIsNull(name);
+        if (existing.isPresent()) {
+            return getById(existing.get().getId());
+        }
+        BorrowerEntity b = new BorrowerEntity();
+        b.setBorrowerName(name);
+        b.setCreatedBy(userId);
+        return toWrapper(borrowerRepo.save(b));
+    }
+
+    @Transactional
+    public void deleteSanction(Long id, Long userId) throws CustomException {
+        BorrowerSanctionEntity s = sanctionRepo.findByIdAndDeletedAtIsNull(id)
+                .orElseThrow(() -> new CustomException("Sanction not found"));
+        s.setDeletedAt(LocalDateTime.now());
+        s.setUpdatedBy(userId);
+        sanctionRepo.save(s);
+    }
+
+    /** Blocking checks only. Soft mismatches surface as derived text, not errors. */
+    private void validateSanction(BorrowerSanctionEntity e) throws CustomException {
+        if (e.getProjectCost() != null && e.getSanctionedAmount() != null
+                && e.getSanctionedAmount().compareTo(e.getProjectCost()) > 0) {
+            throw new CustomException(
+                    "The sanctioned amount cannot be more than the total project cost.");
+        }
+        if (e.getSanctionDate() != null && e.getScheduledCod() != null
+                && e.getScheduledCod().isBefore(e.getSanctionDate())) {
+            throw new CustomException("The scheduled COD cannot fall before the sanction date.");
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // The letter itself
+    // ════════════════════════════════════════════════════════════════════════
+
+    @Transactional
+    public BorrowerSanctionWrapper uploadDocument(Long sanctionId, MultipartFile file, Long userId)
+            throws CustomException {
+        validateFile(file);
+        BorrowerSanctionEntity s = sanctionRepo.findByIdAndDeletedAtIsNull(sanctionId)
+                .orElseThrow(() -> new CustomException("Sanction not found"));
+        try {
+            s.setSanctionDocData(file.getBytes());
+        } catch (Exception e) {
+            throw new CustomException("Could not store the file: " + e.getMessage());
+        }
+        s.setSanctionDocName(file.getOriginalFilename());
+        s.setSanctionDocMime(file.getContentType());
+        s.setSanctionDocSize(file.getSize());
+        s.setUpdatedBy(userId);
+        return toWrapper(sanctionRepo.save(s));
+    }
+
+    /**
+     * Build the payload the in-page viewer needs.
+     *
+     * <p>Runs inside a transaction and pulls the bytes by explicit query rather
+     * than off a detached entity, which is what made the first version fail.
+     */
+    @Transactional(readOnly = true)
+    public Map<String, Object> buildPreview(Long sanctionId) throws CustomException, IOException {
+        BorrowerSanctionEntity s = sanctionRepo.findByIdAndDeletedAtIsNull(sanctionId)
+                .orElseThrow(() -> new CustomException("Sanction not found"));
+
+        byte[] data = sanctionRepo.findDocData(sanctionId);
+        if (data == null || data.length == 0) {
+            throw new CustomException("No document stored for this sanction");
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("fileName", s.getSanctionDocName());
+        payload.put("mimeType", s.getSanctionDocMime());
+        payload.put("size", s.getSanctionDocSize());
+
+        String mime = s.getSanctionDocMime() == null ? "" : s.getSanctionDocMime().toLowerCase();
+        String name = s.getSanctionDocName() == null ? "" : s.getSanctionDocName().toLowerCase();
+
+        if (mime.contains("pdf") || name.endsWith(".pdf")) {
+            // Nothing to convert — the viewer fetches the bytes directly.
+            payload.put("kind", "PDF");
+            return payload;
+        }
+
+        payload.put("kind", "HTML");
+        try {
+            payload.put("html", htmlRenderer.toHtml(data));
+        } catch (Throwable t) {
+            // Formatted conversion touches a lot of the POI styling API, and a
+            // document that trips any part of it shouldn't cost the user the
+            // ability to read the letter. Fall back to the plain text the
+            // importer already extracts successfully from this same file.
+            log.warn("HTML conversion failed for sanction {}; falling back to text", sanctionId, t);
+            String text = SanctionDocExtractor.loadText(data, true);
+            payload.put("html", asPlainHtml(text));
+            payload.put("degraded", true);
+        }
+        return payload;
+    }
+
+    /** Wrap extracted text as escaped paragraphs — the readable last resort. */
+    private String asPlainHtml(String text) {
+        if (text == null || text.isBlank()) {
+            return "<div class=\"docx-body\"><p class=\"docx-p\">"
+                 + "This document contains no readable text.</p></div>";
+        }
+        StringBuilder sb = new StringBuilder("<div class=\"docx-body\">");
+        for (String line : text.split("\\R")) {
+            if (line.isBlank()) {
+                sb.append("<p class=\"docx-spacer\"></p>");
+            } else {
+                sb.append("<p class=\"docx-p\">").append(escapeHtml(line)).append("</p>");
+            }
+        }
+        return sb.append("</div>").toString();
+    }
+
+    private static String escapeHtml(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace("\"", "&quot;").replace("'", "&#39;");
+    }
+
+    /** Categories present across live sanctions, for the registry filter. */
+    public List<String> getCategories() {
+        return sanctionRepo.findDistinctCategories();
+    }
+
+    @Transactional(readOnly = true)
+    public BorrowerSanctionEntity getDocumentEntity(Long sanctionId) throws CustomException {
+        BorrowerSanctionEntity s = sanctionRepo.findByIdAndDeletedAtIsNull(sanctionId)
+                .orElseThrow(() -> new CustomException("Sanction not found"));
+        byte[] data = sanctionRepo.findDocData(sanctionId);
+        if (data == null || data.length == 0) {
+            throw new CustomException("No document stored for this sanction");
+        }
+        s.setSanctionDocData(data);
+        return s;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Mapping
+    // ════════════════════════════════════════════════════════════════════════
+
+    private void applyBorrower(BorrowerEntity b, BorrowerWrapper in) {
+        b.setBorrowerName(SanctionValueParser.clean(in.getBorrowerName()));
+        b.setCin(SanctionValueParser.clean(in.getCin()));
+        b.setPan(SanctionValueParser.clean(in.getPan()));
+        b.setSponsorName(SanctionValueParser.clean(in.getSponsorName()));
+        b.setRegisteredAddress(SanctionValueParser.clean(in.getRegisteredAddress()));
+        b.setCity(SanctionValueParser.clean(in.getCity()));
+        b.setState(SanctionValueParser.clean(in.getState()));
+        b.setPincode(SanctionValueParser.clean(in.getPincode()));
+        b.setContactPerson(SanctionValueParser.clean(in.getContactPerson()));
+        b.setContactEmail(SanctionValueParser.clean(in.getContactEmail()));
+        b.setContactPhone(SanctionValueParser.clean(in.getContactPhone()));
+        b.setNotes(SanctionValueParser.clean(in.getNotes()));
+        if (in.getProjectId() != null) b.setProjectId(in.getProjectId());
+    }
+
+    private void applySanction(BorrowerSanctionEntity e, BorrowerSanctionWrapper in) {
+        e.setRefNo(SanctionValueParser.clean(in.getRefNo()));
+        e.setSanctionDate(SanctionValueParser.parseDate(in.getSanctionDate()));
+        e.setLenderName(SanctionValueParser.clean(in.getLenderName()));
+        e.setProjectName(SanctionValueParser.clean(in.getProjectName()));
+        e.setCategory(SanctionValueParser.clean(in.getCategory()));
+        e.setLocation(SanctionValueParser.clean(in.getLocation()));
+
+        e.setProjectCost(SanctionValueParser.parseMoney(in.getProjectCost()));
+        e.setSanctionedAmount(SanctionValueParser.parseMoney(in.getSanctionedAmount()));
+        e.setDebtEquityRatio(SanctionValueParser.clean(in.getDebtEquityRatio()));
+
+        e.setInterestRateText(SanctionValueParser.clean(in.getInterestRateText()));
+        // Prefer an explicitly supplied percentage; otherwise read it off the phrase.
+        e.setInterestRatePct(in.getInterestRatePct() != null
+                ? SanctionValueParser.parseDecimal(in.getInterestRatePct())
+                : SanctionValueParser.parseRatePct(in.getInterestRateText()));
+
+        e.setTenorText(SanctionValueParser.clean(in.getTenorText()));
+        e.setTenorMonths(in.getTenorMonths() != null
+                ? SanctionValueParser.parseInt(in.getTenorMonths())
+                : SanctionValueParser.parseTenorMonths(in.getTenorText()));
+        e.setMoratoriumMonths(in.getMoratoriumMonths() != null
+                ? SanctionValueParser.parseInt(in.getMoratoriumMonths())
+                : SanctionValueParser.parseMoratoriumMonths(in.getTenorText()));
+
+        e.setScheduledCod(SanctionValueParser.parseDate(in.getScheduledCod()));
+
+        if (!SanctionValueParser.isBlank(in.getStatus()))  e.setStatus(in.getStatus());
+        if (!SanctionValueParser.isBlank(in.getSource()))  e.setSource(in.getSource());
+        if (!SanctionValueParser.isBlank(in.getExtractionEngine())) {
+            e.setExtractionEngine(in.getExtractionEngine());
+        }
+    }
+
+    private BorrowerWrapper toWrapper(BorrowerEntity b) {
+        BorrowerWrapper w = new BorrowerWrapper();
+        w.setId(b.getId());
+        w.setBorrowerName(b.getBorrowerName());
+        w.setCin(b.getCin());
+        w.setPan(b.getPan());
+        w.setSponsorName(b.getSponsorName());
+        w.setRegisteredAddress(b.getRegisteredAddress());
+        w.setCity(b.getCity());
+        w.setState(b.getState());
+        w.setPincode(b.getPincode());
+        w.setContactPerson(b.getContactPerson());
+        w.setContactEmail(b.getContactEmail());
+        w.setContactPhone(b.getContactPhone());
+        w.setNotes(b.getNotes());
+        w.setProjectId(b.getProjectId());
+        w.setCreatedAt(b.getCreatedAt() == null ? null : b.getCreatedAt().format(TS));
+        w.setUpdatedAt(b.getUpdatedAt() == null ? null : b.getUpdatedAt().format(TS));
+
+        int filled = 0;
+        if (!SanctionValueParser.isBlank(b.getCin()))               filled++;
+        if (!SanctionValueParser.isBlank(b.getPan()))               filled++;
+        if (!SanctionValueParser.isBlank(b.getSponsorName()))       filled++;
+        if (!SanctionValueParser.isBlank(b.getRegisteredAddress())) filled++;
+        if (!SanctionValueParser.isBlank(b.getContactPerson()))     filled++;
+        if (!SanctionValueParser.isBlank(b.getContactEmail()))      filled++;
+        if (!SanctionValueParser.isBlank(b.getContactPhone()))      filled++;
+        w.setIdentityFilled(filled);
+        w.setIdentityTotal(IDENTITY_TOTAL);
+
+        return w;
+    }
+
+    private BorrowerSanctionWrapper toWrapper(BorrowerSanctionEntity e) {
+        BorrowerSanctionWrapper w = new BorrowerSanctionWrapper();
+        w.setId(e.getId());
+        w.setBorrowerId(e.getBorrowerId());
+        w.setRefNo(e.getRefNo());
+        w.setSanctionDate(SanctionValueParser.formatDate(e.getSanctionDate()));
+        w.setLenderName(e.getLenderName());
+        w.setProjectName(e.getProjectName());
+        w.setCategory(e.getCategory());
+        w.setLocation(e.getLocation());
+        w.setProjectCost(SanctionValueParser.formatCrore(e.getProjectCost()));
+        w.setSanctionedAmount(SanctionValueParser.formatCrore(e.getSanctionedAmount()));
+        w.setDebtEquityRatio(e.getDebtEquityRatio());
+        w.setInterestRatePct(SanctionValueParser.str(e.getInterestRatePct()));
+        w.setInterestRateText(e.getInterestRateText());
+        w.setTenorText(e.getTenorText());
+        w.setTenorMonths(SanctionValueParser.str(e.getTenorMonths()));
+        w.setMoratoriumMonths(SanctionValueParser.str(e.getMoratoriumMonths()));
+        w.setScheduledCod(SanctionValueParser.formatDate(e.getScheduledCod()));
+        w.setStatus(e.getStatus());
+        w.setSource(e.getSource());
+        w.setExtractionEngine(e.getExtractionEngine());
+        w.setSanctionDocName(e.getSanctionDocName());
+        w.setSanctionDocMime(e.getSanctionDocMime());
+        w.setSanctionDocSize(e.getSanctionDocSize());
+        w.setHasDocument(e.getSanctionDocSize() != null && e.getSanctionDocSize() > 0);
+        w.setCreatedAt(e.getCreatedAt() == null ? null : e.getCreatedAt().format(TS));
+        w.setUpdatedAt(e.getUpdatedAt() == null ? null : e.getUpdatedAt().format(TS));
+
+        derived.apply(e, w);
+        return w;
+    }
+
+    /** Serialise the parser's original output for the audit column. */
+    public String toJson(Map<String, Object> fields) {
+        try {
+            return MAPPER.writeValueAsString(fields);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+}
