@@ -1,5 +1,8 @@
 package com.istlgroup.istl_group_crm_backend.wrapperClasses;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Data;
 
@@ -33,15 +36,56 @@ public class BorrowerSanctionWrapper {
     /** Accepts "205.00 Cr", "Rs. 205 Crore", "2050000000" — all the same value. */
     private String projectCost;
     private String sanctionedAmount;
+
+    // ── means of finance (registry sheet) ──
+    /**
+     * The sheet's column header declares crore, so a unit-less number here is
+     * read as crore. Explicit units ("Rs. 205 Crore", "2,05,00,000 lakh") still
+     * win — see {@code SanctionValueParser.parseMoneyCrore}.
+     */
+    private String debtAmount;
+    private String equityAmount;
+    private String debtPct;
+    private String equityPct;
     private String debtEquityRatio;
 
+    // ── rate build-up ──
+    private String baseRatePct;
+    private String spreadPct;
+    private String roiPct;
     private String interestRatePct;
     private String interestRateText;
+
+    // ── project details ──
+    private String technology;
+    private String village;
+    private String district;
+    private String instrument;
+
+    // ── security ──
+    private String coObligators;
+    private String pledgeOfSharesPct;
+
+    // ── financial covenants ──
+    private String minDscr;
+    private String dsra;
+    private String isra;
+    private String cashSweep;
 
     private String tenorText;
     private String tenorMonths;
     private String moratoriumMonths;
+
+    // ── timeline ──
+    private String disbursementDate;
+    /** Contractual, as printed — the {@code derived*} twins stay modelled. */
+    private String repaymentStartDate;
+    private String repaymentEndDate;
     private String scheduledCod;
+
+    // ── base case assumptions ──
+    private String plfPct;
+    private String tariffPerUnit;
 
     // ── lifecycle ──
     private String status;
@@ -64,6 +108,16 @@ public class BorrowerSanctionWrapper {
     private String derivedFirstYearInterest;
     private String derivedSanctionValidTill;
     private String derivedCodStatus;
+    /** Set when a printed ROI disagrees with base rate + spread. */
+    private String derivedRoiCheck;
+
+    /**
+     * Keys this response filled by calculation because the letter did not print
+     * them — so the UI can mark a value as computed rather than read. A key
+     * being absent from the map is how "not in the document" is represented;
+     * a key present here means "not in the document, but inferable".
+     */
+    private List<String> computedFields = new ArrayList<>();
 
     // ── audit ──
     private String createdAt;

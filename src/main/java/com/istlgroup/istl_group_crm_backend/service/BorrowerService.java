@@ -322,22 +322,74 @@ public class BorrowerService {
     /**
      * Find an existing borrower by name, or create one. Called by the review
      * screen once the user has confirmed which company the letter belongs to.
+     *
+     * <p>The letter also carries borrower-level values the sanction row has no
+     * home for — promoter, guarantor, group, Cat / Sub Cat. Those are filled in
+     * here, but only where the borrower is still blank: an import must never
+     * overwrite something a user typed.
      */
     @Transactional
-    public BorrowerWrapper resolveBorrower(String borrowerName, Long userId) throws CustomException {
-        if (SanctionValueParser.isBlank(borrowerName)) {
+    public BorrowerWrapper resolveBorrower(BorrowerWrapper in, Long userId) throws CustomException {
+        if (in == null || SanctionValueParser.isBlank(in.getBorrowerName())) {
             throw new CustomException("Borrower name is required");
         }
-        String name = borrowerName.trim();
+        String name = in.getBorrowerName().trim();
         Optional<BorrowerEntity> existing =
                 borrowerRepo.findByBorrowerNameIgnoreCaseAndDeletedAtIsNull(name);
+
+        BorrowerEntity b;
         if (existing.isPresent()) {
-            return getById(existing.get().getId());
+            b = existing.get();
+            if (!fillBlanks(b, in)) return getById(b.getId());
+            b.setUpdatedBy(userId);
+        } else {
+            b = new BorrowerEntity();
+            b.setBorrowerName(name);
+            fillBlanks(b, in);
+            b.setCreatedBy(userId);
         }
-        BorrowerEntity b = new BorrowerEntity();
-        b.setBorrowerName(name);
-        b.setCreatedBy(userId);
-        return toWrapper(borrowerRepo.save(b));
+        return getById(borrowerRepo.save(b).getId());
+    }
+
+    /** Copy the parsed borrower-level values onto blank fields only. */
+    private boolean fillBlanks(BorrowerEntity b, BorrowerWrapper in) {
+        boolean changed = false;
+        if (SanctionValueParser.isBlank(b.getSponsorName())
+                && !SanctionValueParser.isBlank(in.getSponsorName())) {
+            b.setSponsorName(SanctionValueParser.clean(in.getSponsorName()));
+            changed = true;
+        }
+        if (SanctionValueParser.isBlank(b.getPromoterName())
+                && !SanctionValueParser.isBlank(in.getPromoterName())) {
+            b.setPromoterName(SanctionValueParser.clean(in.getPromoterName()));
+            changed = true;
+        }
+        if (SanctionValueParser.isBlank(b.getGuarantorName())
+                && !SanctionValueParser.isBlank(in.getGuarantorName())) {
+            b.setGuarantorName(SanctionValueParser.clean(in.getGuarantorName()));
+            changed = true;
+        }
+        if (SanctionValueParser.isBlank(b.getGroupName())
+                && !SanctionValueParser.isBlank(in.getGroupName())) {
+            b.setGroupName(SanctionValueParser.clean(in.getGroupName()));
+            changed = true;
+        }
+        if (SanctionValueParser.isBlank(b.getBorrowerCategory())
+                && !SanctionValueParser.isBlank(in.getBorrowerCategory())) {
+            b.setBorrowerCategory(SanctionValueParser.clean(in.getBorrowerCategory()));
+            changed = true;
+        }
+        if (SanctionValueParser.isBlank(b.getBorrowerSubCategory())
+                && !SanctionValueParser.isBlank(in.getBorrowerSubCategory())) {
+            b.setBorrowerSubCategory(SanctionValueParser.clean(in.getBorrowerSubCategory()));
+            changed = true;
+        }
+        if (SanctionValueParser.isBlank(b.getState())
+                && !SanctionValueParser.isBlank(in.getState())) {
+            b.setState(SanctionValueParser.clean(in.getState()));
+            changed = true;
+        }
+        return changed;
     }
 
     @Transactional
@@ -356,9 +408,18 @@ public class BorrowerService {
             throw new CustomException(
                     "The sanctioned amount cannot be more than the total project cost.");
         }
+        if (e.getProjectCost() != null && e.getDebtAmount() != null
+                && e.getDebtAmount().compareTo(e.getProjectCost()) > 0) {
+            throw new CustomException("The debt cannot be more than the total project cost.");
+        }
         if (e.getSanctionDate() != null && e.getScheduledCod() != null
                 && e.getScheduledCod().isBefore(e.getSanctionDate())) {
             throw new CustomException("The scheduled COD cannot fall before the sanction date.");
+        }
+        if (e.getRepaymentStartDate() != null && e.getRepaymentEndDate() != null
+                && e.getRepaymentEndDate().isBefore(e.getRepaymentStartDate())) {
+            throw new CustomException(
+                    "The repayment end date cannot fall before the repayment start date.");
         }
     }
 
@@ -478,6 +539,11 @@ public class BorrowerService {
         b.setCin(SanctionValueParser.clean(in.getCin()));
         b.setPan(SanctionValueParser.clean(in.getPan()));
         b.setSponsorName(SanctionValueParser.clean(in.getSponsorName()));
+        b.setPromoterName(SanctionValueParser.clean(in.getPromoterName()));
+        b.setGuarantorName(SanctionValueParser.clean(in.getGuarantorName()));
+        b.setGroupName(SanctionValueParser.clean(in.getGroupName()));
+        b.setBorrowerCategory(SanctionValueParser.clean(in.getBorrowerCategory()));
+        b.setBorrowerSubCategory(SanctionValueParser.clean(in.getBorrowerSubCategory()));
         b.setRegisteredAddress(SanctionValueParser.clean(in.getRegisteredAddress()));
         b.setCity(SanctionValueParser.clean(in.getCity()));
         b.setState(SanctionValueParser.clean(in.getState()));
@@ -497,15 +563,36 @@ public class BorrowerService {
         e.setCategory(SanctionValueParser.clean(in.getCategory()));
         e.setLocation(SanctionValueParser.clean(in.getLocation()));
 
-        e.setProjectCost(SanctionValueParser.parseMoney(in.getProjectCost()));
-        e.setSanctionedAmount(SanctionValueParser.parseMoney(in.getSanctionedAmount()));
+        // Money on this form is quoted in crore, so a unit-less number scales.
+        e.setProjectCost(SanctionValueParser.parseMoneyCrore(in.getProjectCost()));
+        e.setSanctionedAmount(SanctionValueParser.parseMoneyCrore(in.getSanctionedAmount()));
+        e.setDebtAmount(SanctionValueParser.parseMoneyCrore(in.getDebtAmount()));
+        e.setEquityAmount(SanctionValueParser.parseMoneyCrore(in.getEquityAmount()));
+        e.setDebtPct(SanctionValueParser.parsePct(in.getDebtPct()));
+        e.setEquityPct(SanctionValueParser.parsePct(in.getEquityPct()));
         e.setDebtEquityRatio(SanctionValueParser.clean(in.getDebtEquityRatio()));
 
+        e.setBaseRatePct(SanctionValueParser.parsePct(in.getBaseRatePct()));
+        e.setSpreadPct(SanctionValueParser.parsePct(in.getSpreadPct()));
+        e.setRoiPct(SanctionValueParser.parsePct(in.getRoiPct()));
         e.setInterestRateText(SanctionValueParser.clean(in.getInterestRateText()));
         // Prefer an explicitly supplied percentage; otherwise read it off the phrase.
         e.setInterestRatePct(in.getInterestRatePct() != null
                 ? SanctionValueParser.parseDecimal(in.getInterestRatePct())
                 : SanctionValueParser.parseRatePct(in.getInterestRateText()));
+
+        e.setTechnology(SanctionValueParser.clean(in.getTechnology()));
+        e.setVillage(SanctionValueParser.clean(in.getVillage()));
+        e.setDistrict(SanctionValueParser.clean(in.getDistrict()));
+        e.setInstrument(SanctionValueParser.clean(in.getInstrument()));
+
+        e.setCoObligators(SanctionValueParser.clean(in.getCoObligators()));
+        e.setPledgeOfSharesPct(SanctionValueParser.parsePct(in.getPledgeOfSharesPct()));
+
+        e.setMinDscr(SanctionValueParser.parseMultiple(in.getMinDscr()));
+        e.setDsra(SanctionValueParser.clean(in.getDsra()));
+        e.setIsra(SanctionValueParser.clean(in.getIsra()));
+        e.setCashSweep(SanctionValueParser.clean(in.getCashSweep()));
 
         e.setTenorText(SanctionValueParser.clean(in.getTenorText()));
         e.setTenorMonths(in.getTenorMonths() != null
@@ -515,7 +602,13 @@ public class BorrowerService {
                 ? SanctionValueParser.parseInt(in.getMoratoriumMonths())
                 : SanctionValueParser.parseMoratoriumMonths(in.getTenorText()));
 
+        e.setDisbursementDate(SanctionValueParser.parseDate(in.getDisbursementDate()));
+        e.setRepaymentStartDate(SanctionValueParser.parseDate(in.getRepaymentStartDate()));
+        e.setRepaymentEndDate(SanctionValueParser.parseDate(in.getRepaymentEndDate()));
         e.setScheduledCod(SanctionValueParser.parseDate(in.getScheduledCod()));
+
+        e.setPlfPct(SanctionValueParser.parsePct(in.getPlfPct()));
+        e.setTariffPerUnit(SanctionValueParser.parseDecimal(in.getTariffPerUnit()));
 
         if (!SanctionValueParser.isBlank(in.getStatus()))  e.setStatus(in.getStatus());
         if (!SanctionValueParser.isBlank(in.getSource()))  e.setSource(in.getSource());
@@ -531,6 +624,11 @@ public class BorrowerService {
         w.setCin(b.getCin());
         w.setPan(b.getPan());
         w.setSponsorName(b.getSponsorName());
+        w.setPromoterName(b.getPromoterName());
+        w.setGuarantorName(b.getGuarantorName());
+        w.setGroupName(b.getGroupName());
+        w.setBorrowerCategory(b.getBorrowerCategory());
+        w.setBorrowerSubCategory(b.getBorrowerSubCategory());
         w.setRegisteredAddress(b.getRegisteredAddress());
         w.setCity(b.getCity());
         w.setState(b.getState());
@@ -543,6 +641,9 @@ public class BorrowerService {
         w.setCreatedAt(b.getCreatedAt() == null ? null : b.getCreatedAt().format(TS));
         w.setUpdatedAt(b.getUpdatedAt() == null ? null : b.getUpdatedAt().format(TS));
 
+        // Deliberately still the seven KYC-pack fields. The registry-sheet
+        // columns added alongside them are not part of "identity complete", and
+        // counting them would flip every existing Complete chip to "7 of 13".
         int filled = 0;
         if (!SanctionValueParser.isBlank(b.getCin()))               filled++;
         if (!SanctionValueParser.isBlank(b.getPan()))               filled++;
@@ -569,13 +670,43 @@ public class BorrowerService {
         w.setLocation(e.getLocation());
         w.setProjectCost(SanctionValueParser.formatCrore(e.getProjectCost()));
         w.setSanctionedAmount(SanctionValueParser.formatCrore(e.getSanctionedAmount()));
+        w.setDebtAmount(SanctionValueParser.formatCrore(e.getDebtAmount()));
+        w.setEquityAmount(SanctionValueParser.formatCrore(e.getEquityAmount()));
+        w.setDebtPct(SanctionValueParser.formatPct(e.getDebtPct()));
+        w.setEquityPct(SanctionValueParser.formatPct(e.getEquityPct()));
         w.setDebtEquityRatio(e.getDebtEquityRatio());
+
+        w.setBaseRatePct(SanctionValueParser.formatPct(e.getBaseRatePct()));
+        w.setSpreadPct(SanctionValueParser.formatPct(e.getSpreadPct()));
+        w.setRoiPct(SanctionValueParser.formatPct(e.getRoiPct()));
         w.setInterestRatePct(SanctionValueParser.str(e.getInterestRatePct()));
         w.setInterestRateText(e.getInterestRateText());
+
+        w.setTechnology(e.getTechnology());
+        w.setVillage(e.getVillage());
+        w.setDistrict(e.getDistrict());
+        w.setInstrument(e.getInstrument());
+
+        w.setCoObligators(e.getCoObligators());
+        w.setPledgeOfSharesPct(SanctionValueParser.formatPct(e.getPledgeOfSharesPct()));
+
+        w.setMinDscr(SanctionValueParser.formatMultiple(e.getMinDscr()));
+        w.setDsra(e.getDsra());
+        w.setIsra(e.getIsra());
+        w.setCashSweep(e.getCashSweep());
+
         w.setTenorText(e.getTenorText());
         w.setTenorMonths(SanctionValueParser.str(e.getTenorMonths()));
         w.setMoratoriumMonths(SanctionValueParser.str(e.getMoratoriumMonths()));
+
+        w.setDisbursementDate(SanctionValueParser.formatDate(e.getDisbursementDate()));
+        w.setRepaymentStartDate(SanctionValueParser.formatDate(e.getRepaymentStartDate()));
+        w.setRepaymentEndDate(SanctionValueParser.formatDate(e.getRepaymentEndDate()));
         w.setScheduledCod(SanctionValueParser.formatDate(e.getScheduledCod()));
+
+        w.setPlfPct(SanctionValueParser.formatPct(e.getPlfPct()));
+        w.setTariffPerUnit(SanctionValueParser.formatTariff(e.getTariffPerUnit()));
+
         w.setStatus(e.getStatus());
         w.setSource(e.getSource());
         w.setExtractionEngine(e.getExtractionEngine());
@@ -587,6 +718,8 @@ public class BorrowerService {
         w.setUpdatedAt(e.getUpdatedAt() == null ? null : e.getUpdatedAt().format(TS));
 
         derived.apply(e, w);
+        // Printed wins; this only fills registry-sheet columns still blank.
+        derived.fillGaps(e, w);
         return w;
     }
 

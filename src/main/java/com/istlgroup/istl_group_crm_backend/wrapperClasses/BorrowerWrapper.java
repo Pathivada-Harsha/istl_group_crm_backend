@@ -25,6 +25,14 @@ public class BorrowerWrapper {
     private String pan;
     private String sponsorName;
 
+    // ── parties (registry sheet: Borrower Details) ──
+    private String promoterName;
+    private String guarantorName;
+    private String groupName;
+    /** Registry sheet "Cat" / "Sub Cat" — not the sanction's project category. */
+    private String borrowerCategory;
+    private String borrowerSubCategory;
+
     // ── registered office ──
     private String registeredAddress;
     private String city;

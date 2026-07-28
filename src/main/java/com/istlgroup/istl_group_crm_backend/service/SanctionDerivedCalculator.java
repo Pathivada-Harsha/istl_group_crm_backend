@@ -19,15 +19,23 @@ import com.istlgroup.istl_group_crm_backend.wrapperClasses.BorrowerSanctionWrapp
  * them typed.
  *
  * <p>Mirrored in the frontend's {@code deriveSanction()} so the review screen
- * can update them live as the user edits. If you change a rule here, change it
- * there too — the backend value is the one that is persisted-adjacent and shown
- * on the detail page.
+ * can update them live as the user edits. If you change a rule here — in
+ * {@link #apply} or {@link #fillGaps} — change it there too; the backend value
+ * is the one that is persisted-adjacent and shown on the detail page.
  */
 @Component
 public class SanctionDerivedCalculator {
 
     /** Letters in the sample set state a six-month validity. */
     private static final int DEFAULT_VALIDITY_MONTHS = 6;
+
+    private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
+
+    /**
+     * Rates are decimal(6,3), so anything below a thousandth of a point is
+     * storage noise, not a disagreement worth flagging to a credit officer.
+     */
+    private static final BigDecimal ROI_TOLERANCE = new BigDecimal("0.001");
 
     public void apply(BorrowerSanctionEntity e, BorrowerSanctionWrapper w) {
         if (e == null || w == null) return;
@@ -85,6 +93,82 @@ public class SanctionDerivedCalculator {
                 w.setDerivedCodStatus("In " + (-days) + " days");
             }
         }
+    }
+
+    /**
+     * Fill the registry-sheet columns the letter left blank but that follow
+     * arithmetically from what it did print. Printed wins: this only ever writes
+     * a wrapper field that is still null, and records what it filled in
+     * {@code computedFields} so the UI can mark the value as calculated.
+     *
+     * <p>Call it after {@link #apply}. It deliberately never touches
+     * {@code derivedRepaymentStart} / {@code derivedRepaymentEnd} — those stay
+     * the modelled dates, so a divergence from the contractual ones printed in
+     * the letter remains visible.
+     */
+    public void fillGaps(BorrowerSanctionEntity e, BorrowerSanctionWrapper w) {
+        if (e == null || w == null) return;
+
+        BigDecimal cost = e.getProjectCost();
+        BigDecimal debt = e.getDebtAmount();
+
+        // Debt is the sanctioned amount unless the letter splits them out —
+        // a facility that is one tranche of a larger consortium debt.
+        if (debt == null && e.getSanctionedAmount() != null) {
+            debt = e.getSanctionedAmount();
+            fill(w, "debtAmount", SanctionValueParser.formatCrore(debt));
+        }
+
+        BigDecimal equity = e.getEquityAmount();
+        if (equity == null && cost != null && debt != null) {
+            equity = cost.subtract(debt);
+            fill(w, "equityAmount", SanctionValueParser.formatCrore(equity));
+        }
+
+        BigDecimal debtPct = e.getDebtPct();
+        if (debtPct == null && cost != null && debt != null && cost.signum() != 0) {
+            debtPct = debt.multiply(HUNDRED).divide(cost, 1, RoundingMode.HALF_UP);
+            fill(w, "debtPct", SanctionValueParser.formatPct(debtPct));
+        }
+
+        if (e.getEquityPct() == null) {
+            BigDecimal equityPct = null;
+            if (equity != null && cost != null && cost.signum() != 0) {
+                equityPct = equity.multiply(HUNDRED).divide(cost, 1, RoundingMode.HALF_UP);
+            } else if (debtPct != null) {
+                equityPct = HUNDRED.subtract(debtPct);
+            }
+            fill(w, "equityPct", SanctionValueParser.formatPct(equityPct));
+        }
+
+        // ── ROI = base rate + spread ──
+        BigDecimal base   = e.getBaseRatePct();
+        BigDecimal spread = e.getSpreadPct();
+        if (base != null && spread != null) {
+            BigDecimal built = base.add(spread);
+            if (e.getRoiPct() == null) {
+                fill(w, "roiPct", SanctionValueParser.formatPct(built));
+            } else if (e.getRoiPct().subtract(built).abs().compareTo(ROI_TOLERANCE) > 0) {
+                w.setDerivedRoiCheck("Does not reconcile — base + spread = "
+                        + SanctionValueParser.formatPct(built));
+            } else {
+                w.setDerivedRoiCheck("Reconciles");
+            }
+        }
+    }
+
+    /** Write a wrapper field only if it is still empty, and note that we did. */
+    private void fill(BorrowerSanctionWrapper w, String key, String value) {
+        if (value == null) return;
+        switch (key) {
+            case "debtAmount"   -> { if (!SanctionValueParser.isBlank(w.getDebtAmount()))   return; w.setDebtAmount(value); }
+            case "equityAmount" -> { if (!SanctionValueParser.isBlank(w.getEquityAmount())) return; w.setEquityAmount(value); }
+            case "debtPct"      -> { if (!SanctionValueParser.isBlank(w.getDebtPct()))      return; w.setDebtPct(value); }
+            case "equityPct"    -> { if (!SanctionValueParser.isBlank(w.getEquityPct()))    return; w.setEquityPct(value); }
+            case "roiPct"       -> { if (!SanctionValueParser.isBlank(w.getRoiPct()))       return; w.setRoiPct(value); }
+            default -> { return; }
+        }
+        w.getComputedFields().add(key);
     }
 
     /**

@@ -27,6 +27,9 @@ public class BorrowerEntity {
     @Column(name = "borrower_name", nullable = false)
     private String borrowerName;
 
+    // The registry sheet's "SL Ref. No" is the sanction's own reference, not a
+    // second number — it lives on BorrowerSanctionEntity.refNo.
+
     /** Unique when present; the natural key for a company, unlike its name. */
     @Column(name = "cin", length = 30)
     private String cin;
@@ -37,6 +40,28 @@ public class BorrowerEntity {
     /** Parent / promoter group behind the SPV. */
     @Column(name = "sponsor_name")
     private String sponsorName;
+
+    // ── parties (registry sheet: Borrower Details) ──
+    @Column(name = "promoter_name")
+    private String promoterName;
+
+    @Column(name = "guarantor_name")
+    private String guarantorName;
+
+    @Column(name = "group_name")
+    private String groupName;
+
+    /**
+     * The registry sheet's "Cat" / "Sub Cat". Deliberately not named
+     * {@code category} — {@code BorrowerSanctionEntity.category} is the
+     * project sector on a letter, and two fields called "category" on the
+     * same screen would be read wrong.
+     */
+    @Column(name = "borrower_category", length = 120)
+    private String borrowerCategory;
+
+    @Column(name = "borrower_sub_category", length = 120)
+    private String borrowerSubCategory;
 
     // ── registered office ──
     @Column(name = "registered_address", columnDefinition = "TEXT")

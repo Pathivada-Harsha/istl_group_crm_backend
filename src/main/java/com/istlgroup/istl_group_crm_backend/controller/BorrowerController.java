@@ -122,13 +122,20 @@ public class BorrowerController {
         }
     }
 
-    /** Find-or-create by name, used by the review screen before saving. */
+    /**
+     * Find-or-create by name, used by the review screen before saving.
+     *
+     * <p>Takes a whole {@link BorrowerWrapper} rather than just the name so the
+     * borrower-level values the letter carried — promoter, guarantor, group,
+     * Cat / Sub Cat, SL ref. — aren't dropped on the floor. The older
+     * {@code {"borrowerName": "..."}} payload still deserialises unchanged.
+     */
     @PostMapping("/resolve")
     public ResponseEntity<Map<String, Object>> resolve(
-            @RequestBody Map<String, String> body,
+            @RequestBody BorrowerWrapper body,
             @RequestHeader(value = "User-Id", required = false) Long userId) {
         try {
-            return ok(borrowerService.resolveBorrower(body.get("borrowerName"), userId), null);
+            return ok(borrowerService.resolveBorrower(body, userId), null);
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
         } catch (Exception e) {

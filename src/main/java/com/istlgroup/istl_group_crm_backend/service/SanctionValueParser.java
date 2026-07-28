@@ -92,6 +92,44 @@ public final class SanctionValueParser {
         return value.setScale(2, RoundingMode.HALF_UP);
     }
 
+    /**
+     * Same as {@link #parseMoney(String)}, except a number carrying no unit is
+     * read as crore rather than rupees.
+     *
+     * <p>Use this only where the label itself declares the unit — the registry
+     * sheet's "Debt (Rs. Cr's)" column, and the money inputs on the borrower
+     * forms, which carry an "in ₹ Cr" suffix. Never make it the general path:
+     * a user who pastes "1537500000" would otherwise create a record 10⁷ times
+     * too large.
+     *
+     * <p>Two escapes keep that from happening even here. An explicit unit always
+     * wins, and a bare number of a lakh or more is left in rupees — no project
+     * in this book costs a hundred thousand crore, so a figure that large was
+     * plainly already pasted in rupees.
+     */
+    public static BigDecimal parseMoneyCrore(String raw) {
+        String s = clean(raw);
+        if (s == null) return null;
+
+        String lower = s.toLowerCase(Locale.ENGLISH);
+        Matcher m = NUM.matcher(lower);
+        if (!m.find()) return null;
+
+        String tail = lower.substring(m.end());
+        boolean unitStated = tail.contains("crore") || tail.contains("lakh") || tail.contains("lac")
+                || tail.matches("^\\s*(cr|crs|l|lk)\\b.*");
+        if (unitStated) return parseMoney(raw);
+
+        BigDecimal value;
+        try {
+            value = new BigDecimal(m.group(1).replace(",", ""));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        if (value.abs().compareTo(LAKH) >= 0) return value.setScale(2, RoundingMode.HALF_UP);
+        return value.multiply(CRORE).setScale(2, RoundingMode.HALF_UP);
+    }
+
     /** Render plain rupees back as "₹153.75 Cr" for display. */
     public static String formatCrore(BigDecimal rupees) {
         if (rupees == null) return null;
@@ -133,6 +171,49 @@ public final class SanctionValueParser {
             } catch (NumberFormatException ignored) { }
         }
         return null;
+    }
+
+    /**
+     * A percentage that may or may not carry its sign: "75", "75%", "9.75 % p.a."
+     * all → 9.75 / 75.
+     *
+     * <p>Deliberately not {@link #parseRatePct(String)}, which <em>requires</em>
+     * a "%" and returns null for a bare "75" — and a bare number is exactly what
+     * a value copied out of the registry sheet looks like.
+     */
+    public static BigDecimal parsePct(String raw) {
+        String s = clean(raw);
+        if (s == null) return null;
+        return parseDecimal(s.replace("%", " "));
+    }
+
+    /** Render a percentage back as "9.75%", without trailing zeros. */
+    public static String formatPct(BigDecimal pct) {
+        return pct == null ? null : trim(pct) + "%";
+    }
+
+    /** A coverage multiple: "1.12x", "1.12 times", "1.12" → 1.12. */
+    public static BigDecimal parseMultiple(String raw) {
+        String s = clean(raw);
+        if (s == null) return null;
+        return parseDecimal(s.replaceAll("(?i)\\s*(x|times)\\s*$", ""));
+    }
+
+    /** Render a coverage multiple back as "1.12x". */
+    public static String formatMultiple(BigDecimal m) {
+        return m == null ? null : trim(m) + "x";
+    }
+
+    /** Render a per-unit tariff back as "₹2.53/kWh". */
+    public static String formatTariff(BigDecimal perUnit) {
+        return perUnit == null ? null : "₹" + trim(perUnit) + "/kWh";
+    }
+
+    /** Drop trailing zeros so decimal(6,3) does not render "9.750%". */
+    private static String trim(BigDecimal v) {
+        BigDecimal t = v.stripTrailingZeros();
+        // stripTrailingZeros turns 100 into 1E+2; scale(0) puts it back.
+        return (t.scale() < 0 ? t.setScale(0) : t).toPlainString();
     }
 
     // ── tenor ───────────────────────────────────────────────────────────────

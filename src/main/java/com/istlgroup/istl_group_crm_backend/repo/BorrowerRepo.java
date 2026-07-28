@@ -26,9 +26,11 @@ public interface BorrowerRepo extends JpaRepository<BorrowerEntity, Long> {
 
     /**
      * Registry search. Covers what the search box actually promises — borrower
-     * name, CIN, PAN <em>and</em> the sanction reference number. The original
+     * name, CIN, PAN, promoter, group <em>and</em> the sanction reference
+     * number, which the registry sheet prints as "SL Ref. No". The original
      * version omitted ref no., so pasting one returned nothing even though the
-     * placeholder invited it.
+     * placeholder invited it; promoter and group joined the list when they
+     * became visible columns.
      *
      * <p>Both parameters are optional and combine: a null or blank value means
      * "don't filter on this", so one query serves all four states.
@@ -38,6 +40,8 @@ public interface BorrowerRepo extends JpaRepository<BorrowerEntity, Long> {
          + "   LOWER(b.borrowerName) LIKE LOWER(CONCAT('%', :q, '%'))"
          + "   OR LOWER(COALESCE(b.cin, '')) LIKE LOWER(CONCAT('%', :q, '%'))"
          + "   OR LOWER(COALESCE(b.pan, '')) LIKE LOWER(CONCAT('%', :q, '%'))"
+         + "   OR LOWER(COALESCE(b.promoterName, '')) LIKE LOWER(CONCAT('%', :q, '%'))"
+         + "   OR LOWER(COALESCE(b.groupName, '')) LIKE LOWER(CONCAT('%', :q, '%'))"
          + "   OR EXISTS (SELECT 1 FROM BorrowerSanctionEntity s"
          + "              WHERE s.borrowerId = b.id AND s.deletedAt IS NULL"
          + "              AND LOWER(s.refNo) LIKE LOWER(CONCAT('%', :q, '%')))"
