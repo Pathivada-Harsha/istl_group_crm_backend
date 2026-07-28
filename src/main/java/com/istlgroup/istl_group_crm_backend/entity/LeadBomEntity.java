@@ -70,6 +70,28 @@ public class LeadBomEntity {
     @Column(name = "notes", length = 500)
     private String notes;
 
+    // ── Auto-sizing: quantity basis snapshot (kept so a reloaded BOM stays live) ──
+    /** FIXED | PER_KW | PER_STEP | FROM_SITE_VISIT | PER_WATT_PEAK | PER_INVERTER_KW | PER_MODULE | PER_INVERTER. Null = legacy static line. */
+    @Column(name = "basis", length = 20)
+    private String basis;
+
+    @Column(name = "basis_value", precision = 18, scale = 4)
+    private BigDecimal basisValue;
+
+    @Column(name = "step_value", precision = 18, scale = 4)
+    private BigDecimal stepValue;
+
+    @Column(name = "site_visit_field", length = 60)
+    private String siteVisitField;
+
+    /** Numeric driver snapshot of the chosen variant (module Wp / inverter kW). */
+    @Column(name = "driver_attr", precision = 18, scale = 4)
+    private BigDecimal driverAttr;
+
+    /** true = quantity auto-derives from the basis; false = user typed a manual quantity. */
+    @Column(name = "auto_qty")
+    private Boolean autoQty = Boolean.TRUE;
+
     // ── Audit ────────────────────────────────────────────────────────────────
     @Column(name = "created_by")
     private Long createdBy;

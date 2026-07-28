@@ -13,8 +13,11 @@ import java.util.Set;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.BomItemVariantEntity;
+import com.istlgroup.istl_group_crm_backend.entity.BomItemsMasterEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadBomEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadBomTemplateItemEntity;
 import com.istlgroup.istl_group_crm_backend.entity.TemplateLineVariantEntity;
@@ -29,6 +32,7 @@ import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
 import com.istlgroup.istl_group_crm_backend.entity.ScopeActivitySuggestionEntity;
 import com.istlgroup.istl_group_crm_backend.entity.SiteVisitEntity;
 import com.istlgroup.istl_group_crm_backend.repo.BomItemVariantRepo;
+import com.istlgroup.istl_group_crm_backend.repo.BomItemsMasterRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadAccessRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadBomRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadBomTemplateItemRepo;
@@ -96,6 +100,9 @@ public class LeadScopeService {
     private BomItemVariantRepo bomItemVariantRepo;
 
     @Autowired
+    private BomItemsMasterRepo bomItemsMasterRepo;
+
+    @Autowired
     private TemplateLineVariantRepo templateLineVariantRepo;
 
     @Autowired
@@ -115,6 +122,9 @@ public class LeadScopeService {
 
     @Autowired
     private ScopeActivitySuggestionRepo scopeActivitySuggestionRepo;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     // ─────────────────────────────────────────────────────────────────────────
     // AUTH
@@ -456,6 +466,11 @@ public class LeadScopeService {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("lines", lineMaps);
         data.put("totalAmount", total.setScale(2, RoundingMode.HALF_UP));
+        // Resolved capacity (kW) so the tab can recompute auto-sized quantities live on reload.
+        LeadsEntity lead = leadsRepo.findById(leadId).orElse(null);
+        CapacityInfo cap = lead == null ? null
+                : CapacityUtil.parse(lead.getCapacity(), lead.getCapacityUnit(), lead.getSubGroupName());
+        data.put("capacityKw", cap != null && cap.isUsable() ? cap.scaleBase() : null);
         return data;
     }
 
@@ -511,6 +526,13 @@ public class LeadScopeService {
             line.setUnit(r.getUnit());
             line.setBomItemId(r.getBomItemId());
             line.setVariantId(r.getVariantId());
+            // Auto-sizing snapshot (kept so a reloaded BOM recomputes live).
+            line.setBasis(r.getBasis());
+            line.setBasisValue(r.getBasisValue());
+            line.setStepValue(r.getStepValue());
+            line.setSiteVisitField(r.getSiteVisitField());
+            line.setDriverAttr(r.getDriverAttr());
+            line.setAutoQty(r.getAutoQty() == null ? Boolean.TRUE : r.getAutoQty());
 
             BigDecimal qty = r.getQuantity() != null ? r.getQuantity() : BigDecimal.ZERO;
             BigDecimal rate = r.getUnitRate() != null ? r.getUnitRate() : BigDecimal.ZERO;
@@ -773,10 +795,15 @@ public class LeadScopeService {
         Map<String, String> siteVisit = latestSiteVisitFields(leadId);
 
         // Template lines for this project type (basis authority + fallback source).
-        List<LeadBomTemplateItemEntity> templateBom = projectType == null ? List.of()
-                : leadBomTemplateItemRepo.findByProjectTypeAndDeletedAtIsNullOrderBySeqNoAscIdAsc(projectType);
-        List<LeadScopeTemplateItemEntity> templateScope = projectType == null ? List.of()
-                : leadScopeTemplateItemRepo.findByProjectTypeAndDeletedAtIsNullOrderBySeqNoAscIdAsc(projectType);
+        // Resolve the ACTIVE template first, then take ITS lines — querying by
+        // project_type alone combines every template for the type, so a second
+        // active one (or a leftover inactive one) silently doubles the suggestion.
+        LeadScopeTemplateEntity activeTemplate = projectType == null ? null
+                : leadScopeTemplateRepo.findFirstByProjectTypeAndIsActiveTrueAndDeletedAtIsNull(projectType).orElse(null);
+        List<LeadBomTemplateItemEntity> templateBom = activeTemplate == null ? List.of()
+                : leadBomTemplateItemRepo.findByTemplateIdAndDeletedAtIsNullOrderBySeqNoAscIdAsc(activeTemplate.getId());
+        List<LeadScopeTemplateItemEntity> templateScope = activeTemplate == null ? List.of()
+                : leadScopeTemplateItemRepo.findByTemplateIdAndDeletedAtIsNullOrderBySeqNoAscIdAsc(activeTemplate.getId());
 
         // Priority: a curated TEMPLATE is the standard for the project type, so it
         // wins whenever one exists — its scope is the agreed activity list and its
@@ -796,8 +823,11 @@ public class LeadScopeService {
             source = "TEMPLATE";
             if (wantScope) scopeItems = resolveTemplateScope(templateScope, templateBom);
             if (wantBom) {
-                bomLines = suggestionEngine.expandTemplateBom(templateBom, cap, siteVisit, warnings);
-                // Pick-a-make: attach each line's allowed makes + default, additively,
+                // Make-driven auto-sizing: resolve each driver line's default make numeric
+                // attribute (module Wp / inverter kW) so the engine can size counts.
+                Map<Long, BigDecimal> driverAttrs = resolveDriverAttrs(templateBom);
+                bomLines = suggestionEngine.expandTemplateBom(templateBom, cap, siteVisit, driverAttrs, warnings);
+                // Pick-a-make: attach each line's makes + default, additively,
                 // WITHOUT touching the engine (its output is 1:1 with templateBom).
                 attachVariantChoices(bomLines, templateBom);
             }
@@ -828,6 +858,7 @@ public class LeadScopeService {
         data.put("hasTemplate", hasTemplate);
         data.put("projectType", projectType);
         data.put("targetCapacity", displayCapacity(cap));
+        data.put("capacityKw", cap.isUsable() ? cap.scaleBase() : null); // resolved kW for live recompute
         data.put("scopeItems", scopeItems);
         data.put("bomLines", bomLines);
         data.put("warnings", warnings);
@@ -1008,20 +1039,32 @@ public class LeadScopeService {
         m.put("bomItemId", l.getBomItemId());
         m.put("variantId", l.getVariantId());
         if (l.getBomItemId() != null) {
+            String schemaJson = variantSchemaJson(l.getBomItemId());
             List<Map<String, Object>> variants = new ArrayList<>();
             for (BomItemVariantEntity v : bomItemVariantRepo
                     .findByBomItemIdAndIsActiveTrueOrderByMakeAsc(l.getBomItemId())) {
-                variants.add(variantChoiceMap(v));
+                variants.add(variantChoiceMap(v, schemaJson));
             }
             m.put("variants", variants);
         }
+        // Auto-sizing metadata so a reloaded BOM stays live (recompute on capacity/make change).
+        m.put("basis", l.getBasis());
+        m.put("basisValue", l.getBasisValue());
+        m.put("stepValue", l.getStepValue());
+        m.put("siteVisitField", l.getSiteVisitField());
+        m.put("driverAttr", l.getDriverAttr());
+        m.put("autoQty", l.getAutoQty() == null ? Boolean.TRUE : l.getAutoQty());
         return m;
     }
 
     /**
-     * Attach each suggested BOM line's allowed makes + default, correlating the
-     * engine output to its template line by index (expandTemplateBom is 1:1 and
+     * Attach each suggested BOM line's makes + default, correlating the engine
+     * output to its template line by index (expandTemplateBom is 1:1 and
      * order-preserving). Additive only — the engine is not modified.
+     *
+     * The dropdown shows ALL of the item's active makes (not just the curated
+     * template subset); the admin-curated make, if any, is only the pre-selected
+     * default. This matches the reload path (bomLineMap) so suggest and reload agree.
      */
     private void attachVariantChoices(List<Map<String, Object>> bomLines,
                                       List<LeadBomTemplateItemEntity> templateBom) {
@@ -1030,29 +1073,15 @@ public class LeadScopeService {
             LeadBomTemplateItemEntity tl = templateBom.get(i);
             if (tl.getBomItemId() == null || tl.getId() == null) continue;
 
-            List<TemplateLineVariantEntity> tlvs = templateLineVariantRepo.findByTemplateItemId(tl.getId());
-            if (tlvs.isEmpty()) continue;
+            List<BomItemVariantEntity> active =
+                    bomItemVariantRepo.findByBomItemIdAndIsActiveTrueOrderByMakeAsc(tl.getBomItemId());
+            if (active.isEmpty()) continue;
 
-            Set<Long> allowed = new HashSet<>();
-            Long defId = null;
-            for (TemplateLineVariantEntity x : tlvs) {
-                allowed.add(x.getVariantId());
-                if (Boolean.TRUE.equals(x.getIsDefault())) defId = x.getVariantId();
-            }
-
+            String schemaJson = variantSchemaJson(tl.getBomItemId());
             List<Map<String, Object>> variants = new ArrayList<>();
-            for (BomItemVariantEntity v : bomItemVariantRepo
-                    .findByBomItemIdAndIsActiveTrueOrderByMakeAsc(tl.getBomItemId())) {
-                if (allowed.contains(v.getId())) variants.add(variantChoiceMap(v));
-            }
-            if (variants.isEmpty()) continue;
+            for (BomItemVariantEntity v : active) variants.add(variantChoiceMap(v, schemaJson));
 
-            // Default must be an active allowed make; else fall back to the first.
-            boolean defActive = false;
-            for (Map<String, Object> vm : variants) {
-                if (vm.get("variantId").equals(defId)) { defActive = true; break; }
-            }
-            if (!defActive) defId = (Long) variants.get(0).get("variantId");
+            Long defId = defaultVariantId(tl, active);
 
             Map<String, Object> line = bomLines.get(i);
             line.put("bomItemId", tl.getBomItemId());
@@ -1062,13 +1091,115 @@ public class LeadScopeService {
         }
     }
 
-    private Map<String, Object> variantChoiceMap(BomItemVariantEntity v) {
+    private Map<String, Object> variantChoiceMap(BomItemVariantEntity v, String schemaJson) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("variantId", v.getId());
         m.put("make", v.getMake());
         m.put("model", v.getModel());
         m.put("description", v.getDescription());
+        Map<String, Object> attrs = parseAttrs(v.getAttributeValues());
+        m.put("attributeValues", attrs);            // drives make-based auto-sizing on the client
+        m.put("spec", composeSpec(schemaJson, attrs)); // so picking a make refreshes the Specifications cell
         return m;
+    }
+
+    /** The raw variant-attribute schema JSON for a catalog item (null when none). */
+    private String variantSchemaJson(Long bomItemId) {
+        if (bomItemId == null) return null;
+        return bomItemsMasterRepo.findById(bomItemId)
+                .map(BomItemsMasterEntity::getVariantAttributes).orElse(null);
+    }
+
+    /**
+     * Compose a variant's structured spec ("590 Wp · TOPCon · N-Type") from the item's
+     * attribute schema (order + units) and the variant's stored values. Mirrors the
+     * frontend specSummary in TemplateLineVariantsModal so it matches template specs.
+     */
+    private String composeSpec(String schemaJson, Map<String, Object> values) {
+        if (schemaJson == null || schemaJson.isBlank() || values == null || values.isEmpty()) return null;
+        List<Map<String, Object>> schema;
+        try {
+            schema = objectMapper.readValue(schemaJson, new TypeReference<List<Map<String, Object>>>() {});
+        } catch (Exception e) {
+            return null;
+        }
+        List<String> parts = new ArrayList<>();
+        for (Map<String, Object> f : schema) {
+            Object keyO = f.get("key");
+            if (keyO == null) continue;
+            Object val = values.get(String.valueOf(keyO));
+            if (val == null || String.valueOf(val).isBlank()) continue;
+            Object unit = f.get("unit");
+            String u = unit == null ? "" : String.valueOf(unit).trim();
+            parts.add(String.valueOf(val) + (u.isEmpty() ? "" : " " + u));
+        }
+        return parts.isEmpty() ? null : String.join(" · ", parts); // "·" separator, matches template spec format
+    }
+
+    // ── Make-driven auto-sizing helpers ──────────────────────────────────────
+
+    /**
+     * The numeric driver each template line's default make contributes: module
+     * wattage (Wp) for PER_WATT_PEAK lines, inverter capacity (kW) for
+     * PER_INVERTER_KW lines. Keyed by template-line id; absent when unresolved.
+     */
+    private Map<Long, BigDecimal> resolveDriverAttrs(List<LeadBomTemplateItemEntity> templateBom) {
+        Map<Long, BigDecimal> out = new LinkedHashMap<>();
+        for (LeadBomTemplateItemEntity t : templateBom) {
+            String key = attrKeyForBasis(t.getBasis());
+            if (key == null || t.getBomItemId() == null || t.getId() == null) continue;
+            List<BomItemVariantEntity> active =
+                    bomItemVariantRepo.findByBomItemIdAndIsActiveTrueOrderByMakeAsc(t.getBomItemId());
+            Long defId = defaultVariantId(t, active);
+            if (defId == null) continue;
+            BomItemVariantEntity v = active.stream().filter(x -> x.getId().equals(defId)).findFirst().orElse(null);
+            BigDecimal attr = numericAttr(v, key);
+            if (attr != null) out.put(t.getId(), attr);
+        }
+        return out;
+    }
+
+    /** Curated default make if present and still active, else the first active make. */
+    private Long defaultVariantId(LeadBomTemplateItemEntity tl, List<BomItemVariantEntity> active) {
+        if (active == null || active.isEmpty()) return null;
+        Long defId = null;
+        for (TemplateLineVariantEntity x : templateLineVariantRepo.findByTemplateItemId(tl.getId())) {
+            if (Boolean.TRUE.equals(x.getIsDefault())) { defId = x.getVariantId(); break; }
+        }
+        if (defId != null) {
+            for (BomItemVariantEntity v : active) if (v.getId().equals(defId)) return defId;
+        }
+        return active.get(0).getId();
+    }
+
+    private String attrKeyForBasis(String basis) {
+        if (LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK.equals(basis)) return "wattage";
+        if (LeadBomTemplateItemEntity.BASIS_PER_INVERTER_KW.equals(basis)) return "capacity";
+        return null;
+    }
+
+    /** Parse a variant's attribute_values JSON to a flat map; null on blank/malformed. */
+    private Map<String, Object> parseAttrs(String json) {
+        if (json == null || json.isBlank()) return null;
+        try {
+            return objectMapper.readValue(json, new TypeReference<Map<String, Object>>() {});
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Numeric value of one attribute key on a variant (e.g. wattage/capacity); null if absent/non-numeric. */
+    private BigDecimal numericAttr(BomItemVariantEntity v, String key) {
+        if (v == null || key == null) return null;
+        Map<String, Object> attrs = parseAttrs(v.getAttributeValues());
+        if (attrs == null) return null;
+        Object raw = attrs.get(key);
+        if (raw == null) return null;
+        try {
+            return new BigDecimal(String.valueOf(raw).trim());
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private Map<String, Object> extraLineMap(LeadBudgetExtraEntity e) {

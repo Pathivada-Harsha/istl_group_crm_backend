@@ -117,6 +117,28 @@ public class InvTransactionController {
         }
     }
 
+    /**
+     * GET /inventory/transactions/project/{projectId}/issued-items
+     *
+     * Items that were taken FROM a warehouse TO this project (OUTWARD), one row
+     * per inventory item, with issuedQty / returnedQty / pendingQty.
+     * Feeds the INWARD modal's item picker so site stock can be received back.
+     *
+     * Optional ?warehouseId= restricts to items held in that warehouse.
+     */
+    @GetMapping("/project/{projectId}/issued-items")
+    public ResponseEntity<?> issuedItemsByProject(
+            @PathVariable String projectId,
+            @RequestParam(required = false) Long warehouseId) {
+        try {
+            return ResponseEntity.ok(txnService.getIssuedItemsForProject(projectId, warehouseId));
+        } catch (Exception e) {
+            log.error("Failed to load issued items for project {}", projectId, e);
+            return ResponseEntity.internalServerError()
+                .body(Map.of("message", "Failed to load issued items: " + e.getMessage()));
+        }
+    }
+
     /** POST /inventory/transactions/batch-outward — issue items from warehouse, auto-creates bill */
     @PostMapping("/batch-outward")
     public ResponseEntity<?> batchOutward(

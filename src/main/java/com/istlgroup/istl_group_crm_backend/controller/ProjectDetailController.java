@@ -14,6 +14,8 @@ import org.springframework.web.bind.annotation.*;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.ProjectPhaseEntity;
 import com.istlgroup.istl_group_crm_backend.service.ProjectDetailService;
+import com.istlgroup.istl_group_crm_backend.service.ProjectScopeSuggestionService;
+import com.istlgroup.istl_group_crm_backend.service.ProjectStatsService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.BudgetRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.ScopeRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.FinanceSaveRequest;
@@ -36,6 +38,12 @@ public class ProjectDetailController {
 
     @Autowired
     private ProjectDetailService detailService;
+
+    @Autowired
+    private ProjectScopeSuggestionService suggestionService;
+
+    @Autowired
+    private ProjectStatsService projectStatsService;
 
     // ── TECHNICAL SCOPE ──────────────────────────────────────────────────────
 
@@ -65,6 +73,11 @@ public class ProjectDetailController {
             @RequestHeader("User-Role") String userRole) {
         try {
             detailService.saveScope(projectUniqueId, request, userId);
+            // saveScope has committed — recompute physical + the blended overall %
+            // (and status) now, in its own transaction, so the headline updates
+            // immediately. Non-fatal: a stats hiccup must not fail the scope save.
+            try { projectStatsService.recalculateProjectStats(projectUniqueId); }
+            catch (Exception statsEx) { /* logged inside; scope save already persisted */ }
             Map<String, Object> data = new HashMap<>();
             data.put("scope",  detailService.getScope(projectUniqueId));
             data.put("phases", phasesToMaps(detailService.getPhases(projectUniqueId)));
@@ -149,6 +162,44 @@ public class ProjectDetailController {
             return ok(data);
         } catch (CustomException e) {
             return err(e.getMessage(), HttpStatus.NOT_FOUND);
+        } catch (Exception e) {
+            return err(e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * Template-driven scope + BOM suggestion for the project's sub-group — the
+     * project analog of {@code GET /leads/{leadId}/scope/suggest}. Same response
+     * shape ({@code scopeItems}, {@code bomLines}, {@code warnings[]}). Never 500s
+     * when no template exists — returns {@code W_NO_TEMPLATE_NO_HISTORY} + empty.
+     * Supersedes {@code /scope/default-plan} (kept routed for backward compat).
+     */
+    @GetMapping("/{projectUniqueId}/scope/suggest")
+    public ResponseEntity<Map<String, Object>> suggestScope(
+            @PathVariable String projectUniqueId,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @RequestParam(value = "target", required = false, defaultValue = "both") String target,
+            @RequestParam(value = "source", required = false, defaultValue = "TEMPLATE") String source) {
+        try {
+            return ok(suggestionService.suggestScopeAndBom(projectUniqueId, target, source));
+        } catch (CustomException e) {
+            return err(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return err("Failed to build suggestion: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /** Whether a template exists for this project's sub-group (Suggest button label). */
+    @GetMapping("/{projectUniqueId}/scope/template-info")
+    public ResponseEntity<Map<String, Object>> templateInfo(
+            @PathVariable String projectUniqueId,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole) {
+        try {
+            return ok(suggestionService.templateInfo(projectUniqueId));
+        } catch (CustomException e) {
+            return err(e.getMessage(), HttpStatus.BAD_REQUEST);
         } catch (Exception e) {
             return err(e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
         }
@@ -310,11 +361,22 @@ public class ProjectDetailController {
             @RequestHeader("User-Id") Long userId,
             @RequestHeader("User-Role") String userRole) {
         try {
-            Map<String, Object> data = new HashMap<>();
-            data.put("lines", detailService.getBom(projectUniqueId));
-            return ok(data);
+            return ok(detailService.getBom(projectUniqueId, canSeeRates(userRole)));
         } catch (CustomException e) { return err(e.getMessage(), HttpStatus.NOT_FOUND); }
         catch (Exception e) { return err(e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR); }
+    }
+
+    /**
+     * Rate gating (§6.5): field-staff access levels see quantities/specs but NOT
+     * pricing (unit_rate / amount / total). Conservative default — gate only clearly
+     * field roles; tune this set once the project_access level model is confirmed.
+     */
+    private boolean canSeeRates(String userRole) {
+        if (userRole == null) return true;
+        String r = userRole.trim().toUpperCase().replace(' ', '_');
+        java.util.Set<String> noRates = java.util.Set.of(
+                "SITE_ENGINEER", "SITE_TECHNICIAN", "TECHNICIAN", "FIELD_ENGINEER");
+        return !noRates.contains(r);
     }
 
     @PutMapping("/{projectUniqueId}/bom")
@@ -366,6 +428,7 @@ public class ProjectDetailController {
             m.put("endWeek",           p.getEndWeek());
             m.put("status",            p.getStatus());
             m.put("progressPercent",   p.getProgressPercent());
+            m.put("plannedProgressPct", p.getPlannedProgressPct());
             m.put("weightPct",         p.getWeightPct());
             m.put("plannedBudget",     p.getPlannedBudget());
             m.put("responsibleUserId", p.getResponsibleUserId());

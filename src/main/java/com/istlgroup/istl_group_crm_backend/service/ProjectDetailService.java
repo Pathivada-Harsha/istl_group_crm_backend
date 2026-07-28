@@ -25,6 +25,8 @@ import com.istlgroup.istl_group_crm_backend.repo.ProjectPhaseRepo;
 import com.istlgroup.istl_group_crm_backend.repo.ProjectProgressPeriodRepo;
 import com.istlgroup.istl_group_crm_backend.repo.ProjectScopeRepo;
 import com.istlgroup.istl_group_crm_backend.repo.ProjectItemRepo;
+import com.istlgroup.istl_group_crm_backend.repo.LeadScopeTemplateRepo;
+import com.istlgroup.istl_group_crm_backend.util.CapacityUtil;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.BudgetLineRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.BudgetRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.CommercialSummary;
@@ -55,6 +57,8 @@ public class ProjectDetailService {
     @Autowired private ProjectProgressPeriodRepo progressRepo;
     @Autowired private ProjectBomRepo     bomRepo;
     @Autowired private ProjectItemRepo    itemRepo;
+    @Autowired private LeadScopeTemplateRepo leadScopeTemplateRepo;
+    @Autowired private ScopeTemplateExpander expander;
 
     @PersistenceContext
     private EntityManager em;
@@ -106,18 +110,94 @@ public class ProjectDetailService {
         return phaseRepo.findByProjectIdOrderBySeqNo(project.getId());
     }
 
+    /** Phase weights are stored to six decimals; see {@code project_phases.weight_pct}. */
+    private static final int PHASE_WEIGHT_SCALE = 6;
+    private static final BigDecimal PHASE_WEIGHT_TOTAL = new BigDecimal("100");
+    /** The most a single two-decimal display value can differ from what's stored. */
+    private static final BigDecimal PHASE_WEIGHT_ROUNDING_STEP = new BigDecimal("0.005");
+
+    /**
+     * Validates the phase weights and normalises them in place.
+     *
+     * <ul>
+     *   <li>No weights at all → even split, so a caller that doesn't send weights
+     *       (or a scope saved before weights meant anything) still works.</li>
+     *   <li>Total off by no more than two-decimal display rounding could explain →
+     *       absorbed onto the largest phase.</li>
+     *   <li>Anything else → rejected, stating the actual total. A scope at 110%
+     *       reports a physical progress that cannot be compared with any other
+     *       project, which is worse than refusing the save.</li>
+     * </ul>
+     */
+    private void normalisePhaseWeights(List<PhaseRequest> phases) throws CustomException {
+        if (phases == null || phases.isEmpty()) return;
+
+        boolean allNull = true;
+        for (PhaseRequest p : phases) {
+            if (p.getWeightPct() != null) { allNull = false; break; }
+        }
+        if (allNull) {
+            BigDecimal each = PHASE_WEIGHT_TOTAL.divide(BigDecimal.valueOf(phases.size()),
+                    PHASE_WEIGHT_SCALE, java.math.RoundingMode.HALF_UP);
+            BigDecimal running = BigDecimal.ZERO;
+            for (int i = 0; i < phases.size(); i++) {
+                BigDecimal w = (i == phases.size() - 1) ? PHASE_WEIGHT_TOTAL.subtract(running) : each;
+                phases.get(i).setWeightPct(w.setScale(PHASE_WEIGHT_SCALE, java.math.RoundingMode.HALF_UP));
+                running = running.add(w);
+            }
+            return;
+        }
+
+        BigDecimal sum = BigDecimal.ZERO;
+        for (PhaseRequest p : phases) {
+            if (p.getWeightPct() != null) sum = sum.add(p.getWeightPct());
+        }
+        BigDecimal delta = PHASE_WEIGHT_TOTAL.subtract(sum);
+        BigDecimal tolerance = PHASE_WEIGHT_ROUNDING_STEP.multiply(BigDecimal.valueOf(phases.size()));
+        if (delta.abs().compareTo(tolerance) > 0) {
+            throw new CustomException("Item weights total "
+                    + sum.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString()
+                    + "% — they must add up to 100% before the scope can be saved.");
+        }
+        if (delta.signum() == 0) return;
+
+        // The correction goes to the largest phase: proportionally the smallest
+        // possible adjustment, and invisible at two decimals.
+        PhaseRequest largest = null;
+        for (PhaseRequest p : phases) {
+            if (p.getWeightPct() == null) continue;
+            if (largest == null || p.getWeightPct().compareTo(largest.getWeightPct()) > 0) largest = p;
+        }
+        if (largest != null) {
+            largest.setWeightPct(largest.getWeightPct().add(delta)
+                    .setScale(PHASE_WEIGHT_SCALE, java.math.RoundingMode.HALF_UP));
+        }
+    }
+
     @Transactional
     public ProjectScopeEntity saveScope(String projectUniqueId, ScopeRequest req, Long userId) throws CustomException {
         DropdownProjectEntity project = requireProject(projectUniqueId);
         Long projectId = project.getId();
 
-        ProjectScopeEntity scope = scopeRepo.findByProjectId(projectId)
-            .orElseGet(() -> {
-                ProjectScopeEntity s = new ProjectScopeEntity();
-                s.setProjectId(projectId);
-                s.setCreatedBy(userId);
-                return s;
-            });
+        // Phase weights drive physical progress, so a scope that does not total
+        // 100% produces a progress figure that cannot be compared with any other
+        // project. Checked here as well as in the browser because this endpoint is
+        // reachable directly. Normalises the request in place.
+        normalisePhaseWeights(req.getPhases());
+
+        ProjectScopeEntity existing = scopeRepo.findByProjectId(projectId).orElse(null);
+        final ProjectScopeEntity scope = existing != null ? existing : new ProjectScopeEntity();
+        if (existing == null) {
+            scope.setProjectId(projectId);
+            scope.setCreatedBy(userId);
+            // Pin template provenance at generation time (audit only). Old projects are
+            // never affected by a later template edit — their scope is materialised into
+            // project_phases/project_bom below and never re-read from the template.
+            leadScopeTemplateRepo
+                .findFirstByProjectTypeAndIsActiveTrueAndDeletedAtIsNull(project.getSubGroupName())
+                .ifPresent(tpl -> { scope.setSourceTemplateId(tpl.getId()); scope.setTemplateVersion(tpl.getVersion()); });
+            if (scope.getScopeSource() == null) scope.setScopeSource("TEMPLATE");
+        }
 
         scope.setProjectType(req.getProjectType());
         scope.setScopeOfWork(req.getScopeOfWork());
@@ -131,16 +211,25 @@ public class ProjectDetailService {
         scope.setTotalPlannedWeeks(req.getTotalPlannedWeeks());
         scope.setPlanUnit(req.getPlanUnit() != null ? req.getPlanUnit() : "WEEK");
         scope.setTrackingMode(req.getTrackingMode() != null ? req.getTrackingMode() : (scope.getTrackingMode() != null ? scope.getTrackingMode() : "SIMPLE"));
-        scope = scopeRepo.save(scope);
+        scopeRepo.save(scope); // save() populates the generated id on this same instance (new rows)
 
-        // Replace-all strategy for phases (mirrors how project_items are saved).
+        // Upsert phases, PRESERVING ids. Progress periods (project_progress_periods)
+        // are keyed by phase_id, so re-inserting phases with fresh ids would orphan
+        // every week's planned/actual %. Existing phases (matched by id) are updated
+        // in place; new ones (id == null) are inserted; phases dropped from the
+        // payload are deleted together with their progress periods.
         if (req.getPhases() != null) {
-            phaseRepo.deleteByProjectId(projectId);
-            em.flush();
+            List<ProjectPhaseEntity> existingPhases = phaseRepo.findByProjectIdOrderBySeqNo(projectId);
+            java.util.Map<Long, ProjectPhaseEntity> phaseById = new java.util.HashMap<>();
+            for (ProjectPhaseEntity e : existingPhases) phaseById.put(e.getId(), e);
+
+            java.util.Set<Long> keptPhaseIds = new java.util.HashSet<>();
             int seq = 1;
             for (PhaseRequest p : req.getPhases()) {
-                ProjectPhaseEntity ph = new ProjectPhaseEntity();
-                ph.setProjectId(projectId);
+                ProjectPhaseEntity ph = (p.getId() != null && phaseById.containsKey(p.getId()))
+                        ? phaseById.get(p.getId())          // update in place — id kept
+                        : new ProjectPhaseEntity();
+                if (ph.getId() == null) ph.setProjectId(projectId);
                 ph.setSeqNo(p.getSeqNo() != null ? p.getSeqNo() : seq);
                 ph.setPhaseName(p.getPhaseName());
                 ph.setPhaseDescription(p.getPhaseDescription());
@@ -152,6 +241,7 @@ public class ProjectDetailService {
                 ph.setActualEndDate(p.getActualEndDate());
                 ph.setStatus(p.getStatus() != null ? p.getStatus() : "Not Started");
                 ph.setProgressPercent(p.getProgressPercent() != null ? p.getProgressPercent() : BigDecimal.ZERO);
+                ph.setPlannedProgressPct(p.getPlannedProgressPct());
                 ph.setWeightPct(p.getWeightPct());
                 ph.setPlannedBudget(p.getPlannedBudget());
                 ph.setResponsibleUserId(p.getResponsibleUserId());
@@ -165,10 +255,20 @@ public class ProjectDetailService {
                 } else {
                     ph.setSubItems(null);
                 }
-                phaseRepo.save(ph);
+                keptPhaseIds.add(phaseRepo.save(ph).getId());
                 seq++;
             }
+            // Remove phases no longer present, plus their now-orphaned progress periods.
+            for (ProjectPhaseEntity e : existingPhases) {
+                if (!keptPhaseIds.contains(e.getId())) {
+                    progressRepo.deleteByPhaseId(e.getId());
+                    phaseRepo.delete(e);
+                }
+            }
         }
+        // NOTE: physical progress + the blended overall % are refreshed by the
+        // controller AFTER this transaction commits (full recalc in its own tx), so
+        // the just-saved phases are visible and the headline updates immediately.
         return scope;
     }
 
@@ -491,38 +591,131 @@ public class ProjectDetailService {
     //  BOM / BOQ — material lines per project
     // ═════════════════════════════════════════════════════════════════════════
 
-    public List<ProjectBomEntity> getBom(String projectUniqueId) throws CustomException {
+    /**
+     * BOM lines for a project, grouped-under-scope shape (mirrors LeadScopeService).
+     * {@code canSeeRates} gates pricing (unit_rate / amount / total) for lower access
+     * levels — quantities and specs stay visible.
+     */
+    public java.util.Map<String, Object> getBom(String projectUniqueId, boolean canSeeRates) throws CustomException {
         DropdownProjectEntity project = requireProject(projectUniqueId);
-        return bomRepo.findByProjectIdOrderBySeqNo(project.getId());
+        List<ProjectBomEntity> lines = bomRepo.findByProjectIdAndDeletedAtIsNullOrderBySeqNo(project.getId());
+
+        List<java.util.Map<String, Object>> lineMaps = new ArrayList<>();
+        BigDecimal total = BigDecimal.ZERO;
+        for (ProjectBomEntity l : lines) {
+            lineMaps.add(bomLineMap(l, canSeeRates));
+            if (l.getAmount() != null) total = total.add(l.getAmount());
+        }
+
+        java.util.Map<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("lines", lineMaps);
+        if (canSeeRates) total = total.setScale(2, java.math.RoundingMode.HALF_UP);
+        data.put("totalAmount", canSeeRates ? total : null);
+        data.put("canSeeRates", canSeeRates);
+        // Resolved capacity (kW) from the scope header, so the tab recomputes auto-sized
+        // quantities live on reload (project analog of lead.capacity).
+        ProjectScopeEntity scope = scopeRepo.findByProjectId(project.getId()).orElse(null);
+        CapacityUtil.CapacityInfo cap = CapacityUtil.parse(
+                scope != null ? scope.getSystemCapacity() : null, null, project.getSubGroupName());
+        data.put("capacityKw", cap.isUsable() ? cap.scaleBase() : null);
+        return data;
     }
 
+    /** JSON shape the BOM tab expects for one line; omits rates when gated. */
+    private java.util.Map<String, Object> bomLineMap(ProjectBomEntity l, boolean canSeeRates) {
+        java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("id", l.getId());
+        m.put("scopeItemId", l.getScopeItemId());
+        m.put("scopeSubItemKey", l.getScopeSubItemKey());
+        m.put("seqNo", l.getSeqNo());
+        m.put("category", l.getCategory());
+        m.put("itemName", l.getItemName());
+        m.put("make", l.getMake());
+        m.put("specification", l.getSpecification());
+        m.put("unit", l.getUnit());
+        m.put("quantity", l.getQuantity());
+        m.put("notes", l.getNotes());
+        m.put("bomItemId", l.getBomItemId());
+        m.put("variantId", l.getVariantId());
+        if (l.getBomItemId() != null) m.put("variants", expander.variantChoicesFor(l.getBomItemId()));
+        // Auto-sizing metadata so a reloaded BOM stays live.
+        m.put("basis", l.getBasis());
+        m.put("basisValue", l.getBasisValue());
+        m.put("stepValue", l.getStepValue());
+        m.put("siteVisitField", l.getSiteVisitField());
+        m.put("driverAttr", l.getDriverAttr());
+        m.put("autoQty", l.getAutoQty() == null ? Boolean.TRUE : l.getAutoQty());
+        // Pricing — gated.
+        if (canSeeRates) {
+            m.put("unitRate", l.getUnitRate());
+            m.put("amount", l.getAmount());
+        }
+        return m;
+    }
+
+    /**
+     * Whole-list replace of a project's BOM. Lines absent from the payload are
+     * soft-deleted (deleted_at) rather than physically removed. Each line's
+     * scopeItemId is validated against the project's real phase ids — anything
+     * stale is stored unlinked (General) rather than trusted.
+     */
     @Transactional
     public void saveBom(String projectUniqueId, BomSaveRequest req, Long userId) throws CustomException {
         DropdownProjectEntity project = requireProject(projectUniqueId);
         Long projectId = project.getId();
-        bomRepo.deleteByProjectId(projectId);
-        em.flush();
+
+        // Valid scope lines this BOM may point at (parent phases).
+        java.util.Set<Long> validScopeIds = new java.util.HashSet<>();
+        for (ProjectPhaseEntity p : phaseRepo.findByProjectIdOrderBySeqNo(projectId)) validScopeIds.add(p.getId());
+
+        List<ProjectBomEntity> existing = bomRepo.findByProjectIdAndDeletedAtIsNullOrderBySeqNo(projectId);
+        java.util.Map<Long, ProjectBomEntity> byId = new java.util.LinkedHashMap<>();
+        for (ProjectBomEntity l : existing) byId.put(l.getId(), l);
+
+        java.util.Set<Long> keptIds = new java.util.HashSet<>();
         int seq = 1;
         if (req.getLines() != null) {
             for (BomLineRequest l : req.getLines()) {
-                ProjectBomEntity b = new ProjectBomEntity();
-                b.setProjectId(projectId);
+                ProjectBomEntity b;
+                if (l.getId() != null && byId.containsKey(l.getId())) {
+                    b = byId.get(l.getId());
+                } else {
+                    b = new ProjectBomEntity();
+                    b.setProjectId(projectId);
+                    b.setCreatedBy(userId);
+                }
                 b.setSeqNo(l.getSeqNo() != null ? l.getSeqNo() : seq);
+                b.setScopeItemId(validScopeIds.contains(l.getScopeItemId()) ? l.getScopeItemId() : null);
+                b.setScopeSubItemKey(l.getScopeSubItemKey());
                 b.setCategory(l.getCategory());
                 b.setItemName(l.getItemName());
                 b.setMake(l.getMake());
+                b.setSpecification(l.getSpecification());
+                b.setBomItemId(l.getBomItemId());
+                b.setVariantId(l.getVariantId());
                 b.setUnit(l.getUnit());
                 BigDecimal qty  = l.getQuantity() != null ? l.getQuantity() : BigDecimal.ZERO;
                 BigDecimal rate = l.getUnitRate() != null ? l.getUnitRate() : BigDecimal.ZERO;
                 b.setQuantity(qty);
                 b.setUnitRate(rate);
-                // Trust an explicit amount if sent; otherwise derive qty * rate.
                 b.setAmount(l.getAmount() != null ? l.getAmount() : qty.multiply(rate));
                 b.setNotes(l.getNotes());
-                b.setCreatedBy(userId);
-                bomRepo.save(b);
+                // Auto-sizing snapshot.
+                b.setBasis(l.getBasis());
+                b.setBasisValue(l.getBasisValue());
+                b.setStepValue(l.getStepValue());
+                b.setSiteVisitField(l.getSiteVisitField());
+                b.setDriverAttr(l.getDriverAttr());
+                b.setAutoQty(l.getAutoQty() == null ? Boolean.TRUE : l.getAutoQty());
+                b.setDeletedAt(null);
+                keptIds.add(bomRepo.save(b).getId());
                 seq++;
             }
+        }
+        // Soft-delete the lines that weren't in the payload.
+        java.time.LocalDateTime now = java.time.LocalDateTime.now();
+        for (ProjectBomEntity l : existing) {
+            if (!keptIds.contains(l.getId())) { l.setDeletedAt(now); bomRepo.save(l); }
         }
     }
 

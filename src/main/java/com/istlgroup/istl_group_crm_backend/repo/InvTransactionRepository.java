@@ -76,4 +76,50 @@ public interface InvTransactionRepository extends JpaRepository<InvTransactionEn
         @Param("projectId") String projectId,
         @Param("type")      String type
     );
+
+    /**
+     * Per-item total of what was ISSUED from a warehouse to this project
+     * (i.e. OUTWARD movements), aggregated across every issuance.
+     *
+     * qty is stored signed — OUTWARD rows are negative — so ABS() is needed
+     * to get the quantity that physically left the warehouse.
+     *
+     * Row shape: [0] inventoryItemId (Long)
+     *            [1] issuedQty       (BigDecimal, always positive)
+     *            [2] lastIssuedDate  (LocalDate)
+     *
+     * Used by the Inventory INWARD modal so items sent out to site can be
+     * picked and received back, alongside the PO line items.
+     */
+    @Query(
+        "SELECT t.inventoryItemId, SUM(ABS(t.qty)), MAX(t.transactionDate) " +
+        "FROM InvTransactionEntity t " +
+        "WHERE t.projectId = :projectId " +
+        "  AND t.type = 'OUTWARD' " +
+        "  AND t.inventoryItemId IS NOT NULL " +
+        "GROUP BY t.inventoryItemId"
+    )
+    List<Object[]> sumIssuedQtyByProject(@Param("projectId") String projectId);
+
+    /**
+     * Per-item total of what has already come back INWARD under this project.
+     *
+     * Row shape: [0] inventoryItemId (Long)
+     *            [1] returnedQty     (BigDecimal, always positive)
+     *
+     * Caveat: inv_transactions never stores po_id (nothing populates it), so a
+     * PO delivery received into the warehouse under the same project and the
+     * same inventory item also lands in this total. It is therefore an
+     * advisory figure used to pre-fill / display "already returned" — never a
+     * hard limit on what can be received.
+     */
+    @Query(
+        "SELECT t.inventoryItemId, SUM(ABS(t.qty)) " +
+        "FROM InvTransactionEntity t " +
+        "WHERE t.projectId = :projectId " +
+        "  AND t.type = 'INWARD' " +
+        "  AND t.inventoryItemId IS NOT NULL " +
+        "GROUP BY t.inventoryItemId"
+    )
+    List<Object[]> sumReturnedQtyByProject(@Param("projectId") String projectId);
 }

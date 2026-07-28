@@ -246,9 +246,10 @@ public class TelecallerLeadService {
                 && (req.getDiscussionNote() == null || req.getDiscussionNote().isBlank()))
             throw new CustomException("Discussion note is required when marking Interested");
 
-        if ("INTERESTED".equals(newStatus)
-                && (req.getTcPropertyType() == null || req.getTcPropertyType().isBlank()))
-            throw new CustomException("Property type is required when marking Interested");
+        // NOTE: Property type is intentionally NOT required here. It was moved out of
+        // the Interested popup into the Edit modal (an optional requirement/site-visit
+        // detail), so the status-update request no longer carries tcPropertyType. The
+        // Interested popup now captures only the discussion note.
 
         LeadsEntity lead = leadsRepo.findById(leadId)
                 .orElseThrow(() -> new CustomException("Lead not found"));

@@ -27,6 +27,14 @@ public class LeadBomTemplateItemEntity {
     public static final String BASIS_PER_STEP = "PER_STEP";
     /** qty parsed from the named site_visit column; blank → left for manual entry. */
     public static final String BASIS_FROM_SITE_VISIT = "FROM_SITE_VISIT";
+    /** module driver: qty = ceil(capacityKw × 1000 / selected make's wattage Wp). */
+    public static final String BASIS_PER_WATT_PEAK = "PER_WATT_PEAK";
+    /** inverter driver: qty = ceil(capacityKw / selected make's capacity kW). */
+    public static final String BASIS_PER_INVERTER_KW = "PER_INVERTER_KW";
+    /** qty = ceil(basisValue × module count) — scales off the PER_WATT_PEAK line. */
+    public static final String BASIS_PER_MODULE = "PER_MODULE";
+    /** qty = ceil(basisValue × inverter count) — scales off the PER_INVERTER_KW line. */
+    public static final String BASIS_PER_INVERTER = "PER_INVERTER";
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

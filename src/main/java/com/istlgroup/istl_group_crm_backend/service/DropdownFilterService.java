@@ -39,6 +39,7 @@ public class DropdownFilterService {
     private final CustomersRepo customersRepo;
     private final RoleHierarchyService roleHierarchyService;
     private final ProjectFinancialsSummaryService financialsSummaryService;
+    private final ProjectAccessService projectAccessService; // per-user visibility (mirrors Order Book)
 
     public List<DropdownGroupWrapper> getAllGroups() {
         return groupRepository.findByIsActiveTrue().stream()
@@ -65,15 +66,43 @@ public class DropdownFilterService {
             .orElseThrow(() -> new RuntimeException("Project not found: " + projectUniqueId));
     }
 
+    /** Unrestricted — every active project (used where no per-user scoping applies). */
     public List<Map<String, Object>> getAllActiveProjects() {
+        return getAllActiveProjects(null, null);
+    }
+
+    /**
+     * Active projects VISIBLE to the given user — mirrors the Order Book access model:
+     * bypass roles (SUPERADMIN / ADMIN / ACCOUNTS_* / role level ≤ 2) see everything;
+     * everyone else sees only projects they have a {@code project_access} grant for
+     * (grants flow to the creator + the manager chain when an order-book project is
+     * created) OR that they directly created / are assigned to. Passing a null role
+     * bypasses the restriction (used by the unrestricted overload above).
+     */
+    public List<Map<String, Object>> getAllActiveProjects(Long userId, String userRole) {
         // Money in / money out for EVERY project in 5 batched queries, computed
         // live from receipts/invoices/bills — same source as the project
         // dashboard, so the list and the dashboard never disagree.
         Map<String, ProjectFinancialsSummaryService.Financials> fin =
             financialsSummaryService.getFinancialsByProject();
 
+        // Access scope. getAccessibleProjectIds returns null for bypass roles → no
+        // restriction; otherwise the granted ids. We ALSO keep directly owned projects
+        // (created_by / assigned_to) so an owner never loses sight of their own project.
+        List<String> accessibleList = (userId == null || userRole == null)
+            ? null
+            : projectAccessService.getAccessibleProjectIds(userId, userRole);
+        boolean restrict = accessibleList != null;
+        java.util.Set<String> accessible = restrict
+            ? new java.util.HashSet<>(accessibleList)
+            : java.util.Collections.emptySet();
+
         return projectRepository.findAll().stream()
             .filter(p -> Boolean.TRUE.equals(p.getIsActive()))
+            .filter(p -> !restrict
+                || accessible.contains(p.getProjectUniqueId())
+                || (userId != null && userId.equals(p.getCreatedBy()))
+                || (userId != null && userId.equals(p.getAssignedTo())))
             .sorted(Comparator.comparing(p -> p.getProjectName() != null ? p.getProjectName() : ""))
             .map(p -> {
                 Map<String, Object> m = new LinkedHashMap<>();
@@ -88,6 +117,8 @@ public class DropdownFilterService {
                 m.put("customerName",        resolveCustomerName(p.getCustomerCode()));
                 m.put("budget",              p.getBudget());
                 m.put("progressPercentage",  p.getProgressPercentage());
+                m.put("physicalProgressPct", p.getPhysicalProgressPct());   // technical progress
+                m.put("financialProgressPct", p.getFinancialProgressPct()); // financial (40/30/20/10)
                 m.put("startDate",           p.getStartDate());
                 m.put("endDate",             p.getEndDate());
 

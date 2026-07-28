@@ -546,6 +546,84 @@ public class InvTransactionService {
         return result;
     }
 
+    // ── Items issued from warehouse to a project (for receiving back) ─────────
+
+    /**
+     * Lists every inventory item that has been issued (OUTWARD) from a warehouse
+     * to the given project, one row per item, with how much went out, how much
+     * has already come back, and the outstanding balance.
+     *
+     * The INWARD modal shows these alongside the project's PO line items so
+     * stock sent to site can be received back into the warehouse.
+     *
+     * @param projectId   project the items were issued to — required
+     * @param warehouseId optional filter; when set, only items belonging to that
+     *                    warehouse are returned (stock is always received back
+     *                    into the item's own warehouse)
+     */
+    public List<Map<String, Object>> getIssuedItemsForProject(String projectId, Long warehouseId) {
+        if (nb(projectId) == null) return List.of();
+
+        // itemId → issued qty / last issue date
+        Map<Long, BigDecimal> issued   = new LinkedHashMap<>();
+        Map<Long, LocalDate>  lastDate = new HashMap<>();
+        for (Object[] row : txnRepository.sumIssuedQtyByProject(projectId.trim())) {
+            Long itemId = (Long) row[0];
+            if (itemId == null) continue;
+            issued.put(itemId, row[1] != null ? (BigDecimal) row[1] : BigDecimal.ZERO);
+            if (row[2] != null) lastDate.put(itemId, (LocalDate) row[2]);
+        }
+        if (issued.isEmpty()) return List.of();
+
+        // itemId → qty already received back under this project
+        Map<Long, BigDecimal> returned = new HashMap<>();
+        for (Object[] row : txnRepository.sumReturnedQtyByProject(projectId.trim())) {
+            Long itemId = (Long) row[0];
+            if (itemId == null) continue;
+            returned.put(itemId, row[1] != null ? (BigDecimal) row[1] : BigDecimal.ZERO);
+        }
+
+        // Item master details are read live so code/name/unit/cost are current
+        Map<Long, InventoryItemEntity> itemsById = new HashMap<>();
+        itemRepository.findAllById(issued.keySet()).forEach(i -> itemsById.put(i.getId(), i));
+
+        Map<Long, String> whNames = buildWhNames(itemsById.values().stream()
+            .map(InventoryItemEntity::getWarehouseId)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet()));
+
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map.Entry<Long, BigDecimal> e : issued.entrySet()) {
+            Long itemId = e.getKey();
+            InventoryItemEntity item = itemsById.get(itemId);
+            if (item == null) continue;   // item deleted since it was issued
+            if (warehouseId != null && !warehouseId.equals(item.getWarehouseId())) continue;
+
+            BigDecimal issuedQty = e.getValue() != null ? e.getValue() : BigDecimal.ZERO;
+            BigDecimal retQty    = returned.getOrDefault(itemId, BigDecimal.ZERO);
+            BigDecimal pending   = issuedQty.subtract(retQty);
+            if (pending.compareTo(BigDecimal.ZERO) < 0) pending = BigDecimal.ZERO;
+
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("inventoryItemId", itemId);
+            row.put("itemCode",        item.getItemCode());
+            row.put("itemName",        item.getName());
+            row.put("unit",            item.getUnit());
+            row.put("warehouseId",     item.getWarehouseId());
+            row.put("warehouseName",   whNames.get(item.getWarehouseId()));
+            row.put("unitCost",        item.getUnitCost() != null ? item.getUnitCost() : BigDecimal.ZERO);
+            row.put("currentQty",      item.getCurrentQty());
+            row.put("issuedQty",       issuedQty);
+            row.put("returnedQty",     retQty);
+            row.put("pendingQty",      pending);
+            row.put("lastIssuedDate",  lastDate.get(itemId));
+            result.add(row);
+        }
+
+        result.sort(Comparator.comparing(r -> String.valueOf(r.get("itemName")).toLowerCase()));
+        return result;
+    }
+
     // ── Batch OUTWARD + auto-generate warehouse bill ───────────────────────────
 
     /**

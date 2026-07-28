@@ -85,6 +85,19 @@ public class DropdownProjectEntity {
     @Column(name = "progress_percentage", precision = 5, scale = 2)
     private BigDecimal progressPercentage;
 
+    /**
+     * Physical (technical) progress — weighted roll-up of the tech scope; NULL = no
+     * scope. Read-only here (owned/written by ProjectStatsService via ProjectEntity);
+     * insertable/updatable=false so a project save through THIS entity can never
+     * null it out. Exposed so the detail header can show physical vs financial.
+     */
+    @Column(name = "physical_progress_pct", precision = 5, scale = 2, insertable = false, updatable = false)
+    private BigDecimal physicalProgressPct;
+
+    /** Financial progress (40/30/20/10) — read-only here (written by ProjectStatsService). */
+    @Column(name = "financial_progress_pct", precision = 5, scale = 2, insertable = false, updatable = false)
+    private BigDecimal financialProgressPct;
+
     @Column(name = "is_active")
     private Boolean isActive = true;
     

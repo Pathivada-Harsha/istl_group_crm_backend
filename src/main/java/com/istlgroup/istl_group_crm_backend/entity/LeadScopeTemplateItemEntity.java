@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.entity;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 import jakarta.persistence.*;
@@ -40,8 +41,34 @@ public class LeadScopeTemplateItemEntity {
     @Column(name = "unit", length = 50)
     private String unit;
 
+    /**
+     * This line's share of the template's 100%. A project generated from the
+     * template copies it verbatim onto {@code project_phases.weight_pct} (same
+     * precision, so no rounding on the way across). NULL means "never set" and
+     * generation falls back to an even split.
+     */
+    @Column(name = "weight_pct", precision = 9, scale = 6)
+    private BigDecimal weightPct;
+
+    /**
+     * TRUE when the user typed this weight in (it is "pinned" and holds its
+     * value); FALSE when it is auto-balanced against the pinned lines so the
+     * template still totals 100%. Persisted because otherwise reopening a
+     * template would re-even-split and wipe the weights just saved.
+     */
+    @Column(name = "weight_manual", nullable = false)
+    private Boolean weightManual = false;
+
     @Column(name = "notes", length = 500)
     private String notes;
+
+    /**
+     * Reserved second-level breakdown, same JSON array shape as
+     * {@code project_phases.sub_items}. Storage only — nothing reads or writes
+     * it yet; the template sub-item editor is deferred.
+     */
+    @Column(name = "sub_items", columnDefinition = "JSON")
+    private String subItems;
 
     // ── Audit ────────────────────────────────────────────────────────────────
     @Column(name = "created_by")

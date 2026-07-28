@@ -205,6 +205,18 @@ public class ProjectEntity {
     @Column(name = "progress_percentage", precision = 5, scale = 2)
     private BigDecimal progressPercentage = BigDecimal.ZERO;
 
+    /** Weighted roll-up of the technical scope's actual progress; NULL = no scope defined. */
+    @Column(name = "physical_progress_pct", precision = 5, scale = 2)
+    private BigDecimal physicalProgressPct;
+
+    /** Manual override of the financial progress; NULL = auto-computed (40/30/20/10 engine). */
+    @Column(name = "progress_override", precision = 5, scale = 2)
+    private BigDecimal progressOverride;
+
+    /** Financial progress (40/30/20/10) — stored so the list/detail can show it beside technical. */
+    @Column(name = "financial_progress_pct", precision = 5, scale = 2)
+    private BigDecimal financialProgressPct;
+
     // ── Capacity / Quantity (derived from order book items) ───────────────────
     @Column(name = "capacity_value", precision = 18, scale = 3)
     private BigDecimal capacityValue;

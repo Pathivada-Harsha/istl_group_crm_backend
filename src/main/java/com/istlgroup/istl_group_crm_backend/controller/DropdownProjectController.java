@@ -29,9 +29,16 @@ public class DropdownProjectController {
             @RequestParam(required = false) String search,
             @RequestParam(required = false) String groupId,
             @RequestParam(required = false) String subGroupName,
-            @RequestParam(required = false) String status) {
+            @RequestParam(required = false) String status,
+            @RequestHeader(value = "User-Id", required = false) Long userId,
+            @RequestHeader(value = "User-Role", required = false) String userRole) {
 
-        List<Map<String, Object>> all = filterService.getAllActiveProjects();
+        // Per-user visibility (mirrors the Order Book list): bypass roles
+        // (SUPERADMIN / ADMIN / ACCOUNTS_* / level ≤ 2) see all; everyone else sees
+        // only projects granted to them (project_access) or that they created / are
+        // assigned to. Identity comes from the User-Id / User-Role headers the
+        // frontend already sends — same trust model as Order Book / Leads.
+        List<Map<String, Object>> all = filterService.getAllActiveProjects(userId, userRole);
 
         return ResponseEntity.ok(all.stream()
             .filter(p -> {
