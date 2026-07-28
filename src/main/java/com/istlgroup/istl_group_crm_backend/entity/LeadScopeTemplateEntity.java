@@ -32,6 +32,15 @@ public class LeadScopeTemplateEntity {
     @Column(name = "is_active", nullable = false)
     private Boolean isActive = true;
 
+    /**
+     * Bumped on every template edit. A project snapshots this onto
+     * {@code project_scope.template_version} at generation, so a later template
+     * change applies to NEW projects only — existing projects keep their generated
+     * scope and stay pinned to the version they were built from.
+     */
+    @Column(name = "version", nullable = false)
+    private Integer version = 1;
+
     // ── Audit ────────────────────────────────────────────────────────────────
     @Column(name = "created_by")
     private Long createdBy;

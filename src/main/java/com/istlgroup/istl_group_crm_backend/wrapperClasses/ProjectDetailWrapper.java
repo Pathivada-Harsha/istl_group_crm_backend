@@ -59,6 +59,7 @@ public class ProjectDetailWrapper {
         private LocalDate actualEndDate;
         private String status;
         private BigDecimal progressPercent;
+        private BigDecimal plannedProgressPct; // SIMPLE tracking: typed planned % (rooftop < 100 kW)
         private BigDecimal weightPct;   // absolute project weight %; parent = sum of sub-item weights
         private BigDecimal plannedBudget; // planned procure budget; parent = sum of sub-item budgets
         private Long responsibleUserId;
@@ -140,14 +141,26 @@ public class ProjectDetailWrapper {
     public static class BomLineRequest {
         private Long id;            // null = new
         private Integer seqNo;
+        private Long scopeItemId;       // project_phases.id — the scope line this sits under
+        private String scopeSubItemKey; // optional sub-item name within the parent phase
         private String category;
         private String itemName;
         private String make;
+        private String specification;
+        private Long bomItemId;         // catalog item (pick-a-make); null = free-text
+        private Long variantId;         // chosen make/variant
         private String unit;
         private BigDecimal quantity;
         private BigDecimal unitRate;
         private BigDecimal amount;
         private String notes;
+        // Auto-sizing snapshot (kept so a reloaded BOM recomputes live).
+        private String basis;
+        private BigDecimal basisValue;
+        private BigDecimal stepValue;
+        private String siteVisitField;
+        private BigDecimal driverAttr;
+        private Boolean autoQty;
     }
 
     @Data

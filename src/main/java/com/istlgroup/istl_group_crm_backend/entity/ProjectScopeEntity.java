@@ -57,6 +57,19 @@ public class ProjectScopeEntity {
     @Column(name = "tracking_mode")
     private String trackingMode = "SIMPLE"; // 'SIMPLE' (one progress %) or 'DETAILED' (per-period grid)
 
+    // ── Template provenance (snapshot at generation; audit only — the scope itself
+    //    is materialised into project_phases/project_bom, so old projects never
+    //    change when a template is edited) ─────────────────────────────────────
+    @Column(name = "source_template_id")
+    private Long sourceTemplateId;
+
+    @Column(name = "template_version")
+    private Integer templateVersion;
+
+    /** How this scope was generated: 'TEMPLATE' now; future 'LEAD_COPY' (§2.6 seam). */
+    @Column(name = "scope_source")
+    private String scopeSource = "TEMPLATE";
+
     @Column(name = "created_by")
     private Long createdBy;
 

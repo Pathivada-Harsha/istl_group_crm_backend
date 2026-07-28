@@ -98,6 +98,14 @@ public class LeadScopeWrapper {
         // Pick-a-make: catalog link + chosen variant snapshotted onto the line.
         private Long bomItemId;
         private Long variantId;
+        // Auto-sizing: the quantity basis is snapshotted onto the saved line so a
+        // reloaded BOM stays live (recomputes on capacity / make change).
+        private String basis;
+        private BigDecimal basisValue;
+        private BigDecimal stepValue;
+        private String siteVisitField;
+        private BigDecimal driverAttr;
+        private Boolean autoQty;
     }
 
     /** PUT /leads/{leadId}/bom — whole-list replace. */

@@ -39,6 +39,12 @@ public class LeadSuggestionEngine {
     public static final String W_BASIS_UNRESOLVED    = "BASIS_UNRESOLVED";
     public static final String W_NEEDS_SITE_VISIT    = "NEEDS_SITE_VISIT";
     public static final String W_NO_TEMPLATE_NO_HISTORY = "NO_TEMPLATE_NO_HISTORY";
+    // Auto-sizing (make-driven) codes
+    public static final String W_NEEDS_MODULE_WATT     = "NEEDS_MODULE_WATT";
+    public static final String W_NEEDS_INVERTER_KW     = "NEEDS_INVERTER_KW";
+    public static final String W_NEEDS_MODULE_DRIVER   = "NEEDS_MODULE_DRIVER";
+    public static final String W_NEEDS_INVERTER_DRIVER = "NEEDS_INVERTER_DRIVER";
+    public static final String W_MULTIPLE_DRIVERS      = "MULTIPLE_DRIVERS";
 
     private static final Set<String> LUMP_UNITS = Set.of("job", "lot", "set", "sets", "ls", "lumpsum", "lump sum");
 
@@ -54,36 +60,94 @@ public class LeadSuggestionEngine {
             m.put("unit", s.getUnit());
             m.put("quantity", null); // scope quantities are optional/manual
             m.put("category", s.getCategory());
+            // Share of overall project progress this line represents. Passed
+            // through verbatim; callers that need a fallback for missing weights
+            // apply it themselves (ScopeTemplateExpander.ensureWeights).
+            m.put("weightPct", s.getWeightPct());
             out.add(m);
         }
         return out;
     }
 
-    /**
-     * Template BOM lines → suggestion BOM lines with quantities computed from each
-     * line's basis and the lead's capacity. {@code warnings} is appended to.
-     */
+    /** Backward-compatible entry point (no make-driven drivers). */
     public List<Map<String, Object>> expandTemplateBom(List<LeadBomTemplateItemEntity> bomLines,
                                                        CapacityInfo cap,
                                                        Map<String, String> siteVisit,
                                                        List<Map<String, Object>> warnings) {
+        return expandTemplateBom(bomLines, cap, siteVisit, Map.of(), warnings);
+    }
+
+    /**
+     * Template BOM lines → suggestion BOM lines with quantities computed from each
+     * line's basis and the lead's capacity. {@code warnings} is appended to.
+     *
+     * Two passes so template ordering is irrelevant:
+     *   1. driver lines (PER_WATT_PEAK → module count, PER_INVERTER_KW → inverter count),
+     *      each reading the chosen make's numeric attribute from
+     *      {@code driverAttrByTemplateItemId} (keyed by template-line id);
+     *   2. everything else, with PER_MODULE / PER_INVERTER scaling off those counts.
+     * Each output line also carries its basis metadata so the client can recompute live.
+     */
+    public List<Map<String, Object>> expandTemplateBom(List<LeadBomTemplateItemEntity> bomLines,
+                                                       CapacityInfo cap,
+                                                       Map<String, String> siteVisit,
+                                                       Map<Long, BigDecimal> driverAttrByTemplateItemId,
+                                                       List<Map<String, Object>> warnings) {
+        Map<Long, BigDecimal> driverAttrs = driverAttrByTemplateItemId == null ? Map.of() : driverAttrByTemplateItemId;
+        int n = bomLines.size();
+        BigDecimal[] qtys = new BigDecimal[n];
+        List<List<String>> flagsByLine = new ArrayList<>();
+        for (int i = 0; i < n; i++) flagsByLine.add(new ArrayList<>());
+
+        // Pass 1 — driver lines accumulate the module and inverter counts.
+        BigDecimal moduleCount = null, inverterCount = null;
+        int moduleDrivers = 0, inverterDrivers = 0;
+        for (int i = 0; i < n; i++) {
+            LeadBomTemplateItemEntity t = bomLines.get(i);
+            String basis = t.getBasis();
+            if (!LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK.equals(basis)
+                    && !LeadBomTemplateItemEntity.BASIS_PER_INVERTER_KW.equals(basis)) continue;
+            BigDecimal qty = quantityForTemplateLine(t, cap, siteVisit, null, null,
+                    driverAttrFor(driverAttrs, t), flagsByLine.get(i));
+            qtys[i] = qty;
+            if (qty != null) {
+                if (LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK.equals(basis)) {
+                    moduleCount = nz(moduleCount).add(qty); moduleDrivers++;
+                } else {
+                    inverterCount = nz(inverterCount).add(qty); inverterDrivers++;
+                }
+            }
+        }
+
+        // Pass 2 — dependents (and all remaining bases).
+        for (int i = 0; i < n; i++) {
+            LeadBomTemplateItemEntity t = bomLines.get(i);
+            String basis = t.getBasis();
+            if (LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK.equals(basis)
+                    || LeadBomTemplateItemEntity.BASIS_PER_INVERTER_KW.equals(basis)) continue;
+            qtys[i] = quantityForTemplateLine(t, cap, siteVisit, moduleCount, inverterCount,
+                    driverAttrFor(driverAttrs, t), flagsByLine.get(i));
+        }
+
         List<Map<String, Object>> out = new ArrayList<>();
-        boolean capacityMissingFlagged = false;
-
-        for (LeadBomTemplateItemEntity t : bomLines) {
-            List<String> flags = new ArrayList<>();
-            BigDecimal qty = quantityForTemplateLine(t, cap, siteVisit, flags);
-            if (flags.contains(W_NEEDS_CAPACITY)) capacityMissingFlagged = true;
-
+        for (int i = 0; i < n; i++) {
+            LeadBomTemplateItemEntity t = bomLines.get(i);
+            List<String> flags = flagsByLine.get(i);
             Map<String, Object> m = bomLineMap(
                     t.getScopeActivity(), t.getCategory(), t.getItemName(), t.getMake(),
-                    t.getSpecification(), t.getUnit(), qty, t.getDefaultUnitRate(), flags);
+                    t.getSpecification(), t.getUnit(), qtys[i], t.getDefaultUnitRate(), flags);
+            // Basis metadata for live client-side recompute (LeadScopeService persists it on save).
+            m.put("basis", t.getBasis());
+            m.put("basisValue", t.getBasisValue());
+            m.put("stepValue", t.getStepValue());
+            m.put("siteVisitField", t.getSiteVisitField());
+            m.put("driverAttr", driverAttrFor(driverAttrs, t));
             out.add(m);
         }
-        if (capacityMissingFlagged) {
-            addWarning(warnings, W_NEEDS_CAPACITY,
-                    "This lead has no usable capacity, so per-kW quantities were left blank — fill them in.");
+        if (moduleDrivers > 1 || inverterDrivers > 1) {
+            addWarning(warnings, W_MULTIPLE_DRIVERS, defaultMessage(W_MULTIPLE_DRIVERS));
         }
+        summarize(out, warnings); // surface per-line flags (capacity/site-visit/driver) as banner warnings
         return out;
     }
 
@@ -151,9 +215,16 @@ public class LeadSuggestionEngine {
 
     // ── Basis math ───────────────────────────────────────────────────────────
 
-    /** Quantity for a TEMPLATE line (no mined source qty to lean on). */
+    /**
+     * Quantity for a TEMPLATE line (no mined source qty to lean on).
+     * {@code driverAttr} = this line's selected make numeric attribute (module Wp /
+     * inverter kW) for the driver bases; {@code moduleCount}/{@code inverterCount} =
+     * the counts resolved from the driver lines, for the dependent bases.
+     */
     private BigDecimal quantityForTemplateLine(LeadBomTemplateItemEntity t, CapacityInfo cap,
-                                               Map<String, String> siteVisit, List<String> flags) {
+                                               Map<String, String> siteVisit,
+                                               BigDecimal moduleCount, BigDecimal inverterCount,
+                                               BigDecimal driverAttr, List<String> flags) {
         String basis = t.getBasis() == null ? LeadBomTemplateItemEntity.BASIS_FIXED : t.getBasis();
         BigDecimal value = nz(t.getBasisValue());
         BigDecimal kw = cap != null && cap.isUsable() ? cap.scaleBase() : null;
@@ -173,6 +244,20 @@ public class LeadSuggestionEngine {
                 BigDecimal fromVisit = fromSiteVisit(t.getSiteVisitField(), siteVisit);
                 if (fromVisit == null) { flags.add(W_NEEDS_SITE_VISIT); return null; }
                 return round3(fromVisit);
+            case LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK:
+                if (kw == null) { flags.add(W_NEEDS_CAPACITY); return null; }
+                if (driverAttr == null || driverAttr.signum() <= 0) { flags.add(W_NEEDS_MODULE_WATT); return null; }
+                return ceilDiv(kw.multiply(BigDecimal.valueOf(1000)), driverAttr); // ceil(kW*1000 / Wp)
+            case LeadBomTemplateItemEntity.BASIS_PER_INVERTER_KW:
+                if (kw == null) { flags.add(W_NEEDS_CAPACITY); return null; }
+                if (driverAttr == null || driverAttr.signum() <= 0) { flags.add(W_NEEDS_INVERTER_KW); return null; }
+                return ceilDiv(kw, driverAttr); // ceil(kW / invKw)
+            case LeadBomTemplateItemEntity.BASIS_PER_MODULE:
+                if (moduleCount == null) { flags.add(W_NEEDS_MODULE_DRIVER); return null; }
+                return ceilMul(value, moduleCount); // ceil(factor * module count)
+            case LeadBomTemplateItemEntity.BASIS_PER_INVERTER:
+                if (inverterCount == null) { flags.add(W_NEEDS_INVERTER_DRIVER); return null; }
+                return ceilMul(value, inverterCount); // ceil(factor * inverter count)
             default:
                 flags.add(W_BASIS_UNRESOLVED);
                 return round3(value);
@@ -287,6 +372,12 @@ public class LeadSuggestionEngine {
         return LeadBomTemplateItemEntity.BASIS_PER_KW.equals(basis);
     }
 
+    /** Null-safe driver-attribute lookup (template ids can be null in unit tests; Map.of() rejects null keys). */
+    private static BigDecimal driverAttrFor(Map<Long, BigDecimal> driverAttrs, LeadBomTemplateItemEntity t) {
+        if (driverAttrs == null || t.getId() == null) return null;
+        return driverAttrs.get(t.getId());
+    }
+
     private BigDecimal fromSiteVisit(String field, Map<String, String> siteVisit) {
         if (field == null || field.isBlank() || siteVisit == null) return null;
         String raw = siteVisit.get(field);
@@ -338,6 +429,11 @@ public class LeadSuggestionEngine {
             case W_BASIS_UNRESOLVED:  return "Some items had no matching template rule — a sensible default was used; verify.";
             case W_NEEDS_SITE_VISIT:  return "Some quantities come from the site visit and were left blank — fill them in.";
             case W_NEEDS_CAPACITY:    return "This lead has no usable capacity, so per-kW quantities were left blank.";
+            case W_NEEDS_MODULE_WATT: return "Pick a module make with a wattage so the module count can be computed.";
+            case W_NEEDS_INVERTER_KW: return "Pick an inverter make with a kW rating so the inverter count can be computed.";
+            case W_NEEDS_MODULE_DRIVER:   return "A per-module item couldn't size — there is no module (watt-peak) line to scale from.";
+            case W_NEEDS_INVERTER_DRIVER: return "A per-inverter item couldn't size — there is no inverter line to scale from.";
+            case W_MULTIPLE_DRIVERS:  return "More than one module/inverter driver line was found — counts were summed; verify.";
             default: return code;
         }
     }
@@ -350,6 +446,13 @@ public class LeadSuggestionEngine {
     private static BigDecimal ceilDiv(BigDecimal a, BigDecimal b) {
         if (b == null || b.signum() == 0) return null;
         BigDecimal q = a.divide(b, 0, RoundingMode.CEILING);
+        return q.setScale(3, RoundingMode.HALF_UP);
+    }
+
+    /** ceil(factor × count) as a whole number, scale 3 for schema consistency. */
+    private static BigDecimal ceilMul(BigDecimal factor, BigDecimal count) {
+        if (factor == null || count == null) return null;
+        BigDecimal q = factor.multiply(count).setScale(0, RoundingMode.CEILING);
         return q.setScale(3, RoundingMode.HALF_UP);
     }
 }

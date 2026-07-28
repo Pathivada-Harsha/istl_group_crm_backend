@@ -45,6 +45,7 @@ public class ProjectDashboardService {
     private final InventoryItemRepository    itemRepository;
     private final VendorAdvanceRepository    vendorAdvanceRepository;
     private final BillPaymentRepository      billPaymentRepository;
+    private final ProjectStatsService        statsService; // financial-progress breakdown (read-only)
 
     @Transactional(readOnly = true)
     public ProjectDashboardDTO getDashboardData(String projectUniqueId) {
@@ -74,6 +75,8 @@ public class ProjectDashboardService {
             .manager(getProjectManager(project))
             .budget(project.getBudget())
             .progressPercentage(project.getProgressPercentage())
+            .physicalProgress(project.getPhysicalProgressPct())            // technical (null = no scope)
+            .progressBreakdown(statsService.computeFinancialProgress(project)) // financial + 40/30/20/10 split
             .financialData(buildFinancialData(project, expenseBlock))
             .procurementData(buildProcurementData(project, projectUniqueId))
             .recentActivities(getRecentActivities(projectUniqueId))

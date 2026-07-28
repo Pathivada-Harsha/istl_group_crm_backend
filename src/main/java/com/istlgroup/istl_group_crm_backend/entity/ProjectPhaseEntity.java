@@ -57,6 +57,14 @@ public class ProjectPhaseEntity {
     private BigDecimal progressPercent = BigDecimal.ZERO;
 
     /**
+     * Planned % for this phase in SIMPLE tracking (Solar_Rooftop &lt; 100 kW), typed
+     * directly in the grid instead of the weekly Weeks modal. In DETAILED tracking the
+     * planned figure is derived from project_progress_periods and this stays null.
+     */
+    @Column(name = "planned_progress_pct", precision = 5, scale = 2)
+    private BigDecimal plannedProgressPct;
+
+    /**
      * Absolute project-level weight (%). A parent phase's weight equals the sum of its
      * sub-items' weights; all parent weights across a project sum to 100%. Mirrors the
      * EPC tracker "Weight (%)" column. Used to compute the weighted-average project progress.

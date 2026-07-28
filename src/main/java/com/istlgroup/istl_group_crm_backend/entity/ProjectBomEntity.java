@@ -9,6 +9,13 @@ import lombok.Data;
  * A single Bill of Materials / Bill of Quantities line for a project.
  * amount is normally quantity * unitRate but is persisted as supplied so that
  * lump-sum lines (quantity/rate left blank) still work.
+ *
+ * <p>Mirrors {@link LeadBomEntity}: BOM lines hang off the technical scope via
+ * {@code scopeItemId} → {@link ProjectPhaseEntity} (the parent phase). Unlike the
+ * lead side — whose scope is a flat list — the project scope is two-level (parent
+ * phase + {@code sub_items} JSON), so {@code scopeSubItemKey} optionally pins a line
+ * below a named sub-item. The catalog/basis snapshot ({@code basis}, {@code driverAttr},
+ * …) lets a reloaded BOM recompute quantities live, exactly like the lead BOM.
  */
 @Entity
 @Table(name = "project_bom")
@@ -22,6 +29,18 @@ public class ProjectBomEntity {
     @Column(name = "project_id", nullable = false)
     private Long projectId;
 
+    /**
+     * {@link ProjectPhaseEntity#getId()} — the scope line (parent phase) this material
+     * sits under. Nullable (a line can stand alone in the "General" bucket) and
+     * deliberately not a hard FK because scope is rebuilt on save (soft deletes).
+     */
+    @Column(name = "scope_item_id")
+    private Long scopeItemId;
+
+    /** Optional sub-item name within the parent phase (project scope is two-level). */
+    @Column(name = "scope_sub_item_key")
+    private String scopeSubItemKey;
+
     @Column(name = "seq_no", nullable = false)
     private Integer seqNo = 1;
 
@@ -33,6 +52,16 @@ public class ProjectBomEntity {
 
     @Column(name = "make")
     private String make;
+
+    @Column(name = "specification", columnDefinition = "TEXT")
+    private String specification;
+
+    /** Catalog item + chosen make (pick-a-make). Nullable = free-text/legacy line. */
+    @Column(name = "bom_item_id")
+    private Long bomItemId;
+
+    @Column(name = "variant_id")
+    private Long variantId;
 
     @Column(name = "unit")
     private String unit;
@@ -49,6 +78,29 @@ public class ProjectBomEntity {
     @Column(name = "notes")
     private String notes;
 
+    // ── Auto-sizing: quantity basis snapshot (kept so a reloaded BOM stays live) ──
+    /** FIXED | PER_KW | PER_STEP | FROM_SITE_VISIT | PER_WATT_PEAK | PER_INVERTER_KW | PER_MODULE | PER_INVERTER. Null = legacy static line. */
+    @Column(name = "basis", length = 20)
+    private String basis;
+
+    @Column(name = "basis_value", precision = 18, scale = 4)
+    private BigDecimal basisValue;
+
+    @Column(name = "step_value", precision = 18, scale = 4)
+    private BigDecimal stepValue;
+
+    @Column(name = "site_visit_field", length = 60)
+    private String siteVisitField;
+
+    /** Numeric driver snapshot of the chosen variant (module Wp / inverter kW). */
+    @Column(name = "driver_attr", precision = 18, scale = 4)
+    private BigDecimal driverAttr;
+
+    /** true = quantity auto-derives from the basis; false = user typed a manual quantity. */
+    @Column(name = "auto_qty")
+    private Boolean autoQty = Boolean.TRUE;
+
+    // ── Audit ────────────────────────────────────────────────────────────────
     @Column(name = "created_by")
     private Long createdBy;
 
@@ -57,6 +109,10 @@ public class ProjectBomEntity {
 
     @Column(name = "updated_at", nullable = false)
     private LocalDateTime updatedAt;
+
+    /** Soft delete — {@code deleted_at IS NULL} is the live filter on every read. */
+    @Column(name = "deleted_at")
+    private LocalDateTime deletedAt;
 
     @PrePersist
     protected void onCreate() { this.createdAt = LocalDateTime.now(); this.updatedAt = LocalDateTime.now(); }

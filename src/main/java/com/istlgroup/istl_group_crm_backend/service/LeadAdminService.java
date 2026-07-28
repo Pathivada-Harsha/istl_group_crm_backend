@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -101,6 +103,7 @@ public class LeadAdminService {
         t.setName(body.getName());
         t.setDescription(body.getDescription());
         t.setIsActive(body.getIsActive() == null ? Boolean.TRUE : body.getIsActive());
+        if (Boolean.TRUE.equals(t.getIsActive())) assertNoOtherActiveTemplate(t.getProjectType(), null);
         t.setCreatedBy(userId);
         return headerMap(templateRepo.save(t));
     }
@@ -109,6 +112,14 @@ public class LeadAdminService {
     public Map<String, Object> updateTemplate(Long id, TemplateHeaderRequest body) throws CustomException {
         LeadScopeTemplateEntity t = templateRepo.findByIdAndDeletedAtIsNull(id)
                 .orElseThrow(() -> new CustomException("Template not found"));
+        // Check the state this edit would LEAVE the template in, so both
+        // activating an inactive template and re-typing an active one are caught.
+        String nextType = (body.getProjectType() != null && !body.getProjectType().isBlank())
+                ? body.getProjectType().trim() : t.getProjectType();
+        boolean nextActive = body.getIsActive() != null
+                ? body.getIsActive() : Boolean.TRUE.equals(t.getIsActive());
+        if (nextActive) assertNoOtherActiveTemplate(nextType, t.getId());
+
         if (body.getProjectType() != null && !body.getProjectType().isBlank()) {
             t.setProjectType(body.getProjectType().trim());
         }
@@ -152,6 +163,10 @@ public class LeadAdminService {
                 throw new CustomException("Every scope line needs an activity");
             }
         }
+        // Rejects a bad total / a zero line and silently absorbs display rounding.
+        // Enforced here as well as in the browser because this endpoint is
+        // reachable without going through the Templates page.
+        normaliseScopeWeights(incoming);
 
         List<LeadScopeTemplateItemEntity> existing =
                 scopeItemRepo.findByTemplateIdAndDeletedAtIsNullOrderBySeqNoAscIdAsc(templateId);
@@ -174,6 +189,8 @@ public class LeadAdminService {
             s.setCategory(r.getCategory());
             s.setSpecification(r.getSpecification());
             s.setUnit(r.getUnit());
+            s.setWeightPct(r.getWeightPct());
+            s.setWeightManual(Boolean.TRUE.equals(r.getWeightManual()));
             s.setNotes(r.getNotes());
             LeadScopeTemplateItemEntity saved = scopeItemRepo.save(s);
             kept.add(saved.getId());
@@ -183,6 +200,10 @@ public class LeadAdminService {
         for (LeadScopeTemplateItemEntity s : existing) {
             if (!kept.contains(s.getId())) { s.setDeletedAt(now); scopeItemRepo.save(s); }
         }
+        // Bump the template version so projects generated after this edit pin the new
+        // version; already-generated projects keep their materialised scope untouched.
+        t.setVersion((t.getVersion() == null ? 1 : t.getVersion()) + 1);
+        templateRepo.save(t);
         return out;
     }
 
@@ -273,7 +294,109 @@ public class LeadAdminService {
         for (LeadBomTemplateItemEntity b : existing) {
             if (!kept.contains(b.getId())) { b.setDeletedAt(now); bomItemRepo.save(b); }
         }
+        // Bump the template version so projects generated after this edit pin the new
+        // version; already-generated projects keep their materialised BOM untouched.
+        t.setVersion((t.getVersion() == null ? 1 : t.getVersion()) + 1);
+        templateRepo.save(t);
         return out;
+    }
+
+    // ── Weights ─────────────────────────────────────────────────────────────────
+
+    /** Weights are stored to six decimals but shown to two. */
+    private static final int WEIGHT_SCALE = 6;
+    private static final BigDecimal ONE_HUNDRED = new BigDecimal("100");
+    /** The most a single two-decimal display value can differ from what's stored. */
+    private static final BigDecimal DISPLAY_ROUNDING_STEP = new BigDecimal("0.005");
+
+    /**
+     * Validates the incoming weights and normalises them in place, so the persist
+     * loop below writes corrected values.
+     *
+     * <ul>
+     *   <li>No weights at all → even split. This is a template that predates the
+     *       feature (or a client that doesn't send weights); it is not an error.</li>
+     *   <li>Any line at or below zero → rejected, naming the line. A 0% line never
+     *       contributes to progress, so it is always a mistake.</li>
+     *   <li>Total off by no more than two-decimal display rounding could explain →
+     *       absorbed silently onto the largest line.</li>
+     *   <li>Anything else → rejected, stating the actual total.</li>
+     * </ul>
+     */
+    private void normaliseScopeWeights(List<TemplateScopeLineRequest> lines) throws CustomException {
+        if (lines.isEmpty()) return;
+
+        boolean allNull = true;
+        for (TemplateScopeLineRequest r : lines) {
+            if (r.getWeightPct() != null) { allNull = false; break; }
+        }
+        if (allNull) { evenSplit(lines); return; }
+
+        BigDecimal sum = BigDecimal.ZERO;
+        for (TemplateScopeLineRequest r : lines) {
+            if (r.getWeightPct() != null) sum = sum.add(r.getWeightPct());
+        }
+        BigDecimal delta = ONE_HUNDRED.subtract(sum);
+
+        // The total is checked before the per-line check: when both are wrong —
+        // one line typed at 120% leaves the auto-balanced lines at 0% — naming the
+        // total explains the problem, whereas naming a zeroed line points away
+        // from what the user actually did.
+        //
+        // A user who retypes each value exactly as displayed enters a slightly
+        // different number than what was stored — up to 0.005 per line. Absorb
+        // that much; more than that is a genuine mistake and must not be swallowed.
+        BigDecimal tolerance = DISPLAY_ROUNDING_STEP.multiply(BigDecimal.valueOf(lines.size()));
+        if (delta.abs().compareTo(tolerance) > 0) {
+            throw new CustomException("Scope weights total "
+                    + sum.setScale(2, RoundingMode.HALF_UP).toPlainString()
+                    + "% — they must add up to 100%.");
+        }
+
+        for (TemplateScopeLineRequest r : lines) {
+            BigDecimal w = r.getWeightPct();
+            if (w == null || w.signum() <= 0) {
+                throw new CustomException("Scope line \"" + r.getActivity().trim()
+                        + "\" has a weight of 0% — every line must carry a weight above zero.");
+            }
+        }
+
+        if (delta.signum() == 0) return;
+
+        // The correction goes to the largest line: proportionally the smallest
+        // possible adjustment, and invisible at two decimals.
+        TemplateScopeLineRequest largest = lines.get(0);
+        for (TemplateScopeLineRequest r : lines) {
+            if (r.getWeightPct().compareTo(largest.getWeightPct()) > 0) largest = r;
+        }
+        largest.setWeightPct(largest.getWeightPct().add(delta).setScale(WEIGHT_SCALE, RoundingMode.HALF_UP));
+    }
+
+    /** Even split totalling exactly 100 — the last line absorbs the remainder. */
+    private void evenSplit(List<TemplateScopeLineRequest> lines) {
+        BigDecimal each = ONE_HUNDRED.divide(BigDecimal.valueOf(lines.size()), WEIGHT_SCALE, RoundingMode.HALF_UP);
+        BigDecimal running = BigDecimal.ZERO;
+        for (int i = 0; i < lines.size(); i++) {
+            BigDecimal w = (i == lines.size() - 1) ? ONE_HUNDRED.subtract(running) : each;
+            lines.get(i).setWeightPct(w.setScale(WEIGHT_SCALE, RoundingMode.HALF_UP));
+            lines.get(i).setWeightManual(Boolean.FALSE);
+            running = running.add(w);
+        }
+    }
+
+    /**
+     * Scope generation resolves THE active template for a project type, so a
+     * second active one would silently combine two scopes into one project —
+     * seeding it at 200% once weights carry meaning. The Templates page already
+     * blocks this; enforced here too because the endpoint is reachable directly.
+     */
+    private void assertNoOtherActiveTemplate(String projectType, Long selfId) throws CustomException {
+        LeadScopeTemplateEntity other = templateRepo
+                .findFirstByProjectTypeAndIsActiveTrueAndDeletedAtIsNull(projectType).orElse(null);
+        if (other != null && !other.getId().equals(selfId)) {
+            throw new CustomException("An active template already exists for " + projectType
+                    + ". Deactivate it first.");
+        }
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -282,7 +405,11 @@ public class LeadAdminService {
         return LeadBomTemplateItemEntity.BASIS_FIXED.equals(basis)
                 || LeadBomTemplateItemEntity.BASIS_PER_KW.equals(basis)
                 || LeadBomTemplateItemEntity.BASIS_PER_STEP.equals(basis)
-                || LeadBomTemplateItemEntity.BASIS_FROM_SITE_VISIT.equals(basis);
+                || LeadBomTemplateItemEntity.BASIS_FROM_SITE_VISIT.equals(basis)
+                || LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK.equals(basis)
+                || LeadBomTemplateItemEntity.BASIS_PER_INVERTER_KW.equals(basis)
+                || LeadBomTemplateItemEntity.BASIS_PER_MODULE.equals(basis)
+                || LeadBomTemplateItemEntity.BASIS_PER_INVERTER.equals(basis);
     }
 
     /** Same normalisation the engine uses to resolve mined lines, so keys line up. */
@@ -328,6 +455,8 @@ public class LeadAdminService {
         m.put("category", s.getCategory());
         m.put("specification", s.getSpecification());
         m.put("unit", s.getUnit());
+        m.put("weightPct", s.getWeightPct());
+        m.put("weightManual", Boolean.TRUE.equals(s.getWeightManual()));
         m.put("notes", s.getNotes());
         return m;
     }

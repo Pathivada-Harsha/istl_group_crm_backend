@@ -45,6 +45,9 @@ public class SiteVisitService {
     @Autowired
     private LeadHistoryService leadHistoryService;
 
+    @Autowired
+    private RoleHierarchyService roleHierarchyService;
+
     // ─────────────────────────────────────────────────────────────────────────
     // READ
     // ─────────────────────────────────────────────────────────────────────────
@@ -161,14 +164,22 @@ public class SiteVisitService {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Allowed when the caller is admin, already has access to the lead, OR is the
-     * assignee of the follow-up this report is being filed against (the visitor
-     * path — grants report-write without full lead access).
+     * Same rule as {@link LeadScopeService}#authorize / {@code LeadsService#hasAccessToLead}:
+     * level ≤ 2 bypass (L1/L2), else the lead's creator/assignee, else an explicit
+     * lead_access grant — PLUS the visitor path: the assignee of the Visit follow-up
+     * this report is being filed against may write the report without full lead access.
      */
     private void authorize(SiteVisitRequestWrapper request, Long leadId, Long userId, String userRole)
             throws CustomException {
-        boolean isAdmin = "SUPERADMIN".equalsIgnoreCase(userRole) || "ADMIN".equalsIgnoreCase(userRole);
-        if (isAdmin) return;
+        LeadsEntity lead = leadsRepo.findById(leadId).orElse(null);
+
+        int level = roleHierarchyService.getLevelOrder(userRole);
+        if (level <= 2) return;
+
+        if (lead != null && userId != null
+                && (userId.equals(lead.getCreatedBy()) || userId.equals(lead.getAssignedTo()))) {
+            return;
+        }
 
         if (leadAccessRepo.existsByLeadIdAndUserId(leadId, userId)) return;
 

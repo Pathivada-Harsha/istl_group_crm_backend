@@ -28,8 +28,10 @@ public class ProjectDashboardDTO {
     private LocalDate endDate;
     private String manager;
     private BigDecimal budget;
-    private BigDecimal progressPercentage;  // Manual override or auto-calculated
-    
+    private BigDecimal progressPercentage;  // Headline % complete — now TECHNICAL (physical); manual override wins
+    private BigDecimal physicalProgress;    // technical (physical) progress; null = no scope defined
+    private ProgressBreakdown progressBreakdown; // financial score + 40/30/20/10 components for the breakdown modal
+
     // Data sections
     private FinancialData financialData;
     private ProcurementData procurementData;
@@ -51,7 +53,28 @@ public class ProjectDashboardDTO {
     // ========================================================================
     // NESTED CLASSES
     // ========================================================================
-    
+
+    /** Financial progress (40/30/20/10) + its components and raw ₹ inputs — for the
+     *  dashboard "Progress breakdown" modal. Technical progress lives in physicalProgress. */
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class ProgressBreakdown {
+        private BigDecimal financialProgress; // overall financial % (0-100)
+        private BigDecimal collectionPct;     // weight 40% — received ÷ budget
+        private BigDecimal deliveryPct;       // weight 30% — delivered PO ÷ committed PO (count fallback)
+        private BigDecimal invoicingPct;      // weight 20% — invoiced ÷ budget
+        private BigDecimal commitmentPct;     // weight 10% — committed PO ÷ budget
+        // Raw ₹ inputs, for transparency in the modal
+        private BigDecimal budget;
+        private BigDecimal received;
+        private BigDecimal invoiced;
+        private BigDecimal committedPoValue;
+        private BigDecimal deliveredPoValue;
+    }
+
+
    // ============================================================================
 // UPDATE YOUR FinancialData CLASS IN ProjectDashboardDTO.java
 // ============================================================================

@@ -31,6 +31,10 @@ public class LeadTemplateWrapper {
         private String specification;
         private String unit;
         private String notes;
+        /** Share of the template's 100%. Validated/normalised server-side. */
+        private BigDecimal weightPct;
+        /** TRUE when the user pinned this weight; FALSE when it auto-balances. */
+        private Boolean weightManual;
     }
 
     /** PUT /admin/lead-templates/{id}/scope-items — whole-list replace. */

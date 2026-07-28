@@ -3,7 +3,11 @@ package com.istlgroup.istl_group_crm_backend.service;
 
 
 import com.istlgroup.istl_group_crm_backend.entity.ProjectEntity;
+import com.istlgroup.istl_group_crm_backend.entity.ProjectPhaseEntity;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDashboardDTO;
 import com.istlgroup.istl_group_crm_backend.repo.*;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -14,6 +18,7 @@ import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 @Service
 @RequiredArgsConstructor
@@ -21,6 +26,7 @@ import java.util.List;
 public class ProjectStatsService {
 
     private final ProjectRepository projectRepository;
+    private final ProjectPhaseRepo projectPhaseRepo;   // technical-scope phases for physical progress
     private final PurchaseOrderRepository purchaseOrderRepository;
     private final QuotationRepository quotationRepository;
     private final BillRepository billRepository;
@@ -241,41 +247,32 @@ public class ProjectStatsService {
         boolean hasProcurement = totalPOs > 0 || approvedQuotes > 0;
         boolean hasFinancial   = totalInvoices > 0 || received.compareTo(BigDecimal.ZERO) > 0;
 
-        // ── Weighted progress calculation ────────────────────────────────
-        // Weights: Financial collection 40% | Delivery 30% | Invoicing 20% | PO commitment 10%
-        BigDecimal financialScore    = BigDecimal.ZERO; // paidInvoice / budget
-        BigDecimal deliveryScore     = BigDecimal.ZERO; // deliveredPOValue / committedPOValue (or count-based)
-        BigDecimal invoicingScore    = BigDecimal.ZERO; // totalInvoiceValue / budget
-        BigDecimal commitmentScore   = BigDecimal.ZERO; // committedPOValue / budget
+        // ── Financial progress (40/30/20/10) ─────────────────────────────
+        // Single source of the financial score + its component breakdown, also
+        // exposed to the dashboard's Progress-breakdown modal so what's stored and
+        // what's shown never diverge.
+        ProjectDashboardDTO.ProgressBreakdown fb = computeFinancialProgress(project);
+        BigDecimal weightedProgress = fb.getFinancialProgress();
 
-        if (budget.compareTo(BigDecimal.ZERO) > 0) {
-            financialScore = received.divide(budget, 4, RoundingMode.HALF_UP)
-                    .multiply(new BigDecimal("100")).min(new BigDecimal("100")).max(BigDecimal.ZERO);
-            invoicingScore = invoiced.divide(budget, 4, RoundingMode.HALF_UP)
-                    .multiply(new BigDecimal("100")).min(new BigDecimal("100")).max(BigDecimal.ZERO);
-            commitmentScore = committedPOVal.divide(budget, 4, RoundingMode.HALF_UP)
-                    .multiply(new BigDecimal("100")).min(new BigDecimal("100")).max(BigDecimal.ZERO);
-        }
-        if (committedPOVal.compareTo(BigDecimal.ZERO) > 0) {
-            deliveryScore = deliveredPOVal.divide(committedPOVal, 4, RoundingMode.HALF_UP)
-                    .multiply(new BigDecimal("100")).min(new BigDecimal("100")).max(BigDecimal.ZERO);
-        } else if (totalPOs > 0) {
-            // Fallback: count-based delivery when no PO values
-            deliveryScore = new BigDecimal(deliveredPOs)
-                    .divide(new BigDecimal(totalPOs), 4, RoundingMode.HALF_UP)
-                    .multiply(new BigDecimal("100"));
-        }
+        // ── Physical (technical) progress — weighted roll-up of the tech scope.
+        //    Kept SEPARATE from the financial figure (they are shown side-by-side,
+        //    never blended). NULL when no scope is defined.
+        BigDecimal physical = computePhysicalProgress(project.getId());
+        project.setPhysicalProgressPct(physical);
+        project.setFinancialProgressPct(weightedProgress); // stored for the list/detail dual display
 
-        BigDecimal weightedProgress = financialScore.multiply(new BigDecimal("0.40"))
-                .add(deliveryScore.multiply(new BigDecimal("0.30")))
-                .add(invoicingScore.multiply(new BigDecimal("0.20")))
-                .add(commitmentScore.multiply(new BigDecimal("0.10")))
-                .setScale(2, RoundingMode.HALF_UP);
-
-        // ── Only write auto-progress when no manual override is set ──────
-        boolean hasManualProgress = project.getProgressPercentage() != null
-                && project.getProgressPercentage().compareTo(BigDecimal.ZERO) > 0;
-        if (!hasManualProgress) {
+        // ── Overall project progress = TECHNICAL (physical) only ─────────────
+        //  Financial is a SEPARATE metric (shown beside the dashboard donut + in the
+        //  Progress-breakdown modal), never blended into "progress" — a blended number
+        //  hid where a project was actually delayed. A manual override wins; when there
+        //  is no scope (physical == null) fall back to the financial score so the
+        //  headline isn't blank. A genuine 0% is not "manually set" — the override
+        //  lives in its own column (NULL = auto). (Defect §5.3a.)
+        if (project.getProgressOverride() != null) {
+            project.setProgressPercentage(project.getProgressOverride());
+        } else if (physical != null) {
+            project.setProgressPercentage(physical);
+        } else {
             project.setProgressPercentage(weightedProgress);
         }
 
@@ -287,9 +284,13 @@ public class ProjectStatsService {
                 // Zero activity on all fronts → Not Started
                 newStatus = ProjectEntity.ProjectStatus.NOT_STARTED;
 
-            } else if (weightedProgress.compareTo(new BigDecimal("99.00")) >= 0
-                    || received.compareTo(budget) >= 0) {
-                // Fully received from client → Completed
+            } else if ((weightedProgress.compareTo(new BigDecimal("99.00")) >= 0
+                        || received.compareTo(budget) >= 0)
+                    && (physical == null || physical.compareTo(new BigDecimal("99.00")) >= 0)) {
+                // Completion needs BOTH the financial condition AND the physical work
+                // done (≥99% of the tech scope). When no scope is defined (physical
+                // == null) fall back to the financial-only rule so existing projects
+                // don't regress. (Defect §5.3c.)
                 newStatus = ProjectEntity.ProjectStatus.COMPLETED;
 
             } else if (hasProcurement || hasFinancial) {
@@ -307,6 +308,147 @@ public class ProjectStatsService {
                 project.setStatus(newStatus);
             }
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  FINANCIAL PROGRESS (40/30/20/10) — read-only; single source for the stored
+    //  status logic AND the dashboard Progress-breakdown modal.
+    // ═══════════════════════════════════════════════════════════════════════
+    private static final BigDecimal HUNDRED = new BigDecimal("100");
+
+    private BigDecimal pctClamped(BigDecimal num, BigDecimal den) {
+        if (den == null || den.signum() <= 0) return BigDecimal.ZERO;
+        return num.divide(den, 4, RoundingMode.HALF_UP).multiply(HUNDRED).min(HUNDRED).max(BigDecimal.ZERO);
+    }
+
+    /**
+     * The financial score (0-100) + its four weighted components and raw ₹ inputs,
+     * computed from stored project fields. Weights: Collection 40% | PO Delivery 30% |
+     * Invoicing 20% | PO Commitment 10%. Read-only (no persistence).
+     */
+    public ProjectDashboardDTO.ProgressBreakdown computeFinancialProgress(ProjectEntity project) {
+        BigDecimal budget    = project.getBudget()            != null ? project.getBudget()            : BigDecimal.ZERO;
+        BigDecimal received  = project.getPaidInvoiceValue()  != null ? project.getPaidInvoiceValue()  : BigDecimal.ZERO;
+        BigDecimal invoiced  = project.getTotalInvoiceValue() != null ? project.getTotalInvoiceValue() : BigDecimal.ZERO;
+        BigDecimal deliveredPOVal = project.getDeliveredPoValue() != null ? project.getDeliveredPoValue() : BigDecimal.ZERO;
+        BigDecimal committedPOVal = project.getTotalPoValue() != null
+                ? project.getTotalPoValue().subtract(project.getCancelledPoValue() != null ? project.getCancelledPoValue() : BigDecimal.ZERO)
+                : BigDecimal.ZERO;
+        int totalPOs     = project.getTotalPoCount()     != null ? project.getTotalPoCount()     : 0;
+        int deliveredPOs = project.getDeliveredPoCount()  != null ? project.getDeliveredPoCount()  : 0;
+
+        BigDecimal collection = pctClamped(received, budget);
+        BigDecimal invoicing  = pctClamped(invoiced, budget);
+        BigDecimal commitment = pctClamped(committedPOVal, budget);
+        BigDecimal delivery;
+        if (committedPOVal.signum() > 0) {
+            delivery = pctClamped(deliveredPOVal, committedPOVal);
+        } else if (totalPOs > 0) {
+            delivery = new BigDecimal(deliveredPOs).divide(new BigDecimal(totalPOs), 4, RoundingMode.HALF_UP)
+                    .multiply(HUNDRED).min(HUNDRED).max(BigDecimal.ZERO);
+        } else {
+            delivery = BigDecimal.ZERO;
+        }
+
+        BigDecimal financial = collection.multiply(new BigDecimal("0.40"))
+                .add(delivery.multiply(new BigDecimal("0.30")))
+                .add(invoicing.multiply(new BigDecimal("0.20")))
+                .add(commitment.multiply(new BigDecimal("0.10")))
+                .setScale(2, RoundingMode.HALF_UP);
+
+        ProjectDashboardDTO.ProgressBreakdown b = new ProjectDashboardDTO.ProgressBreakdown();
+        b.setFinancialProgress(financial);
+        b.setCollectionPct(collection.setScale(2, RoundingMode.HALF_UP));
+        b.setDeliveryPct(delivery.setScale(2, RoundingMode.HALF_UP));
+        b.setInvoicingPct(invoicing.setScale(2, RoundingMode.HALF_UP));
+        b.setCommitmentPct(commitment.setScale(2, RoundingMode.HALF_UP));
+        b.setBudget(budget);
+        b.setReceived(received);
+        b.setInvoiced(invoiced);
+        b.setCommittedPoValue(committedPOVal);
+        b.setDeliveredPoValue(deliveredPOVal);
+        return b;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  PHYSICAL (TECHNICAL) PROGRESS — weighted roll-up of the tech scope
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private static final ObjectMapper PHYS_MAPPER = new ObjectMapper();
+
+    /**
+     * Recompute ONLY physical progress for a project (cheap — no native financial
+     * queries). Called after a scope/phase/progress save so the figure is fresh
+     * immediately; the full stats recalc (scheduler / PO/invoice events) re-derives
+     * status from it.
+     */
+    @Transactional
+    public void recomputePhysicalProgress(String projectUniqueId) {
+        ProjectEntity project = projectRepository.findByProjectUniqueId(projectUniqueId).orElse(null);
+        if (project == null) return;
+        project.setPhysicalProgressPct(computePhysicalProgress(project.getId()));
+        projectRepository.save(project);
+    }
+
+    /**
+     * Weighted roll-up of the project's phases:
+     *   parent actual = (has sub-items) ? Σ(sub.progress×sub.weight)/Σ(sub.weight) : phase.progressPercent
+     *   physical      = Σ(parent.actual × parent.weight) / Σ(parent.weight)
+     * Phases with null/zero weight are excluded from the denominator. Returns NULL
+     * (not 0) when there is no scope or no positive weight — "no plan" ≠ "no work".
+     */
+    private BigDecimal computePhysicalProgress(Long projectId) {
+        if (projectId == null) return null;
+        List<ProjectPhaseEntity> phases = projectPhaseRepo.findByProjectIdOrderBySeqNo(projectId);
+        if (phases == null || phases.isEmpty()) return null;
+        BigDecimal weightedSum = BigDecimal.ZERO;
+        BigDecimal weightTotal = BigDecimal.ZERO;
+        for (ProjectPhaseEntity p : phases) {
+            BigDecimal w = p.getWeightPct();
+            if (w == null || w.signum() <= 0) continue;
+            weightedSum = weightedSum.add(parentActual(p).multiply(w));
+            weightTotal = weightTotal.add(w);
+        }
+        if (weightTotal.signum() > 0) {
+            return weightedSum.divide(weightTotal, 2, RoundingMode.HALF_UP);
+        }
+        // Phases exist but none carry a weight → equal-weighted average of their
+        // actuals (matches the grid's equal-split default), so physical progress is
+        // still meaningful for plans authored before parent weights were set.
+        BigDecimal sum = BigDecimal.ZERO;
+        for (ProjectPhaseEntity p : phases) sum = sum.add(parentActual(p));
+        return sum.divide(new BigDecimal(phases.size()), 2, RoundingMode.HALF_UP);
+    }
+
+    /** A phase's actual %: weighted mean of its sub-items when present, else its own. */
+    private BigDecimal parentActual(ProjectPhaseEntity p) {
+        List<Map<String, Object>> subs = parseSubItems(p.getSubItems());
+        if (subs != null && !subs.isEmpty()) {
+            BigDecimal wsum = BigDecimal.ZERO, acc = BigDecimal.ZERO;
+            for (Map<String, Object> si : subs) {
+                BigDecimal w = toBD(si.get("weightPct"));
+                if (w.signum() <= 0) continue;
+                acc = acc.add(toBD(si.get("progressPercent")).multiply(w));
+                wsum = wsum.add(w);
+            }
+            if (wsum.signum() > 0) return acc.divide(wsum, 2, RoundingMode.HALF_UP);
+        }
+        return p.getProgressPercent() != null ? p.getProgressPercent() : BigDecimal.ZERO;
+    }
+
+    private List<Map<String, Object>> parseSubItems(String json) {
+        if (json == null || json.isBlank()) return null;
+        try {
+            return PHYS_MAPPER.readValue(json, new TypeReference<List<Map<String, Object>>>() {});
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private BigDecimal toBD(Object o) {
+        if (o == null || String.valueOf(o).isBlank()) return BigDecimal.ZERO;
+        try { return new BigDecimal(String.valueOf(o)); }
+        catch (Exception e) { return BigDecimal.ZERO; }
     }
 
     /**

@@ -10,4 +10,8 @@ public interface ProjectProgressPeriodRepo extends JpaRepository<ProjectProgress
 
     @Transactional
     void deleteByProjectId(Long projectId);
+
+    /** Remove the progress periods of a phase that was deleted from the scope. */
+    @Transactional
+    void deleteByPhaseId(Long phaseId);
 }
