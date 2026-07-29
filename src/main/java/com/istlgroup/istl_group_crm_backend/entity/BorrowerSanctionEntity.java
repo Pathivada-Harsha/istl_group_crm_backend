@@ -133,13 +133,13 @@ public class BorrowerSanctionEntity {
      * COD", "100% above 1.30x DSCR" — and a numeric column would have to either
      * drop the qualifier or invent a number the document never printed.
      */
-    @Column(name = "dsra", length = 255)
+    @Column(name = "dsra", columnDefinition = "TEXT")
     private String dsra;
 
-    @Column(name = "isra", length = 255)
+    @Column(name = "isra", columnDefinition = "TEXT")
     private String isra;
 
-    @Column(name = "cash_sweep", length = 255)
+    @Column(name = "cash_sweep", columnDefinition = "TEXT")
     private String cashSweep;
 
     @Column(name = "tenor_text")

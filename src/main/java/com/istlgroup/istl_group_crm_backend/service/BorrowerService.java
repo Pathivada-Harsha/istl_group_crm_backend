@@ -18,6 +18,8 @@ import org.springframework.web.multipart.MultipartFile;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import com.istlgroup.istl_group_crm_backend.entity.BorrowerEntity;
 import com.istlgroup.istl_group_crm_backend.entity.BorrowerSanctionEntity;
 import com.istlgroup.istl_group_crm_backend.repo.BorrowerRepo;
@@ -53,6 +55,8 @@ public class BorrowerService {
     @Autowired private SanctionDocAiExtractor aiExtractor;
     @Autowired private SanctionDerivedCalculator derived;
     @Autowired private SanctionDocHtmlRenderer htmlRenderer;
+
+    @PersistenceContext private EntityManager em;
 
     // ════════════════════════════════════════════════════════════════════════
     // Import — stateless parse
@@ -235,20 +239,41 @@ public class BorrowerService {
         return getById(borrowerRepo.save(b).getId());
     }
 
+    /**
+     * Hard-deletes a borrower and every row that belongs to it, across all
+     * registry tables. This is permanent and irreversible — there is no
+     * {@code deleted_at} row left behind, so the reference numbers become free
+     * for re-import immediately.
+     *
+     * <p>Children are removed before the parent so foreign keys never block the
+     * delete. Every statement is scoped by {@code borrower_id}, so shared tables
+     * such as {@code data_room_documents} only lose this borrower's rows.
+     */
     @Transactional
     public void deleteBorrower(Long id, Long userId) throws CustomException {
-        BorrowerEntity b = borrowerRepo.findByIdAndDeletedAtIsNull(id)
+        // findById (not ...AndDeletedAtIsNull) so an already soft-deleted
+        // borrower can still be purged for good.
+        borrowerRepo.findById(id)
                 .orElseThrow(() -> new CustomException("Borrower not found"));
-        b.setDeletedAt(LocalDateTime.now());
-        b.setUpdatedBy(userId);
-        borrowerRepo.save(b);
-        // Soft-delete the letters with it, so a re-import of the same ref no.
-        // isn't blocked by a row nobody can see.
-        for (BorrowerSanctionEntity s :
-                sanctionRepo.findByBorrowerIdAndDeletedAtIsNullOrderBySanctionDateDesc(id)) {
-            s.setDeletedAt(LocalDateTime.now());
-            sanctionRepo.save(s);
-        }
+
+        deleteByBorrowerId("data_room_documents", id);          // shared: scoped delete
+        deleteByBorrowerId("loan_facilities", id);
+        deleteByBorrowerId("borrower_onboarding_requests", id);
+        deleteByBorrowerId("borrower_kyc_documents", id);
+        deleteByBorrowerId("borrower_financial_snapshot", id);
+        deleteByBorrowerId("borrower_sanctions", id);           // also FK-cascades, kept explicit
+
+        em.createNativeQuery("DELETE FROM borrowers WHERE id = :id")
+          .setParameter("id", id)
+          .executeUpdate();
+    }
+
+    /** Deletes all rows of {@code table} whose {@code borrower_id} matches. */
+    private void deleteByBorrowerId(String table, Long borrowerId) {
+        // 'table' is a fixed internal constant, never user input — no injection risk.
+        em.createNativeQuery("DELETE FROM " + table + " WHERE borrower_id = :id")
+          .setParameter("id", borrowerId)
+          .executeUpdate();
     }
 
     private void assertCinFree(String cin, Long selfId) throws CustomException {
