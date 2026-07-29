@@ -256,12 +256,9 @@ public class BorrowerService {
         borrowerRepo.findById(id)
                 .orElseThrow(() -> new CustomException("Borrower not found"));
 
-        deleteByBorrowerId("data_room_documents", id);          // shared: scoped delete
-        deleteByBorrowerId("loan_facilities", id);
-        deleteByBorrowerId("borrower_onboarding_requests", id);
-        deleteByBorrowerId("borrower_kyc_documents", id);
-        deleteByBorrowerId("borrower_financial_snapshot", id);
-        deleteByBorrowerId("borrower_sanctions", id);           // also FK-cascades, kept explicit
+        // Only borrower_sanctions still hangs off a borrower in the current
+        // schema; the KYC / onboarding / snapshot / loan tables were removed.
+        deleteByBorrowerId("borrower_sanctions", id);
 
         em.createNativeQuery("DELETE FROM borrowers WHERE id = :id")
           .setParameter("id", id)
