@@ -570,6 +570,7 @@ public class BorrowerService {
         b.setCity(SanctionValueParser.clean(in.getCity()));
         b.setState(SanctionValueParser.clean(in.getState()));
         b.setPincode(SanctionValueParser.clean(in.getPincode()));
+        b.setDistrict(SanctionValueParser.clean(in.getDistrict()));
         b.setContactPerson(SanctionValueParser.clean(in.getContactPerson()));
         b.setContactEmail(SanctionValueParser.clean(in.getContactEmail()));
         b.setContactPhone(SanctionValueParser.clean(in.getContactPhone()));
@@ -655,6 +656,7 @@ public class BorrowerService {
         w.setCity(b.getCity());
         w.setState(b.getState());
         w.setPincode(b.getPincode());
+        w.setDistrict(b.getDistrict());
         w.setContactPerson(b.getContactPerson());
         w.setContactEmail(b.getContactEmail());
         w.setContactPhone(b.getContactPhone());

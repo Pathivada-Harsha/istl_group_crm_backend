@@ -4,6 +4,8 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.springframework.stereotype.Component;
 
@@ -141,19 +143,44 @@ public class SanctionDerivedCalculator {
             fill(w, "equityPct", SanctionValueParser.formatPct(equityPct));
         }
 
-        // ── ROI = base rate + spread ──
+        // ── ROI ──
+        // A number printed as part of "Rate of Interest" is what the letter
+        // actually says, so it wins over the base + spread build-up below —
+        // this is what backfills roiPct for letters that only ever stated one
+        // composite rate (existing records included: this runs on every read,
+        // not just at import, so it applies retroactively too).
+        BigDecimal roi = e.getRoiPct();
+        if (roi == null) {
+            roi = firstPercent(e.getInterestRateText());
+            if (roi != null) fill(w, "roiPct", SanctionValueParser.formatPct(roi));
+        }
+
         BigDecimal base   = e.getBaseRatePct();
         BigDecimal spread = e.getSpreadPct();
         if (base != null && spread != null) {
             BigDecimal built = base.add(spread);
-            if (e.getRoiPct() == null) {
+            if (roi == null) {
                 fill(w, "roiPct", SanctionValueParser.formatPct(built));
-            } else if (e.getRoiPct().subtract(built).abs().compareTo(ROI_TOLERANCE) > 0) {
+            } else if (roi.subtract(built).abs().compareTo(ROI_TOLERANCE) > 0) {
                 w.setDerivedRoiCheck("Does not reconcile — base + spread = "
                         + SanctionValueParser.formatPct(built));
             } else {
                 w.setDerivedRoiCheck("Reconciles");
             }
+        }
+    }
+
+    /** First "9.75%"-shaped figure in free text, or null if there isn't one. */
+    private static final Pattern PERCENT = Pattern.compile("([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%");
+
+    private static BigDecimal firstPercent(String text) {
+        if (text == null) return null;
+        Matcher m = PERCENT.matcher(text);
+        if (!m.find()) return null;
+        try {
+            return new BigDecimal(m.group(1));
+        } catch (NumberFormatException ex) {
+            return null;
         }
     }
 
