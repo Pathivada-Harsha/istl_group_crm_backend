@@ -23,6 +23,7 @@ import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadFilterRequestWrap
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadRequestWrapper;
 import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
 import com.istlgroup.istl_group_crm_backend.entity.TeamEntity;
+import com.istlgroup.istl_group_crm_backend.entity.UsersEntity;
 import com.istlgroup.istl_group_crm_backend.repo.LeadAccessRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadsRepo;
 import com.istlgroup.istl_group_crm_backend.repo.TeamRepository;
@@ -78,6 +79,41 @@ public class LeadsService {
     private TeamRepository teamRepository;
 
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    /**
+     * Statuses at which a lead is on HOLD or already closed out. A lead sitting at one
+     * of these NEVER pulls a BD off the round-robin, whatever its source.
+     *
+     * Source alone must not trigger BD auto-assignment — "Keep in View" means the client
+     * asked to be called back later, so nobody has confirmed interest yet and a BD cannot
+     * act on the lead.
+     *
+     * This gates automatic BD ROUTING only. It deliberately does NOT gate the telecaller
+     * round-robin: "Keep in View" is a telecaller status and the callback is a phone call,
+     * so a telecaller owning such a lead is correct and keeps working exactly as before.
+     *
+     * Lower-cased — compare against status.trim().toLowerCase().
+     */
+    private static final java.util.Set<String> NO_AUTO_BD_STATUSES = java.util.Set.of(
+            "keep in view", "closed lost", "not interested", "not responded");
+
+    /**
+     * How the HANDLER slot (leads.assigned_to) got filled. Drives the history wording so
+     * the timeline can tell a self-assignment apart from a round-robin pick — previously
+     * every assignment was logged as round-robin.
+     */
+    private enum AssignMode {
+        NONE,               // nobody in the handler slot
+        EXPLICIT,           // picked in "Assign To", and it is somebody else
+        SELF_PICK,          // picked in "Assign To", and it is the creator
+        SELF_ROLE_HANDLER,  // the creator's role claims the handler slot
+        SELF_ROLE_BD,       // the creator's role claims the BD slot — handler stays empty
+        SELF_CREATOR,       // the creator simply keeps its own lead (TELECALLER / affiliate)
+        ROUND_ROBIN         // telecaller round-robin
+    }
+
+    /** How the BD slot (leads.bd_assigned_to) got filled. Same purpose as AssignMode. */
+    private enum BdAssignMode { NONE, EXPLICIT, SELF_ROLE, ROUND_ROBIN }
 
     // ─────────────────────────────────────────────────────────────────────────
     // VISIBILITY HELPER
@@ -428,27 +464,38 @@ public class LeadsService {
         lead.setCapacity(requestWrapper.getCapacity());
         lead.setCapacityUnit(requestWrapper.getCapacityUnit() != null ? requestWrapper.getCapacityUnit() : "kW");
 
+        // The creator row is needed for the lead owner, the affiliate debug line and the
+        // creator's role — fetch it once instead of three separate findById calls.
+        UsersEntity creator = (createdBy != null)
+                ? usersRepo.findById(createdBy).orElse(null)
+                : null;
+        String creatorRole = (creator != null) ? creator.getRole() : null;
+
         // Lead Owner — use provided value, or fall back to the creator's name
         if (requestWrapper.getLeadOwner() != null && !requestWrapper.getLeadOwner().trim().isEmpty()) {
             lead.setLeadOwner(requestWrapper.getLeadOwner().trim());
-        } else if (createdBy != null) {
-            usersRepo.findById(createdBy).ifPresent(u ->
-                lead.setLeadOwner(u.getName() != null ? u.getName() : u.getUser_id()));
+        } else if (creator != null) {
+            lead.setLeadOwner(creator.getName() != null ? creator.getName() : creator.getUser_id());
         }
 
         lead.setCreatedBy(createdBy);
 
         // ── Assignment logic ───────────────────────────────────────────────────
+        // Precedence, highest wins:
+        //   1. affiliate-team creator   — existing behaviour, untouched
+        //   2. explicit "Assign To" pick — ALWAYS honoured, never overridden
+        //   3. creator's role owns its own leads — data-driven, slot-aware
+        //   4. everything else — Closed Won / Referral / BD-owned stage / telecaller RR
         Long assignedTo = requestWrapper.getAssignedTo();
 
         // Affiliate-team leads are never auto-routed to a telecaller or a BD.
         String affiliateTeam = affiliateTeamNameOf(createdBy);
         boolean affiliateCreator = affiliateTeam != null;
-        String rawTeam = usersRepo.findById(createdBy).map(u -> u.getTeam()).orElse(null);
         System.out.println("[LeadsService.createLead] createdBy=" + createdBy
                 + " affiliateCreator=" + affiliateCreator
                 + " matchedTeam=" + affiliateTeam
-                + " users.team=" + rawTeam);
+                + " users.team=" + (creator != null ? creator.getTeam() : null)
+                + " creatorRole=" + creatorRole);
 
         boolean isClosedWon = "Closed Won".equalsIgnoreCase(requestWrapper.getStatus());
         boolean isReferral   = "Referral".equalsIgnoreCase(requestWrapper.getSource());
@@ -458,15 +505,40 @@ public class LeadsService {
                         "Proposal Sent", "Closed Won", "Closed Lost")
                         .contains(requestWrapper.getStatus());
 
+        // BUG FIX — a lead parked on hold or already closed out must never pull a BD off
+        // the round-robin, whatever its source. Source alone is not enough; the status has
+        // to allow it too. See NO_AUTO_BD_STATUSES.
+        String statusKey = requestWrapper.getStatus() == null
+                ? "" : requestWrapper.getStatus().trim().toLowerCase();
+        boolean referralAutoBd = isReferral && !NO_AUTO_BD_STATUSES.contains(statusKey);
+
+        // Which ownership slot, if any, the creator's own role claims for the leads it
+        // creates. Driven by role_hierarchy.lead_self_assign_slot — no role names here.
+        // Affiliate creators are exempt: their branch below owns the decision outright
+        // (precedence rank 1), and affiliate handling must not change.
+        RoleHierarchyService.SelfAssignSlot creatorSlot = affiliateCreator
+                ? RoleHierarchyService.SelfAssignSlot.NONE
+                : roleHierarchyService.getLeadSelfAssignSlot(creatorRole);
+
+        AssignMode assignMode = AssignMode.NONE;
+
         if (affiliateCreator) {
             // Affiliate-team lead: honour a "lead handler" explicitly picked at
             // creation; otherwise the lead simply stays with its creator. No
             // telecaller round-robin, no BD — a manager can reassign later.
             lead.setAssignedTo(assignedTo != null ? assignedTo : createdBy);
             lead.setBdAssignedTo(null);
+            assignMode = (assignedTo == null)             ? AssignMode.SELF_CREATOR
+                       : assignedTo.equals(createdBy)     ? AssignMode.SELF_PICK
+                       :                                    AssignMode.EXPLICIT;
 
-        } else if (assignedTo != null && !isClosedWon && !isReferral) {
+        } else if (assignedTo != null) {
             // Explicit assignment selected in the form.
+            //
+            // BUG FIX — the pick is now honoured at EVERY status and for EVERY source.
+            // The old guards (!isClosedWon && !isReferral) silently threw the pick away
+            // and let auto-assignment hand the lead to somebody else instead.
+            //
             // Branch on the ASSIGNEE's role so that a direct assignment to a
             // BD or a senior user is NOT mistaken for a telecaller assignment.
             String assigneeRole = usersRepo.findById(assignedTo)
@@ -494,13 +566,38 @@ public class LeadsService {
                 // skipped because a senior owner already exists.
                 lead.setAssignedTo(assignedTo);
             }
+            assignMode = assignedTo.equals(createdBy)
+                    ? AssignMode.SELF_PICK : AssignMode.EXPLICIT;
+
+        } else if (creatorSlot == RoleHierarchyService.SelfAssignSlot.BD) {
+            // The creator's role keeps the leads it creates, in the BD slot
+            // (e.g. BD_EXECUTIVE). Applies at EVERY status — New, Keep in View,
+            // Closed Won, anything — and bypasses the round-robin entirely.
+            // Recorded as the BD executive, NOT as the lead handler: the two are not
+            // interchangeable. The creator's per-lead access is granted after save.
+            lead.setAssignedTo(null);
+            lead.setBdAssignedTo(createdBy);
+            lead.setBdAssignedAt(java.time.LocalDateTime.now());
+            assignMode = AssignMode.SELF_ROLE_BD;
+
+        } else if (creatorSlot == RoleHierarchyService.SelfAssignSlot.HANDLER) {
+            // The creator's role keeps the leads it creates, in the HANDLER slot
+            // (e.g. MARKETING_EXECUTIVE — they close it themselves, so no BD is needed).
+            // Applies at EVERY status and bypasses the round-robin entirely.
+            // Recorded as the lead handler, NOT as the BD executive.
+            lead.setAssignedTo(createdBy);
+            lead.setBdAssignedTo(null);
+            assignMode = AssignMode.SELF_ROLE_HANDLER;
 
         } else if (isClosedWon) {
             // Closed Won on creation → no telecaller needed, leave assignedTo null
             lead.setAssignedTo(null);
 
-        } else if (isReferral) {
-            // Referral leads → skip telecaller, auto-assign BD via round-robin
+        } else if (referralAutoBd) {
+            // Referral leads → skip telecaller, auto-assign BD via round-robin.
+            // Suppressed at hold / closed-out statuses (NO_AUTO_BD_STATUSES): such a lead
+            // falls through to the UNCHANGED telecaller round-robin below, which is the
+            // correct owner for a lead waiting on a callback.
             try {
                 Long nextBD = roundRobinService.getNextBD(
                         requestWrapper.getGroupName(), requestWrapper.getSubGroupName());
@@ -519,19 +616,27 @@ public class LeadsService {
 
         } else {
             // No explicit assignment — round-robin among telecallers
-            String creatorRole = usersRepo.findById(createdBy)
-                    .map(u -> u.getRole())
-                    .orElse("");
-
             if ("TELECALLER".equalsIgnoreCase(creatorRole)) {
                 lead.setAssignedTo(createdBy);
+                assignMode = AssignMode.SELF_CREATOR;
             } else {
                 Long nextTelecaller = roundRobinService.getNextTelecaller(
                         requestWrapper.getGroupName(),
                         requestWrapper.getSubGroupName());
                 lead.setAssignedTo(nextTelecaller);
+                assignMode = (nextTelecaller != null)
+                        ? AssignMode.ROUND_ROBIN : AssignMode.NONE;
             }
         }
+
+        // How the BD slot got filled, tracked separately from the handler slot because the
+        // two are populated by different branches and get different history wording.
+        Long bdSlot = lead.getBdAssignedTo();
+        BdAssignMode bdMode;
+        if (bdSlot == null)                             bdMode = BdAssignMode.NONE;
+        else if (assignMode == AssignMode.SELF_ROLE_BD) bdMode = BdAssignMode.SELF_ROLE;
+        else if (bdSlot.equals(assignedTo))             bdMode = BdAssignMode.EXPLICIT;
+        else                                            bdMode = BdAssignMode.ROUND_ROBIN;
         // ── End assignment logic ──────────────────────────────────────────────
 
         // First save — gets the auto-incremented id from DB
@@ -555,10 +660,21 @@ public class LeadsService {
                 String assignedToName = usersRepo.findById(savedLead.getAssignedTo())
                         .map(u -> u.getName()).orElse("Unknown");
 
-                boolean wasRoundRobin = (requestWrapper.getAssignedTo() == null);
-                String  historyDesc   = wasRoundRobin
-                        ? "Lead auto-assigned via round-robin to " + assignedToName
-                        : "Lead assigned to " + assignedToName;
+                // The old code inferred "round-robin" from requestWrapper.getAssignedTo()
+                // == null, which mislabelled EVERY self-assignment as an automatic
+                // round-robin pick. The mode is now tracked explicitly by the branch that
+                // made the decision, so the timeline can tell the two apart.
+                String historyDesc = switch (assignMode) {
+                    case ROUND_ROBIN ->
+                        "Lead auto-assigned via round-robin to " + assignedToName;
+                    case SELF_ROLE_HANDLER ->
+                        "Lead self-assigned to " + assignedToName
+                        + " (creator's role owns the leads it creates)";
+                    case SELF_PICK, SELF_CREATOR ->
+                        "Lead self-assigned to " + assignedToName;
+                    default ->
+                        "Lead assigned to " + assignedToName;
+                };
 
                 leadHistoryService.addHistory(savedLead.getId(), "ASSIGNED",
                         "assignedTo", "Unassigned", assignedToName,
@@ -584,8 +700,18 @@ public class LeadsService {
             }
         }
 
-        // ── Referral: create BD LeadAccess after save (need real leadId) ─────
-        if (isReferral && savedLead.getBdAssignedTo() != null) {
+        // ── BD slot: grant lead_access + write history after save (need real leadId) ──
+        // Runs however the BD got there: referral round-robin, an explicit "Assign To"
+        // pick of a BD user, or the creator's own role claiming the BD slot.
+        //
+        // The lead_access row is load-bearing, not decorative. hasAccessToLead() and
+        // LeadsRepo.findAccessibleByUser / searchAccessibleByUserPaged all test
+        // createdBy / assignedTo / lead_access — none of them look at bd_assigned_to. So a
+        // BD executive whose role only permits seeing their own records, and who sits ONLY
+        // in the BD slot, cannot open or list the lead without this row. Every other
+        // BD-assignment path (reassignBd, TelecallerLeadService) already writes it; the
+        // create path used to write it for referral leads only.
+        if (savedLead.getBdAssignedTo() != null) {
             try {
                 Long bdUserId = savedLead.getBdAssignedTo();
                 if (!leadAccessRepo.existsByLeadIdAndUserId(savedLead.getId(), bdUserId)) {
@@ -598,11 +724,20 @@ public class LeadsService {
                 }
                 String bdName = usersRepo.findById(bdUserId)
                         .map(u -> u.getName()).orElse("Unknown");
+                String bdDesc = switch (bdMode) {
+                    case ROUND_ROBIN ->
+                        "Referral lead — BD auto-assigned via round-robin to " + bdName;
+                    case SELF_ROLE ->
+                        "Lead self-assigned to BD " + bdName
+                        + " (creator's role owns the leads it creates)";
+                    default ->
+                        "BD assigned to " + bdName;
+                };
                 leadHistoryService.addHistory(savedLead.getId(), "ASSIGNED",
-                        "bdAssignedTo", "Unassigned", bdName,
-                        "Referral lead — BD auto-assigned via round-robin to " + bdName, createdBy);
+                        "bdAssignedTo", "Unassigned", bdName, bdDesc, createdBy);
             } catch (Exception e) {
-                System.err.println("Failed to create BD LeadAccess for referral lead: " + e.getMessage());
+                System.err.println("Failed to create BD LeadAccess for lead "
+                        + savedLead.getId() + ": " + e.getMessage());
             }
         }
 
@@ -610,7 +745,13 @@ public class LeadsService {
         // finalSavedLead is a snapshot after all re-assignments; required because
         // lambdas can only capture effectively-final variables.
         final LeadsEntity finalSavedLead = savedLead;
-        if (!suppressEmail && !affiliateCreator && finalSavedLead.getAssignedTo() != null) {
+        final Long finalAssignee = finalSavedLead.getAssignedTo();
+        // Never tell somebody a lead was assigned to them when they assigned it to
+        // themselves. Covers the new creator-owns-its-leads rule and the pre-existing case
+        // of a telecaller creating their own lead. (Their round-robin behaviour is
+        // untouched — only the self-addressed email is suppressed.)
+        boolean selfAssigned = finalAssignee != null && finalAssignee.equals(createdBy);
+        if (!suppressEmail && !affiliateCreator && finalAssignee != null && !selfAssigned) {
             try {
                 usersRepo.findById(finalSavedLead.getAssignedTo()).ifPresent(telecaller -> {
                     // Only send the "New Lead Assigned" telecaller email when the
@@ -632,6 +773,7 @@ public class LeadsService {
         // ── NOTIFICATIONS (independent of email) ──────────────────────────────
         try {
             Long assignee = finalSavedLead.getAssignedTo();
+            // Self-assignment sends no notification — same rule as the email guard above.
             if (assignee != null && !assignee.equals(createdBy)) {
                 notificationService.createNotification(
                     assignee,
@@ -907,8 +1049,18 @@ public class LeadsService {
         // ── Auto-assign BD when source is changed TO "Referral" ───────────────
         boolean sourceChangedToReferral = "Referral".equalsIgnoreCase(requestWrapper.getSource())
                 && !("Referral".equalsIgnoreCase(oldSource));
+
+        // Same hold / closed-out guard as createLead — no BD auto-assignment at these
+        // statuses regardless of source. Without it the create-time guard is bypassable by
+        // simply saving the lead as Referral afterwards.
+        // Judged on the EFFECTIVE status: lead.setStatus(...) has already run above, so a
+        // single save that flips source to Referral AND status to Keep in View is evaluated
+        // against the new status, not the old one.
+        String effStatus = lead.getStatus() == null ? "" : lead.getStatus().trim().toLowerCase();
+
         // Affiliate-team leads must never be auto-assigned to a BD, at any status.
-        if (sourceChangedToReferral && lead.getBdAssignedTo() == null
+        if (sourceChangedToReferral && !NO_AUTO_BD_STATUSES.contains(effStatus)
+                && lead.getBdAssignedTo() == null
                 && !isAffiliateTeamCreator(lead.getCreatedBy())) {
             try {
                 Long nextBD = roundRobinService.getNextBD(lead.getGroupName(), lead.getSubGroupName());
@@ -1268,7 +1420,10 @@ public class LeadsService {
                 // suppressEmail=true: no individual email per lead
                 LeadWrapper lead = createLead(requests.get(i), userId, true);
                 imported++;
-                if (lead.getAssignedTo() != null) {
+                // Skip the importer's own leads — no self-addressed batch email. A role
+                // that owns the leads it creates would otherwise self-assign every row and
+                // then be emailed a digest of its own import.
+                if (lead.getAssignedTo() != null && !lead.getAssignedTo().equals(userId)) {
                     telecallerLeads
                         .computeIfAbsent(lead.getAssignedTo(), k -> new ArrayList<>())
                         .add(lead);

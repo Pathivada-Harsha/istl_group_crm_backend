@@ -174,4 +174,36 @@ public class RoleHierarchyService {
                 RoleNormalizer.normalize(roleName))
             .orElse(Integer.MAX_VALUE);
     }
+
+    // ── Lead self-ownership by creator role ──────────────────────────────────
+
+    /** Which lead-ownership slot a creator's role claims. Never null. */
+    public enum SelfAssignSlot { NONE, BD, HANDLER }
+
+    /**
+     * Data-driven answer to "does this role keep the leads it creates, and in which slot?"
+     * Backed by role_hierarchy.lead_self_assign_slot, so the list of roles changes with a
+     * single UPDATE — no code change, no redeploy.
+     *
+     * BD and HANDLER are NOT interchangeable: a BD_EXECUTIVE must be recorded as the lead's
+     * BD executive and a MARKETING_EXECUTIVE as its lead handler. Getting it backwards
+     * mislabels the Team Assignment card and misroutes downstream telecaller/BD logic
+     * without throwing anything.
+     *
+     * An unknown role, a NULL/blank column, or an unrecognised value all resolve to NONE,
+     * so a misconfigured row degrades to the pre-existing routing rather than misfiling
+     * leads.
+     */
+    public SelfAssignSlot getLeadSelfAssignSlot(String roleName) {
+        if (roleName == null || roleName.isBlank()) return SelfAssignSlot.NONE;
+        String slot = hierarchyRepo.findByRoleName(RoleNormalizer.normalize(roleName))
+                .map(RoleHierarchyEntity::getLeadSelfAssignSlot)
+                .orElse(null);
+        if (slot == null) return SelfAssignSlot.NONE;
+        return switch (slot.trim().toUpperCase()) {
+            case "BD"      -> SelfAssignSlot.BD;
+            case "HANDLER" -> SelfAssignSlot.HANDLER;
+            default        -> SelfAssignSlot.NONE;
+        };
+    }
 }

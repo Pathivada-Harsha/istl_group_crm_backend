@@ -41,13 +41,14 @@ public interface BomItemsMasterRepo extends JpaRepository<BomItemsMasterEntity, 
     List<String> findDistinctCategories();
 
     // Admin master-data list — includes INACTIVE items (so they can be reactivated),
-    // optional category + free-text filter over name/spec/make.
+    // optional category + free-text filter over name/spec/make/HSN.
     @Query("SELECT b FROM BomItemsMasterEntity b WHERE " +
            "(:category IS NULL OR :category = '' OR b.category = :category) AND " +
            "(:term IS NULL OR :term = '' OR " +
            " LOWER(b.itemName) LIKE LOWER(CONCAT('%', :term, '%')) OR " +
            " LOWER(b.specification) LIKE LOWER(CONCAT('%', :term, '%')) OR " +
-           " LOWER(b.makeBrand) LIKE LOWER(CONCAT('%', :term, '%'))) " +
+           " LOWER(b.makeBrand) LIKE LOWER(CONCAT('%', :term, '%')) OR " +
+           " LOWER(b.hsnCode) LIKE LOWER(CONCAT('%', :term, '%'))) " +
            "ORDER BY b.category ASC, b.itemName ASC")
     List<BomItemsMasterEntity> adminSearch(@Param("category") String category, @Param("term") String term);
 
