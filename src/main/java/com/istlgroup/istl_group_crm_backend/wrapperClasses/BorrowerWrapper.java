@@ -38,6 +38,7 @@ public class BorrowerWrapper {
     private String city;
     private String state;
     private String pincode;
+    private String district;
 
     // ── contact ──
     private String contactPerson;

@@ -59,8 +59,12 @@ public class SanctionDocExtractor {
         LABELS.put("site",                              "location");
         LABELS.put("totalprojectcost",                  "projectCost");
         LABELS.put("projectcost",                       "projectCost");
+        // Same "(Rs. Cr's)" suffixed header Debt/Equity already get, below.
+        LABELS.put("projectcostrscrs",                  "projectCost");
+        LABELS.put("totalprojectcostrscrs",             "projectCost");
         LABELS.put("debtequityratio",                   "debtEquityRatio");
         LABELS.put("debtequity",                        "debtEquityRatio");
+        LABELS.put("der",                               "debtEquityRatio");
         LABELS.put("sanctionedtermloanamount",          "sanctionedAmount");
         LABELS.put("sanctionedamount",                  "sanctionedAmount");
         LABELS.put("termloanamount",                    "sanctionedAmount");
@@ -100,11 +104,13 @@ public class SanctionDocExtractor {
         LABELS.put("promoter",                          "promoterName");
         LABELS.put("sponsorname",                       "sponsorName");
         LABELS.put("sponsor",                           "sponsorName");
+        LABELS.put("holdingcompany",                    "sponsorName");
         LABELS.put("guarantorname",                     "guarantorName");
         LABELS.put("corporateguarantor",                "guarantorName");
         LABELS.put("guarantor",                         "guarantorName");
         LABELS.put("groupname",                         "groupName");
         LABELS.put("promotergroup",                     "groupName");
+        LABELS.put("parentgroup",                       "groupName");
         LABELS.put("cat",                               "borrowerCategory");
         LABELS.put("subcat",                            "borrowerSubCategory");
         LABELS.put("subcategory",                       "borrowerSubCategory");
@@ -128,22 +134,35 @@ public class SanctionDocExtractor {
 
         // Rate build-up.
         LABELS.put("baserate",                          "baseRatePct");
+        LABELS.put("mclr",                              "baseRatePct");
+        LABELS.put("benchmarkrate",                     "baseRatePct");
+        LABELS.put("referencerate",                     "baseRatePct");
+        LABELS.put("repolinkedbenchmarkrate",           "baseRatePct");
         LABELS.put("creditspread",                      "spreadPct");
         LABELS.put("spread",                            "spreadPct");
+        LABELS.put("markup",                            "spreadPct");
         LABELS.put("effectiveroi",                      "roiPct");
         LABELS.put("roi",                               "roiPct");
+        LABELS.put("allinrate",                         "roiPct");
+        LABELS.put("allinrateofinterest",               "roiPct");
 
         // Project details. Village / district / technology are sanction-level;
-        // state stays on the borrower row and is filled via resolve.
+        // state stays on the borrower row and is filled via resolve — it was
+        // already read on the PDF path but had no DOCX table-label entry, so
+        // a Word letter's "State" row fell through unmatched.
         LABELS.put("technology",                        "technology");
         LABELS.put("village",                           "village");
         LABELS.put("district",                          "district");
         LABELS.put("dist",                              "district");
+        LABELS.put("state",                             "state");
+        LABELS.put("projectstate",                      "state");
 
         // Product.
         LABELS.put("instrument",                        "instrument");
         LABELS.put("producttype",                       "instrument");
         LABELS.put("facilitytype",                      "instrument");
+        LABELS.put("natureoffacility",                  "instrument");
+        LABELS.put("typeoffacility",                    "instrument");
 
         // Security.
         LABELS.put("coobligators",                      "coObligators");
@@ -163,11 +182,14 @@ public class SanctionDocExtractor {
         LABELS.put("interestservicereserveaccount",     "isra");
         LABELS.put("isra",                              "isra");
         LABELS.put("cashsweep",                         "cashSweep");
+        LABELS.put("cashsweepmechanism",                "cashSweep");
+        LABELS.put("cashsweepclause",                   "cashSweep");
 
         // Timeline.
         LABELS.put("disbdate",                          "disbursementDate");
         LABELS.put("disbursementdate",                  "disbursementDate");
         LABELS.put("dateofdisbursement",                "disbursementDate");
+        LABELS.put("firstdisbursementdate",             "disbursementDate");
         LABELS.put("repaymentstartdate",                "repaymentStartDate");
         LABELS.put("repaymentcommencementdate",         "repaymentStartDate");
         LABELS.put("firstrepaymentdate",                "repaymentStartDate");
@@ -177,9 +199,13 @@ public class SanctionDocExtractor {
         // Base case assumptions.
         LABELS.put("plf",                               "plfPct");
         LABELS.put("cuf",                               "plfPct");
+        LABELS.put("plantloadfactor",                   "plfPct");
+        LABELS.put("capacityutilizationfactor",         "plfPct");
         LABELS.put("levellisedtariff",                  "tariffPerUnit");
         LABELS.put("ppatariff",                         "tariffPerUnit");
         LABELS.put("tariff",                            "tariffPerUnit");
+        LABELS.put("energytariff",                      "tariffPerUnit");
+        LABELS.put("unitrate",                          "tariffPerUnit");
     }
 
     /**
@@ -189,7 +215,24 @@ public class SanctionDocExtractor {
      * silently.
      */
     private static final Set<String> CRORE_LABELS = Set.of(
-            "debtrscrs", "debtrscr", "equityrscrs", "equityrscr");
+            "debtrscrs", "debtrscr", "equityrscrs", "equityrscr",
+            "projectcostrscrs", "totalprojectcostrscrs");
+
+    /**
+     * Fields whose value is always a number, date, percentage or ratio. Used
+     * only to guard {@link #putIfInlinePair}: a cell like "Debt : Equity
+     * Ratio" colon-splits into label "Debt" (→ debtAmount) and remainder
+     * "Equity Ratio" — that remainder is not a value, it's the rest of the
+     * label, and has no digit in it. {@link #putIfLabelled} doesn't need this
+     * guard; the last cell of a multi-column row is unambiguously the value
+     * regardless of its content.
+     */
+    private static final Set<String> NUMERIC_VALUE_KEYS = Set.of(
+            "projectCost", "debtAmount", "equityAmount", "debtPct", "equityPct",
+            "sanctionedAmount", "debtEquityRatio", "baseRatePct", "spreadPct",
+            "roiPct", "minDscr", "pledgeOfSharesPct", "plfPct", "tariffPerUnit",
+            "sanctionDate", "disbursementDate", "repaymentStartDate",
+            "repaymentEndDate", "scheduledCod");
 
     // ── entry points ────────────────────────────────────────────────────────
 
@@ -288,6 +331,7 @@ public class SanctionDocExtractor {
                 }
             }
         }
+        deriveRoiFromInterestText(out);
         return out;
     }
 
@@ -324,7 +368,9 @@ public class SanctionDocExtractor {
         put(out, "projectName",      group(flat, "Project\\s*[:\\-]?\\s*(.{4,160}?)\\s*(?:Category|Location|Total\\s+Project)"));
         put(out, "category",         group(flat, "Category\\s*[:\\-]?\\s*(.{3,60}?)\\s*(?:Location|Total\\s+Project)"));
         put(out, "location",         group(flat, "Location\\s*[:\\-]?\\s*(.{3,120}?)\\s*(?:Total\\s+Project|Debt)"));
-        put(out, "projectCost",      group(flat, "Total\\s+Project\\s+Cost\\s*[:\\-]?\\s*(" + MONEY + ")"));
+        // "Total" is optional and an "(Rs. Cr's)" header suffix is tolerated,
+        // the same way debtAmount/equityAmount below handle their own unit.
+        put(out, "projectCost",      group(flat, "(?:Total\\s+)?Project\\s+Cost\\s*(?:\\(Rs\\.?\\s*Cr[^)]*\\))?\\s*[:\\-]?\\s*(" + MONEY + "|[0-9][0-9,\\.]*)"));
         put(out, "debtEquityRatio",  group(flat, "Debt\\s*[:\\-]?\\s*Equity\\s*Ratio\\s*[:\\-]?\\s*([0-9]{1,3}\\s*:\\s*[0-9]{1,3})"));
         put(out, "sanctionedAmount", group(flat, "Sanctioned\\s+(?:Term\\s+Loan\\s+)?Amount\\s*[:\\-]?\\s*(" + MONEY + ")"));
         put(out, "interestRateText", group(flat, "Rate\\s+of\\s+Interest\\s*[:\\-]?\\s*(.{3,120}?)\\s*(?:Tenor|Tenure|Scheduled)"));
@@ -380,10 +426,26 @@ public class SanctionDocExtractor {
         String firstLine = text.strip().lines().findFirst().orElse("");
         put(out, "lenderName", stripLenderSuffixNoise(SanctionValueParser.clean(firstLine)));
 
+        deriveRoiFromInterestText(out);
         return out;
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────
+
+    /**
+     * "Rate of Interest" and "ROI" name the same figure on most letters — one
+     * spells out the floating-rate mechanics ("10.35% p.a., linked to..."),
+     * the other is the registry sheet's bare percentage. A letter that only
+     * prints the narrative phrase still states the all-in rate as its first
+     * number, so when no row was labelled "ROI" outright, take that.
+     */
+    private static void deriveRoiFromInterestText(Map<String, Object> out) {
+        if (out.containsKey("roiPct")) return;
+        Object text = out.get("interestRateText");
+        if (text == null) return;
+        Matcher m = Pattern.compile("([0-9]{1,2}(?:\\.[0-9]+)?)\\s*%").matcher(text.toString());
+        if (m.find()) out.put("roiPct", m.group(1) + "%");
+    }
 
     private void putIfLabelled(Map<String, Object> out, String label, String value) {
         String norm = normaliseLabel(label);
@@ -409,7 +471,9 @@ public class SanctionDocExtractor {
         if (key == null) return;
 
         String v = SanctionValueParser.clean(value);
-        if (v != null) out.putIfAbsent(key, withUnit(norm, v));
+        if (v == null) return;
+        if (NUMERIC_VALUE_KEYS.contains(key) && !v.matches(".*[0-9].*")) return;
+        out.putIfAbsent(key, withUnit(norm, v));
     }
 
     /**
