@@ -143,9 +143,15 @@ public class SanctionDocAiExtractor {
           equityPct     equity as a percentage of project cost
 
         Rate build-up:
-          baseRatePct  the base / reference rate, e.g. "7.25%"
-          spreadPct    the spread over the base rate, e.g. "2.50%"
-          roiPct       the all-in rate of interest, e.g. "9.75%"
+          baseRatePct  the base / reference rate, e.g. "7.25%". Also called
+                       "MCLR", "benchmark rate" or "reference rate".
+          spreadPct    the spread / markup over the base rate, e.g. "2.50%"
+          roiPct       the all-in rate of interest, e.g. "9.75%". Many
+                       letters only print this under the heading "Rate of
+                       Interest" (not a separate "ROI" line) as a single
+                       percentage — that number IS roiPct. Copy it here as
+                       well as into interestRateText below; the two fields
+                       are not exclusive of each other.
 
         Project and product:
           technology  e.g. "Solar PV", "Wind", "Hybrid"

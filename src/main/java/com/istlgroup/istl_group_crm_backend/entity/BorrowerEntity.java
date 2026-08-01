@@ -76,6 +76,9 @@ public class BorrowerEntity {
     @Column(name = "pincode", length = 10)
     private String pincode;
 
+    @Column(name = "district", length = 120)
+    private String district;
+
     // ── contact ──
     @Column(name = "contact_person", length = 200)
     private String contactPerson;
