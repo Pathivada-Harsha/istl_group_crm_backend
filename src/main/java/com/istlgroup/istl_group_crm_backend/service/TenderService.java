@@ -23,6 +23,11 @@ import org.springframework.web.multipart.MultipartFile;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.*;
 import com.istlgroup.istl_group_crm_backend.repo.*;
+import com.istlgroup.istl_group_crm_backend.service.tender.ExtractedField;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderFieldValidator;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderParseGate;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderParseResult;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderText;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.*;
 
 /**
@@ -99,94 +104,181 @@ public class TenderService {
 
     // ── source-PDF: parse (stateless), store (BLOB), fetch (for streaming) ──
 
-    /** Stateless parse → partial field-map (keys match tenderData.js).
-     *  LLM-primary so it reads arbitrary tender templates and normalises
-     *  Lakh/Crore money to plain rupees; the regex extractor is the fallback
-     *  used only when Groq is unavailable or returns nothing usable. */
-    public Map<String, Object> parsePdf(MultipartFile file) throws CustomException {
+    /**
+     * Stateless parse of an uploaded NIT.
+     *
+     * <p>Runs stages 1–5: clean the text, locate the summary block, extract,
+     * validate, and decide whether the parse is complete. Nothing is written to
+     * the form here — the caller gets a list of proposed values, each with the
+     * page and line it came from, and the user picks.
+     *
+     * <p>The AI never runs on its own. {@code useAi} is set only when the user
+     * asks for a re-read from the review modal, which they can do whether the
+     * parse came back incomplete or came back looking plausible but wrong.
+     */
+    public TenderParseResult parsePdf(MultipartFile file, boolean useAi) throws CustomException {
         validatePdf(file);
-        String text;
+        TenderText document;
         try {
-            text = TenderPdfExtractor.loadText(file.getBytes());
+            document = TenderPdfExtractor.load(file.getBytes());
         } catch (IOException e) {
             throw new CustomException("Could not read the PDF: " + e.getMessage());
         }
         // A PDF with no text layer (a scan/photocopy) yields nothing for either
         // parser — say so plainly instead of reporting "no fields recognised".
-        if (text.strip().length() < 200) {
+        if (document.charCount() < 200) {
             throw new CustomException(
                     "This PDF has no readable text layer (it looks like a scan), so fields "
                   + "can't be extracted automatically. Please enter them manually.");
         }
 
-        // 1) Free path first — PDFBox text + deterministic regex. Costs no tokens,
-        //    and on a template it recognises it is as good as the LLM.
-        Map<String, Object> regex = pdfExtractor.extractFromText(text);
-        if (isSufficient(regex)) {
-            log.info("Tender parse: regex got {} field(s) — LLM not needed", regex.size());
-            return tidyNames(regex);
-        }
+        TenderPdfExtractor.Extraction extraction = pdfExtractor.extract(document);
+        List<TenderParseResult.Discarded> discarded = new ArrayList<>();
+        Map<String, ExtractedField> fields = validate(extraction.fields(), extraction, discarded);
 
-        // 2) Regex couldn't handle this template — only now spend tokens.
-        log.info("Tender parse: regex got only {} field(s); calling the AI extractor", regex.size());
-        String aiError;
-        try {
-            Map<String, Object> ai = pdfAiExtractor.extractFromText(text);
-            if (ai != null && !ai.isEmpty()) {
-                // Keep anything regex found that the AI missed; AI wins conflicts.
-                Map<String, Object> merged = new LinkedHashMap<>(regex);
-                merged.putAll(ai);
-                return tidyNames(merged);
+        List<Map<String, Object>> boqItems = extraction.boqItems();
+        List<Map<String, Object>> eligibility = extraction.eligibilityCriteria();
+
+        String origin = ExtractedField.REGEX;
+        String aiError = null;
+        if (useAi) {
+            try {
+                // The merged map is revalidated from scratch, so the first pass's
+                // rejections are superseded rather than reported twice.
+                List<TenderParseResult.Discarded> fromAi = new ArrayList<>();
+                Merged merged = mergeAi(fields, extraction, fromAi);
+                fields = merged.fields();
+                discarded = fromAi;
+                // The line scanner has no idea how this template lays a schedule
+                // out; if it found nothing, the AI's rows are all there is.
+                if (boqItems.isEmpty()) boqItems = merged.boqItems();
+                if (eligibility.isEmpty()) eligibility = merged.eligibilityCriteria();
+                origin = "regex+ai";
+            } catch (Exception e) {
+                aiError = e.getMessage();
+                log.warn("AI tender parse failed: {}", e.getMessage());
             }
-            aiError = "the AI returned no recognisable fields";
-            log.warn("AI tender parse returned nothing");
-        } catch (Exception e) {
-            aiError = e.getMessage();
-            log.warn("AI tender parse failed: {}", e.getMessage());
         }
 
-        // 3) Both paths came up short — a partial regex result still beats nothing.
-        if (!regex.isEmpty()) return tidyNames(regex);
-        throw new CustomException("Could not extract fields from this PDF — " + aiError + ".");
+        // Supporting dates exist only so the ordering check has something to
+        // order against; they are not fields the CRM stores, so neither their
+        // values nor their rejections belong in the review.
+        TenderPdfExtractor.SUPPORTING_DATES.forEach(fields::remove);
+        discarded.removeIf(d -> TenderPdfExtractor.SUPPORTING_DATES.contains(d.field()));
+
+        boolean complete = TenderParseGate.isComplete(fields.keySet());
+        log.info("Tender parse ({}): {} field(s) kept, {} discarded, complete={}",
+                origin, fields.size(), discarded.size(), complete);
+
+        return new TenderParseResult(complete,
+                message(complete, fields, useAi, aiError),
+                origin,
+                new ArrayList<>(fields.values()),
+                boqItems,
+                eligibility,
+                discarded,
+                document.pageCount(),
+                extraction.summary() == null ? null : extraction.summary().fromPage(),
+                extraction.summary() == null ? null : extraction.summary().toPage());
     }
 
     /**
-     * Trim the work title however it was produced. The LLM in particular tends to
-     * hand back the whole cover page — description, tender reference, agency,
-     * address, phone, email, URL and the bidder's signature line as one string —
-     * so the same tidy-up is applied to every path rather than trusting the prompt.
+     * Stage 4 for a whole field map: per-field rules plus the cross-field checks,
+     * with the work title tidied however it was produced. The LLM in particular
+     * tends to hand back the whole cover page — description, tender reference,
+     * agency, address, phone, email, URL and the bidder's signature line as one
+     * string — so the tidy-up runs on every path rather than trusting the prompt.
      */
-    private Map<String, Object> tidyNames(Map<String, Object> fields) {
-        Object name = fields.get("tenderName");
-        if (name instanceof String) {
-            String tidy = TenderPdfExtractor.tidyTenderName((String) name);
-            if (tidy == null || tidy.isEmpty()) fields.remove("tenderName");
-            else fields.put("tenderName", tidy);
+    private Map<String, ExtractedField> validate(Map<String, ExtractedField> raw,
+                                                 TenderPdfExtractor.Extraction extraction,
+                                                 List<TenderParseResult.Discarded> discarded) {
+        Map<String, ExtractedField> input = new LinkedHashMap<>(raw);
+        ExtractedField name = input.get("tenderName");
+        if (name != null) {
+            String tidy = TenderPdfExtractor.tidyTenderName(name.value());
+            if (tidy == null || tidy.isEmpty()) input.remove("tenderName");
+            else input.put("tenderName", name.withValue(tidy));
         }
-        return fields;
+        ExtractedField ref = input.get("tenderNumber");
+        TenderFieldValidator.Context ctx = TenderFieldValidator.contextFor(
+                ref == null ? null : ref.value(), extraction.summaryText().flat());
+
+        return TenderFieldValidator.validate(input, ctx, (field, why) -> {
+            ExtractedField dropped = input.get(field);
+            discarded.add(new TenderParseResult.Discarded(field,
+                    dropped == null ? null : dropped.value(), why));
+            log.debug("Tender parse: discarded {} — {}", field, why);
+        });
     }
+
+    /** What an AI re-read produced, once it has been through the same rules. */
+    private record Merged(Map<String, ExtractedField> fields,
+                          List<Map<String, Object>> boqItems,
+                          List<Map<String, Object>> eligibilityCriteria) {}
 
     /**
-     * Is a regex result good enough to skip the LLM?
-     *
-     * <p>Deliberately NOT "found at least one field": on an unfamiliar template the
-     * regex still scrapes stray matches (it will pull "Karnataka" into {@code state}
-     * from almost any Karnataka tender), and treating that as success would save
-     * tokens by silently importing an almost-empty tender. So we require the core
-     * identity of the tender plus at least one commercial/date detail — the shape
-     * only a genuinely recognised template produces.
+     * Re-read the summary block with the LLM and fold the result in. The AI wins
+     * a disagreement, but a value it changes is handed over <em>unticked</em>:
+     * the two extractors disagreeing is the clearest signal there is that a
+     * human should look at that row.
      */
-    private boolean isSufficient(Map<String, Object> m) {
-        if (m == null || m.isEmpty()) return false;
-        long core = CORE_FIELDS.stream().filter(m::containsKey).count();
-        boolean hasDetail = DETAIL_FIELDS.stream().anyMatch(m::containsKey);
-        return core >= 2 && hasDetail;
+    @SuppressWarnings("unchecked")
+    private Merged mergeAi(Map<String, ExtractedField> regexFields,
+                           TenderPdfExtractor.Extraction extraction,
+                           List<TenderParseResult.Discarded> discarded) throws CustomException {
+        TenderText block = extraction.summaryText();
+        Map<String, Object> ai = pdfAiExtractor.extractFromText(block.asText());
+        if (ai == null || ai.isEmpty()) {
+            throw new CustomException("the AI returned no recognisable fields");
+        }
+
+        Map<String, ExtractedField> merged = new LinkedHashMap<>(regexFields);
+        for (Map.Entry<String, Object> e : ai.entrySet()) {
+            if (!(e.getValue() instanceof String value) || value.isBlank()) continue;
+            ExtractedField existing = merged.get(e.getKey());
+            boolean changes = existing != null && !existing.value().equals(value.strip());
+            merged.put(e.getKey(), locate(block, e.getKey(), value.strip(), !changes));
+        }
+        return new Merged(validate(merged, extraction, discarded),
+                (List<Map<String, Object>>) ai.getOrDefault("boqItems", List.of()),
+                (List<Map<String, Object>>) ai.getOrDefault("eligibilityCriteria", List.of()));
     }
 
-    private static final Set<String> CORE_FIELDS =
-            Set.of("tenderNumber", "tenderName", "issuingAuthority");
-    private static final Set<String> DETAIL_FIELDS =
-            Set.of("estimatedValue", "emdAmount", "submissionDeadline");
+    /** Give an AI value a page and a source line by finding it in the block. */
+    private ExtractedField locate(TenderText block, String field, String value, boolean confident) {
+        String needle = value.length() > 30 ? value.substring(0, 30) : value;
+        for (TenderText.Line line : block.lines()) {
+            if (line.text().contains(needle)) {
+                return new ExtractedField(field, "read by the AI", value,
+                        line.page(), line.text(), ExtractedField.AI, confident);
+            }
+        }
+        int page = block.lines().isEmpty() ? 1 : block.lines().get(0).page();
+        return new ExtractedField(field, "read by the AI", value, page,
+                "(the AI derived this; it is not quoted verbatim in the document)",
+                ExtractedField.AI, false);
+    }
+
+    private String message(boolean complete, Map<String, ExtractedField> fields,
+                           boolean usedAi, String aiError) {
+        if (aiError != null) {
+            return "The AI re-read failed (" + aiError + "). Showing what the parser found.";
+        }
+        if (fields.isEmpty()) {
+            return usedAi
+                    ? "Neither the parser nor the AI could read any field from this PDF."
+                    : "No field could be read from this PDF. Try the AI re-read.";
+        }
+        if (complete) {
+            return "Read " + fields.size() + " field" + (fields.size() == 1 ? "" : "s")
+                 + " — check each one against the source before applying.";
+        }
+        List<String> missing = TenderParseGate.missingCore(fields.keySet());
+        return "This parse is incomplete: "
+             + (missing.isEmpty() ? "no cost or date could be confirmed"
+                                  : String.join(", ", missing) + " could not be confirmed")
+             + ". Anything unreliable was left out rather than guessed.";
+    }
 
     /** Store the uploaded PDF bytes on the tender row (mirrors OrderBook PO). */
     @Transactional

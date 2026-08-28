@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.service.ProposalsService;
 import com.istlgroup.istl_group_crm_backend.service.LeadHistoryService;
@@ -10,10 +12,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
+import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+
+import java.nio.charset.StandardCharsets;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
@@ -39,6 +44,8 @@ public class ProposalsController {
     private ProposalsPDFService proposalsPDFService;
     @Autowired
     private LeadHistoryService leadHistoryService;
+    @Autowired
+    private com.istlgroup.istl_group_crm_backend.service.SolarProposalDocService solarProposalDocService;
     /**
      * Get all proposals with pagination
      */
@@ -48,8 +55,8 @@ public class ProposalsController {
             @RequestParam(required = false) String subGroupName,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         
         Map<String, Object> response = new HashMap<>();
         try {
@@ -80,8 +87,8 @@ public class ProposalsController {
     @PostMapping("/filter")
     public ResponseEntity<Map<String, Object>> filterProposals(
             @RequestBody ProposalRequestWrapper filterRequest,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         
         Map<String, Object> response = new HashMap<>();
         try {
@@ -114,8 +121,8 @@ public class ProposalsController {
     @GetMapping("/{id}")
     public ResponseEntity<Map<String, Object>> getProposalById(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         
         Map<String, Object> response = new HashMap<>();
         try {
@@ -135,8 +142,8 @@ public class ProposalsController {
 @PostMapping("/create")
 public ResponseEntity<Map<String, Object>> createProposal(
         @RequestBody ProposalRequestWrapper requestWrapper,
-        @RequestHeader("User-Id") Long userId,
-        @RequestHeader("User-Role") String userRole) {
+        @ActingUserId Long userId,
+        @ActingUserRole String userRole) {
     
     Map<String, Object> response = new HashMap<>();
     try {
@@ -178,8 +185,8 @@ public ResponseEntity<Map<String, Object>> createProposal(
     public ResponseEntity<Map<String, Object>> updateProposal(
             @PathVariable Long id,
             @RequestBody ProposalRequestWrapper requestWrapper,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         
         Map<String, Object> response = new HashMap<>();
         try {
@@ -205,8 +212,8 @@ public ResponseEntity<Map<String, Object>> createProposal(
     @DeleteMapping("/delete/{id}")
     public ResponseEntity<Map<String, Object>> deleteProposal(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         
         Map<String, Object> response = new HashMap<>();
         try {
@@ -227,8 +234,8 @@ public ResponseEntity<Map<String, Object>> createProposal(
     @GetMapping("/download-pdf/{id}")
     public ResponseEntity<byte[]> downloadProposalPDF(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         
         try {
             byte[] pdfBytes = proposalsPDFService.generateProposalPDF(id, userId, userRole);
@@ -246,6 +253,227 @@ public ResponseEntity<Map<String, Object>> createProposal(
         }
     }
 
+    // =========================================================================
+    // SOLAR PROPOSAL DOCUMENT — generated from the lead's own tabs
+    //
+    // Scoped to the Solar group. Other groups (CCMS / EPC / IoT / Hybrid /
+    // Others) keep the generic proposal path above, untouched.
+    // =========================================================================
+
+    /**
+     * Review-step defaults for a lead: everything variable, pulled from the
+     * Technical Scope / BOM / Budget / Site Visit tabs, plus the last generated
+     * payload when this is a re-generation.
+     * GET /proposals/solar/prefill?leadId=…&proposalId=…
+     */
+    @GetMapping("/solar/prefill")
+    public ResponseEntity<Map<String, Object>> solarPrefill(
+            @RequestParam Long leadId,
+            @RequestParam(required = false) Long proposalId,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+
+        Map<String, Object> response = new HashMap<>();
+        try {
+            response.put("success", true);
+            response.put("data", solarProposalDocService.prefill(leadId, proposalId));
+            return ResponseEntity.ok(response);
+        } catch (CustomException e) {
+            response.put("success", false);
+            response.put("message", e.getMessage());
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Solar proposal prefill failed for lead {}", leadId, e);
+            response.put("success", false);
+            response.put("message", "Failed to prepare the proposal: " + e.getMessage());
+            return ResponseEntity.ok(response);
+        }
+    }
+
+    /**
+     * Fill the skeleton with the confirmed values and store the result as the
+     * next version on the proposal record (creating the record on first run).
+     * POST /proposals/solar/generate
+     */
+    @PostMapping("/solar/generate")
+    public ResponseEntity<Map<String, Object>> generateSolarProposal(
+            @RequestBody com.istlgroup.istl_group_crm_backend.wrapperClasses.SolarProposalDocRequest request,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+
+        Map<String, Object> response = new HashMap<>();
+        try {
+            Map<String, Object> data = solarProposalDocService.generate(request, userId);
+            response.put("success", true);
+            response.put("data", data);
+            response.put("message", "Proposal document generated (v" + data.get("version") + ")");
+
+            if (request.getLeadId() != null) {
+                try {
+                    leadHistoryService.addHistory(
+                        request.getLeadId(), "PROPOSAL_CREATED", null, null,
+                        String.valueOf(data.get("proposalNo")),
+                        "Proposal document generated: " + data.get("proposalNo") + " v" + data.get("version"),
+                        userId);
+                } catch (Exception historyEx) {
+                    log.warn("Failed to add proposal history: {}", historyEx.getMessage());
+                }
+            }
+            return ResponseEntity.ok(response);
+        } catch (CustomException e) {
+            response.put("success", false);
+            response.put("message", e.getMessage());
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Solar proposal generation failed for lead {}", request.getLeadId(), e);
+            response.put("success", false);
+            response.put("message", "Failed to generate the proposal document: " + e.getMessage());
+            return ResponseEntity.ok(response);
+        }
+    }
+
+    /** Every stored version of a proposal's generated document (no file bytes). */
+    @GetMapping("/{id}/documents")
+    public ResponseEntity<Map<String, Object>> listProposalDocuments(
+            @PathVariable Long id,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+
+        Map<String, Object> response = new HashMap<>();
+        try {
+            proposalsService.getProposalById(id, userId, userRole); // permission check
+            response.put("success", true);
+            response.put("data", solarProposalDocService.versions(id));
+            return ResponseEntity.ok(response);
+        } catch (CustomException e) {
+            response.put("success", false);
+            response.put("message", e.getMessage());
+            return ResponseEntity.ok(response);
+        }
+    }
+
+    /** @param version omit for the latest. */
+    @GetMapping("/{id}/documents/download")
+    public ResponseEntity<byte[]> downloadProposalDocument(
+            @PathVariable Long id,
+            @RequestParam(required = false) Integer version,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+        return serveProposalDocument(id, version, userId, userRole, false);
+    }
+
+    @GetMapping("/{id}/documents/view")
+    public ResponseEntity<byte[]> viewProposalDocument(
+            @PathVariable Long id,
+            @RequestParam(required = false) Integer version,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+        return serveProposalDocument(id, version, userId, userRole, true);
+    }
+
+    /**
+     * PDF rendition of a generated Solar proposal, for in-browser preview.
+     * A .docx cannot be previewed — its cover is a DrawingML grouped shape that no
+     * client-side renderer draws — so the PDF is rendered alongside it at generate
+     * time, and re-rendered on demand for versions that predate the feature.
+     *
+     * <p>{@code /download} and {@code /view} are untouched and still serve the .docx,
+     * which remains the deliverable.
+     *
+     * <p>200 → the PDF. 404 → no such version, or no permission (deliberately not
+     * disambiguated, matching {@link #serveProposalDocument}). 409 → the version
+     * exists but can never be given a PDF (no stored payload), which is the
+     * frontend's cue to offer the Word file instead.
+     *
+     * @param version omit for the latest.
+     */
+    @GetMapping("/{id}/documents/pdf")
+    public ResponseEntity<byte[]> proposalDocumentPdf(
+            @PathVariable Long id,
+            @RequestParam(required = false) Integer version,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+        try {
+            proposalsService.getProposalById(id, userId, userRole); // permission check
+            var pdf = solarProposalDocService.pdf(id, version);
+            if (pdf == null || pdf.data() == null || pdf.data().length == 0) {
+                return ResponseEntity.status(HttpStatus.CONFLICT).build();
+            }
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_PDF);
+            headers.setContentDisposition(ContentDisposition.inline()
+                    .filename(pdf.fileName(), StandardCharsets.UTF_8).build());
+            headers.setContentLength(pdf.data().length);
+            return ResponseEntity.ok().headers(headers).body(pdf.data());
+        } catch (CustomException e) {
+            log.warn("Proposal PDF {} v{} unavailable: {}", id, version, e.getMessage());
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+        } catch (Exception e) {
+            log.error("Error serving proposal PDF {}", id, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * Remove one generated version.
+     * DELETE /proposals/{id}/documents/{version}
+     *
+     * <p>Deleting the current version rolls the proposal record back to the one
+     * below it, so the card falls back to showing that version instead of a file
+     * that is gone. The last remaining version is refused — that is what deleting
+     * the proposal itself is for.
+     */
+    @DeleteMapping("/{id}/documents/{version}")
+    public ResponseEntity<Map<String, Object>> deleteProposalDocumentVersion(
+            @PathVariable Long id,
+            @PathVariable Integer version,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+
+        Map<String, Object> response = new HashMap<>();
+        try {
+            proposalsService.requireDeletable(id, userId, userRole);
+            Map<String, Object> data = solarProposalDocService.deleteVersion(id, version);
+            response.put("success", true);
+            response.put("data", data);
+            response.put("message", "v" + version + " deleted — v" + data.get("currentVersion") + " is now the latest");
+            return ResponseEntity.ok(response);
+        } catch (CustomException e) {
+            response.put("success", false);
+            response.put("message", e.getMessage());
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Failed to delete proposal {} document v{}", id, version, e);
+            response.put("success", false);
+            response.put("message", "Failed to delete this version");
+            return ResponseEntity.ok(response);
+        }
+    }
+
+    private ResponseEntity<byte[]> serveProposalDocument(Long id, Integer version, Long userId,
+                                                         String userRole, boolean inline) {
+        try {
+            proposalsService.getProposalById(id, userId, userRole); // permission check
+            var doc = solarProposalDocService.document(id, version);
+            byte[] bytes = doc.data();
+            if (bytes == null || bytes.length == 0) return ResponseEntity.notFound().build();
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.parseMediaType(
+                    doc.contentType() != null ? doc.contentType() : "application/octet-stream"));
+            headers.add(HttpHeaders.CONTENT_DISPOSITION,
+                    (inline ? "inline" : "attachment") + "; filename=\"" + doc.fileName() + "\"");
+            headers.setContentLength(bytes.length);
+            return ResponseEntity.ok().headers(headers).body(bytes);
+        } catch (CustomException e) {
+            log.warn("Proposal document {} v{} unavailable: {}", id, version, e.getMessage());
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+        } catch (Exception e) {
+            log.error("Error serving proposal document {}", id, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
     /**
      * Upload an offline proposal PDF (scanned/external proposal given by client).
      * POST /proposals/{id}/upload-offline
@@ -255,8 +483,8 @@ public ResponseEntity<Map<String, Object>> createProposal(
     public ResponseEntity<?> uploadOfflineProposal(
             @PathVariable Long id,
             @RequestParam("file") MultipartFile file,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             if (file.isEmpty()) {
                 return ResponseEntity.badRequest().body(Map.of("error", "File is empty"));
@@ -294,8 +522,8 @@ public ResponseEntity<Map<String, Object>> createProposal(
     @GetMapping("/{id}/view-offline")
     public ResponseEntity<byte[]> viewOfflineProposal(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             ProposalWrapper proposal = proposalsService.getProposalById(id, userId, userRole);
 
@@ -336,21 +564,25 @@ public ResponseEntity<Map<String, Object>> createProposal(
 // ADD THIS METHOD TO YOUR ProposalController.java
 
 /**
- * NEW: Get proposals filtered by customer ID
- * Returns proposals for a specific customer
- * GET /proposals/by-customer/{customerId}
+ * Proposals a customer's order book may cite — approved AND system-generated only.
+ * Backs the Proposal dropdown in the Create/Edit Order Book modals.
+ * GET /proposals/by-customer/{customerId}[?includeId=]
+ *
+ * includeId keeps an already-linked proposal in the list even if it no longer
+ * qualifies, so editing an order book cannot silently drop its proposal.
  */
 @GetMapping("/by-customer/{customerId}")
 public ResponseEntity<Map<String, Object>> getProposalsByCustomer(
         @PathVariable Long customerId,
-        @RequestHeader("User-Id") Long userId,
-        @RequestHeader("User-Role") String userRole) {
-    
+        @ActingUserId Long userId,
+        @ActingUserRole String userRole,
+        @RequestParam(value = "includeId", required = false) Long includeId) {
+
     Map<String, Object> response = new HashMap<>();
     try {
         // Call service method to get proposals for this customer
         List<Map<String, Object>> proposals = proposalsService.getProposalsByCustomerForDropdown(
-            customerId, userId, userRole
+            customerId, userId, userRole, includeId
         );
         
         response.put("success", true);

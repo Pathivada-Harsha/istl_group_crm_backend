@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -40,8 +42,8 @@ public class OrderBookDetailController {
     @GetMapping("/{id}/scope")
     public ResponseEntity<Map<String, Object>> getScope(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("scope",  detailService.getScope(id));
@@ -59,8 +61,8 @@ public class OrderBookDetailController {
     public ResponseEntity<Map<String, Object>> saveScope(
             @PathVariable Long id,
             @RequestBody ScopeRequest request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             detailService.saveScope(id, request, userId);
             Map<String, Object> data = new HashMap<>();
@@ -88,8 +90,8 @@ public class OrderBookDetailController {
     public ResponseEntity<Map<String, Object>> saveScopeBudgets(
             @PathVariable Long id,
             @RequestBody Map<String, Object> request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> items = (List<Map<String, Object>>) request.get("items");
@@ -114,8 +116,8 @@ public class OrderBookDetailController {
     public ResponseEntity<Map<String, Object>> saveProgress(
             @PathVariable Long id,
             @RequestBody Map<String, Object> request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> cells = (List<Map<String, Object>>) request.get("cells");
@@ -139,8 +141,8 @@ public class OrderBookDetailController {
     @GetMapping("/{id}/scope/default-plan")
     public ResponseEntity<Map<String, Object>> defaultPlan(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("phases", detailService.defaultEpcPlan(id));
@@ -157,8 +159,8 @@ public class OrderBookDetailController {
     @GetMapping("/{id}/budget")
     public ResponseEntity<Map<String, Object>> getBudget(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("lines", detailService.getBudgetLines(id));
@@ -174,8 +176,8 @@ public class OrderBookDetailController {
     public ResponseEntity<Map<String, Object>> saveBudget(
             @PathVariable Long id,
             @RequestBody BudgetRequest request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             detailService.saveBudget(id, request, userId);
             Map<String, Object> resp = new HashMap<>();
@@ -195,8 +197,8 @@ public class OrderBookDetailController {
     @GetMapping("/{id}/commercial-summary")
     public ResponseEntity<Map<String, Object>> commercialSummary(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("summary", detailService.getCommercialSummary(id));
@@ -213,8 +215,8 @@ public class OrderBookDetailController {
     @GetMapping("/{id}/billing")
     public ResponseEntity<Map<String, Object>> getBilling(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("lines", detailService.getBilling(id));
@@ -227,8 +229,8 @@ public class OrderBookDetailController {
     public ResponseEntity<Map<String, Object>> saveBilling(
             @PathVariable Long id,
             @RequestBody FinanceSaveRequest request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             detailService.saveBilling(id, request, userId);
             Map<String, Object> resp = new HashMap<>();
@@ -243,8 +245,8 @@ public class OrderBookDetailController {
     @GetMapping("/{id}/cost")
     public ResponseEntity<Map<String, Object>> getCost(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("lines", detailService.getCost(id));
@@ -257,8 +259,8 @@ public class OrderBookDetailController {
     public ResponseEntity<Map<String, Object>> saveCost(
             @PathVariable Long id,
             @RequestBody FinanceSaveRequest request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             detailService.saveCost(id, request, userId);
             Map<String, Object> resp = new HashMap<>();
@@ -274,8 +276,8 @@ public class OrderBookDetailController {
     @GetMapping("/{id}/commercial-summary-v2")
     public ResponseEntity<Map<String, Object>> commercialSummaryV2(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("summary", detailService.getCommercialSummaryV2(id));
@@ -289,8 +291,8 @@ public class OrderBookDetailController {
     public ResponseEntity<Map<String, Object>> saveSiteLocation(
             @PathVariable Long id,
             @RequestBody SiteLocationRequest request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             detailService.saveSiteLocation(id, request, userId);
             Map<String, Object> resp = new HashMap<>();
@@ -305,8 +307,8 @@ public class OrderBookDetailController {
     @GetMapping("/{id}/bom")
     public ResponseEntity<Map<String, Object>> getBom(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("lines", detailService.getBom(id));
@@ -319,8 +321,8 @@ public class OrderBookDetailController {
     public ResponseEntity<Map<String, Object>> saveBom(
             @PathVariable Long id,
             @RequestBody BomSaveRequest request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             detailService.saveBom(id, request, userId);
             Map<String, Object> resp = new HashMap<>();

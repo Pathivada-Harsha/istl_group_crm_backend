@@ -557,7 +557,10 @@ public class LoginService {
 	    MODULE_NAME_ALIASES.put("INVOICE_RECEIPTS",      "INVOICE_RECEIPTS");
 	}
 
-	private Map<String, List<String>> buildPermissionsMapFromNames(List<String> permissionNames) {
+	// Package-visible so the AI assistant can rebuild the caller's page permissions from
+	// the database instead of trusting the set the client posts in the request body.
+	// Pure function of its argument — no session, no request, no state.
+	public Map<String, List<String>> buildPermissionsMapFromNames(List<String> permissionNames) {
 	    Map<String, List<String>> result = new LinkedHashMap<>();
 	    if (permissionNames == null) return result;
 	    for (String name : permissionNames) {

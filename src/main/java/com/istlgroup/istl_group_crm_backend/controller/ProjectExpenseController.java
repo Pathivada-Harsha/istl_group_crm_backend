@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.*;
 import com.istlgroup.istl_group_crm_backend.entity.ProjectExpenseHistory;
 import com.istlgroup.istl_group_crm_backend.service.ProjectExpenseService;
@@ -24,17 +25,19 @@ import java.util.Map;
 @CrossOrigin
 public class ProjectExpenseController {
 
+    private final ActingUserService actingUserService;   // acting identity, from the session
     private final ProjectExpenseService expenseService;
     private final ProjectAccessService projectAccessService;
 
+    // Acting identity, from the authenticated session. getUserId used to read X-User-Id
+    // and fall back to 0L, and getUserName used to take X-User-Name at face value — so a
+    // caller could both act as anybody and stamp anybody's name on the audit trail.
     private Long getUserId(HttpServletRequest req) {
-        String val = req.getHeader("X-User-Id");
-        try { return val != null ? Long.parseLong(val) : 0L; } catch (Exception e) { return 0L; }
+        return actingUserService.requireUserId(req);
     }
 
     private String getUserName(HttpServletRequest req) {
-        String val = req.getHeader("X-User-Name");
-        return val != null ? val : "System";
+        return actingUserService.requireName(req);
     }
 
     // ─── EXPENSE ENDPOINTS ────────────────────────────────────────────────────
@@ -66,8 +69,7 @@ public class ProjectExpenseController {
             HttpServletRequest req) {
 
         Long   userId   = getUserId(req);
-        String userRole = req.getHeader("X-User-Role");
-        if (userRole == null) userRole = req.getHeader("User-Role");
+        String userRole = actingUserService.requireRole(req);
 
         if (projectId != null && !projectId.isBlank()
                 && userId != null && userId > 0
@@ -238,8 +240,7 @@ public class ProjectExpenseController {
 
         // ── Resolve caller identity from headers (same as getExpenses) ─────
         Long   userId   = getUserId(req);
-        String userRole = req.getHeader("X-User-Role");
-        if (userRole == null) userRole = req.getHeader("User-Role");
+        String userRole = actingUserService.requireRole(req);
 
         // ── Build a scratch filter and apply the same visibility rules ──────
         ExpenseFilterRequest vis = new ExpenseFilterRequest();

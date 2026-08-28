@@ -116,7 +116,10 @@ public class InvoiceEntity {
             invoiceDate = LocalDate.now();
         }
         if (status == null || status.isEmpty()) {  // FIXED TYPO
-            status = "Draft";
+            status = Status.DRAFT;
+        } else {
+            // Last line of defence: never persist a raw client token like "PENDING_APPROVAL"
+            status = Status.normalize(status);
         }
         if (paidAmount == null) {
             paidAmount = BigDecimal.ZERO;
@@ -131,6 +134,7 @@ public class InvoiceEntity {
     @PreUpdate
     protected void onUpdate() {
         updatedAt = LocalDateTime.now();
+        status = Status.normalize(status);
     }
 
     /**
@@ -157,6 +161,42 @@ public class InvoiceEntity {
         /** Approved by accounts team — attachment uploaded */
         public static final String APPROVED         = "Approved";
         public static final String REJECTED         = "Rejected";
+
+        /**
+         * Canonicalises whatever status string a client sent.
+         *
+         * <p>The UI works in screaming-snake tokens ({@code PENDING_APPROVAL},
+         * {@code SENT}, ...) while this column stores the human labels above. Both
+         * spellings used to reach the DB, which broke equality checks: an invoice
+         * saved as {@code "PENDING_APPROVAL"} failed the approve/reject guard with
+         * the nonsensical "not in PENDING_APPROVAL status. Current status:
+         * PENDING_APPROVAL", and the status filter (which upper-cases and swaps
+         * underscores for spaces) missed those rows too. Everything now goes
+         * through here, so only the labels above are ever persisted.
+         *
+         * <p>Unknown values come back trimmed but unchanged rather than dropped.
+         */
+        public static String normalize(String raw) {
+            if (raw == null) return null;
+            String trimmed = raw.trim();
+            if (trimmed.isEmpty()) return trimmed;
+            String key = trimmed.replace('-', '_').replace(' ', '_').toUpperCase();
+            if (key.equals("DRAFT"))                                     return DRAFT;
+            if (key.equals("SENT"))                                      return SENT;
+            if (key.equals("PARTIALLY_PAID") || key.equals("PARTIAL"))   return PARTIALLY_PAID;
+            if (key.equals("PAID"))                                      return PAID;
+            if (key.equals("CANCELLED") || key.equals("CANCELED"))       return CANCELLED;
+            if (key.equals("PENDING_APPROVAL") || key.equals("PENDING")) return PENDING_APPROVAL;
+            if (key.equals("APPROVED"))                                  return APPROVED;
+            if (key.equals("REJECTED"))                                  return REJECTED;
+            return trimmed;
+        }
+
+        /** True when {@code raw} means the same status as {@code canonical}, whatever its spelling. */
+        public static boolean is(String raw, String canonical) {
+            String n = normalize(raw);
+            return n != null && n.equalsIgnoreCase(canonical);
+        }
     }
     
     // Company constants

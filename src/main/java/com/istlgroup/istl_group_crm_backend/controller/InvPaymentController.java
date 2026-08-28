@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.service.InvPaymentService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.InvPaymentWrapper;
 import lombok.RequiredArgsConstructor;
@@ -49,7 +50,7 @@ public class InvPaymentController {
     @PostMapping
     public ResponseEntity<?> create(
             @RequestBody InvPaymentWrapper body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ResponseEntity.ok(paymentService.create(body, userId));
         } catch (IllegalArgumentException e) {
@@ -65,7 +66,7 @@ public class InvPaymentController {
     public ResponseEntity<?> update(
             @PathVariable Long id,
             @RequestBody InvPaymentWrapper body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ResponseEntity.ok(paymentService.update(id, body, userId));
         } catch (IllegalArgumentException e) {
@@ -103,7 +104,7 @@ public class InvPaymentController {
     public ResponseEntity<?> allocate(
             @PathVariable Long id,
             @RequestBody java.util.Map<String, Object> body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ResponseEntity.ok(paymentService.allocate(id, body, userId));
         } catch (IllegalArgumentException e) {
@@ -121,7 +122,7 @@ public class InvPaymentController {
     @DeleteMapping("/{id}")
     public ResponseEntity<?> delete(
             @PathVariable Long id,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ResponseEntity.ok(paymentService.delete(id));
         } catch (IllegalArgumentException e) {

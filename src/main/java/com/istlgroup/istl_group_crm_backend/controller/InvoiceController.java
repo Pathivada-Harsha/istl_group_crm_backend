@@ -1,5 +1,8 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserName;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.entity.InvoiceEntity;
 import com.istlgroup.istl_group_crm_backend.entity.PaymentHistoryEntity;
 import com.istlgroup.istl_group_crm_backend.entity.ReceiptEntity;
@@ -47,8 +50,8 @@ public class InvoiceController {
             @RequestParam(defaultValue = "10") int size,
             @RequestParam(defaultValue = "invoiceDate") String sortBy,
             @RequestParam(defaultValue = "DESC") String sortDirection,
-            @RequestHeader(value = "x-user-id", required = false) Long userId,
-            @RequestHeader(value = "x-user-role", required = false) String userRole
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole
     ) {
         try {
             Page<InvoiceEntity> invoices = invoiceService.getInvoices(
@@ -85,8 +88,8 @@ public class InvoiceController {
             @RequestParam(required = false) String groupId,
             @RequestParam(required = false) String subGroupId,
             @RequestParam(required = false) String projectId,
-            @RequestHeader(value = "x-user-id",   required = false) Long userId,
-            @RequestHeader(value = "x-user-role", required = false) String userRole
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole
     ) {
         try {
             Map<String, Object> data = invoiceService.getOutstandings(
@@ -155,8 +158,8 @@ public class InvoiceController {
     @PostMapping
     public ResponseEntity<?> createInvoice(
             @RequestBody InvoiceEntity invoice,
-            @RequestHeader(value = "x-user-id", required = false) Long userId,
-            @RequestHeader(value = "x-user-role", required = false) String userRole
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole
     ) {
         try {
             if (invoice.getCustomerId() == null) {
@@ -192,9 +195,9 @@ public class InvoiceController {
             @RequestParam("file") MultipartFile file,
             @RequestParam(value = "notes", required = false, defaultValue = "") String notes,
             @RequestParam(value = "tallyNumber", required = false, defaultValue = "") String tallyNumber,
-            @RequestHeader(value = "x-user-id",   required = false) Long   userId,
-            @RequestHeader(value = "x-user-role", required = false) String userRole,
-            @RequestHeader(value = "x-user-name", required = false) String userName
+            @ActingUserId Long   userId,
+            @ActingUserRole String userRole,
+            @ActingUserName String userName
     ) {
         try {
             // Only accounts-role users may approve
@@ -242,9 +245,9 @@ public class InvoiceController {
     public ResponseEntity<?> rejectInvoice(
             @PathVariable Long id,
             @RequestBody(required = false) Map<String, String> body,
-            @RequestHeader(value = "x-user-id",   required = false) Long   userId,
-            @RequestHeader(value = "x-user-role", required = false) String userRole,
-            @RequestHeader(value = "x-user-name", required = false) String userName
+            @ActingUserId Long   userId,
+            @ActingUserRole String userRole,
+            @ActingUserName String userName
     ) {
         try {
             // Only accounts-role users may reject
@@ -337,7 +340,7 @@ public class InvoiceController {
     public ResponseEntity<?> recordPayment(
             @PathVariable Long id,
             @RequestBody Map<String, Object> payload,
-            @RequestHeader(value = "x-user-id", required = false) Long userId
+            @ActingUserId Long userId
     ) {
         try {
             BigDecimal amount = new BigDecimal(payload.get("amount").toString());
@@ -446,8 +449,8 @@ public class InvoiceController {
             @RequestParam(required = false) String status,
             @RequestParam(required = false) String fromDate,
             @RequestParam(required = false) String toDate,
-            @RequestHeader(value = "x-user-id",   required = false) Long   userId,
-            @RequestHeader(value = "x-user-role", required = false) String userRole
+            @ActingUserId Long   userId,
+            @ActingUserRole String userRole
     ) {
         try {
             Map<String, Object> summary = invoiceService.getInvoiceSummary(
@@ -465,7 +468,7 @@ public class InvoiceController {
     @PostMapping("/receipts")
     public ResponseEntity<?> createReceipt(
             @RequestBody ReceiptEntity receipt,
-            @RequestHeader(value = "x-user-id", required = false) Long userId
+            @ActingUserId Long userId
     ) {
         try {
             if (receipt.getCustomerId() == null) {
@@ -504,8 +507,8 @@ public class InvoiceController {
             @RequestParam(defaultValue = "10") int size,
             @RequestParam(defaultValue = "receiptDate") String sortBy,
             @RequestParam(defaultValue = "DESC") String sortDirection,
-            @RequestHeader(value = "x-user-id", required = false) Long userId,
-            @RequestHeader(value = "x-user-role", required = false) String userRole
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole
     ) {
         try {
             Page<ReceiptEntity> receipts = receiptService.getReceipts(
@@ -562,7 +565,7 @@ public class InvoiceController {
     public ResponseEntity<?> allocateAdvance(
             @PathVariable Long id,
             @RequestBody Map<String, Object> payload,
-            @RequestHeader(value = "x-user-id", required = false) Long userId
+            @ActingUserId Long userId
     ) {
         try {
             @SuppressWarnings("unchecked")
@@ -614,7 +617,7 @@ public class InvoiceController {
     @DeleteMapping("/receipts/{id}")
     public ResponseEntity<?> deleteReceipt(
             @PathVariable Long id,
-            @RequestHeader(value = "x-user-id", required = false) Long userId
+            @ActingUserId Long userId
     ) {
         try {
             receiptService.deleteReceipt(id, userId);
@@ -628,8 +631,8 @@ public class InvoiceController {
     @DeleteMapping("/receipts/{id}/permanent")
     public ResponseEntity<?> permanentlyDeleteReceipt(
             @PathVariable Long id,
-            @RequestHeader(value = "x-user-id", required = false) Long userId,
-            @RequestHeader(value = "x-user-role", required = false) String userRole
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole
     ) {
         try {
             // Check if user is admin
@@ -648,8 +651,8 @@ public class InvoiceController {
     }
     @GetMapping("/receipts/deleted")
     public ResponseEntity<?> getDeletedReceipts(
-            @RequestHeader(value = "x-user-id", required = false) Long userId,
-            @RequestHeader(value = "x-user-role", required = false) String userRole
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole
     ) {
         try {
             List<ReceiptEntity> deletedReceipts = receiptService.getDeletedReceipts(userId, userRole);
@@ -663,7 +666,7 @@ public class InvoiceController {
     @PostMapping("/receipts/{id}/restore")
     public ResponseEntity<?> restoreReceipt(
             @PathVariable Long id,
-            @RequestHeader(value = "x-user-id", required = false) Long userId
+            @ActingUserId Long userId
     ) {
         try {
             ReceiptEntity restored = receiptService.restoreReceipt(id, userId);
@@ -684,8 +687,8 @@ public class InvoiceController {
             @RequestParam(required = false) String paymentMethod,
             @RequestParam(required = false) String fromDate,
             @RequestParam(required = false) String toDate,
-            @RequestHeader(value = "x-user-id",   required = false) Long   userId,
-            @RequestHeader(value = "x-user-role", required = false) String userRole
+            @ActingUserId Long   userId,
+            @ActingUserRole String userRole
     ) {
         try {
             Map<String, Object> summary = receiptService.getReceiptSummary(
@@ -752,7 +755,7 @@ public class InvoiceController {
     public ResponseEntity<?> updateReceipt(
             @PathVariable Long id,
             @RequestBody ReceiptEntity receipt,
-            @RequestHeader(value = "x-user-id", required = false) Long userId
+            @ActingUserId Long userId
     ) {
         try {
             ReceiptEntity updated = receiptService.updateReceipt(id, receipt, userId);
@@ -771,7 +774,7 @@ public class InvoiceController {
     public ResponseEntity<?> updateAdvanceAllocation(
             @PathVariable Long receiptId,
             @RequestBody Map<String, Object> payload,
-            @RequestHeader(value = "x-user-id", required = false) Long userId
+            @ActingUserId Long userId
     ) {
         try {
             Long oldInvoiceId = Long.valueOf(payload.get("oldInvoiceId").toString());
@@ -801,7 +804,7 @@ public class InvoiceController {
     public ResponseEntity<?> removeAdvanceAllocation(
             @PathVariable Long receiptId,
             @PathVariable Long allocationId,
-            @RequestHeader(value = "x-user-id", required = false) Long userId
+            @ActingUserId Long userId
     ) {
         try {
             receiptService.removeAdvanceAllocation(receiptId, allocationId, userId);
@@ -836,7 +839,7 @@ public class InvoiceController {
     public ResponseEntity<?> editAllocation(
             @PathVariable Long receiptId,
             @RequestBody Map<String, Object> payload,
-            @RequestHeader(value = "x-user-id", required = false) Long userId
+            @ActingUserId Long userId
     ) {
         try {
             Long oldInvoiceId = Long.valueOf(payload.get("oldInvoiceId").toString());
@@ -866,7 +869,7 @@ public class InvoiceController {
     public ResponseEntity<?> removeAllocation(
             @PathVariable Long receiptId,
             @PathVariable Long invoiceId,
-            @RequestHeader(value = "x-user-id", required = false) Long userId
+            @ActingUserId Long userId
     ) {
         try {
             ReceiptEntity updated = receiptService.removeSpecificAllocation(receiptId, invoiceId, userId);

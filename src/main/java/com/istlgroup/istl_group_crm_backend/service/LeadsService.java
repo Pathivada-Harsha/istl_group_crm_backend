@@ -5,8 +5,10 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -17,6 +19,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.customException.NotPermittedException;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.CustomerWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadFilterRequestWrapper;
@@ -77,6 +80,12 @@ public class LeadsService {
     // NEW — used to fetch all team member IDs for an L3 user
     @Autowired
     private TeamRepository teamRepository;
+
+    // Canonical "users I can act on" rule (reporting subtree, or everyone for
+    // hierarchy level 1–2). Backs the write-side guard below — the dropdowns are
+    // a convenience, this is the actual gate.
+    @Autowired
+    private UserScopeService userScopeService;
 
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
@@ -422,6 +431,128 @@ public class LeadsService {
     }
 
     /**
+     * Rejects any attempt to point a lead at a user outside the acting user's
+     * reporting subtree. A null target is always fine — clearing an assignment
+     * is not an escalation — and so is targeting yourself.
+     *
+     * <p>Throws {@link NotPermittedException} (403), NOT {@link CustomException}
+     * (400): a refused privilege escalation should be distinguishable from a
+     * malformed payload in the logs.
+     */
+    private void assertCanActOn(Long actingUserId, Long targetUserId, String action) {
+        if (userScopeService.canActOn(actingUserId, targetUserId)) return;
+        throw new NotPermittedException(
+                "You are not permitted to " + action + " "
+                + userScopeService.displayName(targetUserId)
+                + " — only you and the people reporting to you are available.");
+    }
+
+    /**
+     * Resolves the lead import's "Assigned To (Email)" column into {@code assignedTo}.
+     *
+     * <p>The import template lets the person uploading name an owner by email. That value
+     * arrives as {@code assignedToEmail} and nothing used to read it, so an explicitly
+     * addressed lead was handed to the telecaller round-robin like any other — the
+     * importer named someone and the system quietly picked somebody else.
+     *
+     * <p>Writing the resolved id back into the wrapper is the whole fix: every downstream
+     * decision — the role-aware placement in the assignment chain below, the history
+     * wording, the digest-email grouping — then sees an ordinary explicit assignment and
+     * needs no import-specific special case.
+     *
+     * <p>An email that cannot be resolved is a HARD ERROR. It must never fall through to
+     * round-robin: silently reassigning a lead somebody deliberately addressed is exactly
+     * the bug this exists to prevent, and it is invisible to the importer. The row is
+     * rejected instead, and {@code bulkCreateLeads} reports it as "Row N: ...".
+     *
+     * <p>Messages here are constrained by {@code cleanImportError}: it truncates at the
+     * first " [" and rewrites anything containing "Duplicate entry", so neither may appear.
+     */
+    private boolean resolveAssignedToEmail(LeadRequestWrapper w, Long createdBy)
+            throws CustomException {
+        String raw = w.getAssignedToEmail();
+        if (raw == null || raw.isBlank()) return false;   // no email → untouched, existing behaviour
+
+        // NBSP is a common artefact of pasting into Excel and survives a plain trim().
+        String email = raw.replace(' ', ' ').trim();
+
+        List<UsersEntity> matches = usersRepo.findByEmailIgnoreCase(email);
+        if (matches.isEmpty()) {
+            throw new CustomException(
+                    "Assigned To email '" + email + "' does not match any CRM user");
+        }
+        if (matches.size() > 1) {
+            throw new CustomException(
+                    "Assigned To email '" + email + "' matches more than one CRM user"
+                    + " — ask an admin to clean up the duplicate account");
+        }
+
+        UsersEntity target = matches.get(0);
+        if (target.getIs_active() == null || target.getIs_active() != 1L) {
+            throw new CustomException(
+                    "Assigned To email '" + email + "' belongs to a deactivated user ("
+                    + target.getName() + ")");
+        }
+
+        Long resolved = target.getId();
+        Long explicit = w.getAssignedTo();
+        if (explicit != null && !explicit.equals(resolved)) {
+            throw new CustomException(
+                    "Conflicting assignment for '" + email + "' — that email resolves to "
+                    + target.getName() + " but a different user was also selected");
+        }
+        w.setAssignedTo(resolved);
+
+        // Being on the importer's team is its own authorisation, checked here so the
+        // caller can skip the reporting-subtree gate for this one value.
+        //
+        // A spreadsheet naming a teammate is a colleague handing work sideways, which the
+        // reporting line does not model: a manager's subtree excludes peers on the same
+        // team, so the gate alone refused assignments the importer plainly should be able
+        // to make. This does NOT narrow anything — the caller still falls back to the
+        // subtree check, so an assignee reachable that way stays reachable. It only adds a
+        // second way to qualify.
+        return sameTeam(createdBy, resolved);
+    }
+
+    /**
+     * Do these two users belong to the same team?
+     *
+     * <p>Team membership is recorded in two places that do not agree — the denormalised
+     * {@code users.team} string and the {@code team_members} junction — so either counts,
+     * the same way {@link #affiliateTeamNameOf(Long)} already treats them as equivalent.
+     * Insisting on one source would reject someone who is genuinely a teammate according
+     * to the other.
+     *
+     * <p>A blank team matches a blank team, by explicit decision: the accounts and admin
+     * accounts carry no team, and treating "no team" as its own group keeps them able to
+     * assign to each other.
+     */
+    private boolean sameTeam(Long userA, Long userB) {
+        if (userA == null || userB == null) return false;
+        if (userA.equals(userB)) return true;              // assigning to yourself
+
+        // 1. The denormalised column, compared ignoring case and separators so
+        //    "Sesola BD" and "sesola_bd" are one team.
+        String teamA = normaliseTeamName(usersRepo.findById(userA).map(UsersEntity::getTeam).orElse(null));
+        String teamB = normaliseTeamName(usersRepo.findById(userB).map(UsersEntity::getTeam).orElse(null));
+        if (teamA.equals(teamB)) return true;
+
+        // 2. The junction table — a shared team id.
+        Set<Long> teamsOfA = new HashSet<>();
+        teamRepository.findByMemberId(userA).forEach(t -> teamsOfA.add(t.getId()));
+        if (teamsOfA.isEmpty()) return false;
+        return teamRepository.findByMemberId(userB).stream()
+                .anyMatch(t -> teamsOfA.contains(t.getId()));
+    }
+
+    /** Lower-cased, separator-stripped team name. Null/blank collapse to "". */
+    private static String normaliseTeamName(String name) {
+        if (name == null) return "";
+        return name.toLowerCase().replaceAll("[\\s_-]+", "").trim();
+    }
+
+    /**
      * Create a new lead (sends assignment email to telecaller).
      */
     public LeadWrapper createLead(LeadRequestWrapper requestWrapper, Long createdBy)
@@ -437,6 +568,34 @@ public class LeadsService {
     public LeadWrapper createLead(LeadRequestWrapper requestWrapper, Long createdBy,
                                   boolean suppressEmail)
             throws CustomException {
+
+        // Excel import: "Assigned To (Email)" → assignedTo id.
+        //
+        // MUST run before the C4 gate below, so an assignee named by a spreadsheet is
+        // authorised rather than waved through — resolving after the gate would turn that
+        // column into a privilege-escalation route.
+        //
+        // Returns true when the email named someone on the importer's own team, which
+        // authorises this value on its own. Anything else still faces the gate.
+        boolean assigneeIsTeammate = resolveAssignedToEmail(requestWrapper, createdBy);
+
+        // ── C4 write-side gate ────────────────────────────────────────────────
+        // A filtered dropdown is not a permission check: the payload is whatever
+        // the client chose to send. Both the "Assign To" pick and the Closed-Won
+        // attribution have to be inside the creator's reporting subtree.
+        // Auto-assignment (round-robin, self-role slots) is exempt by construction —
+        // it never reads a client-supplied user id.
+        //
+        // Teammates named by an import email are exempt too: the reporting subtree does
+        // not model peers, so it refused assignments to colleagues the importer works
+        // alongside. The two rules are a UNION, never a narrowing — an assignee the
+        // subtree already allowed is still allowed even on a different team.
+        if (!assigneeIsTeammate) {
+            assertCanActOn(createdBy, requestWrapper.getAssignedTo(), "assign this lead to");
+        }
+        if ("Closed Won".equalsIgnoreCase(requestWrapper.getStatus())) {
+            assertCanActOn(createdBy, requestWrapper.getClosedByUserId(), "record this lead as closed by");
+        }
 
         LeadsEntity lead = new LeadsEntity();
         // leadCode intentionally NOT set here.
@@ -936,6 +1095,27 @@ public class LeadsService {
 
         if (!hasAccessToLead(lead, userId, userRole)) {
             throw new CustomException("Access denied to update this lead");
+        }
+
+        // ── C4 write-side gate ────────────────────────────────────────────────
+        // Same rule as createLead: reassigning the lead, or naming who closed it,
+        // may only ever point at somebody inside the acting user's reporting
+        // subtree (top-level roles being the whole organisation). Checked before
+        // any field is copied onto the entity, so a rejected request changes
+        // nothing at all.
+        //
+        // Only a CHANGE is gated. The leads form posts the whole record back, so a
+        // lead already sitting with somebody outside the caller's subtree resends
+        // that id on every save. Blocking it would make an unrelated edit — a phone
+        // number, a status note — impossible on any lead the caller did not own,
+        // while gating the change alone still makes moving a lead out of the
+        // subtree impossible, which is the actual security property.
+        if (!java.util.Objects.equals(requestWrapper.getAssignedTo(), lead.getAssignedTo())) {
+            assertCanActOn(userId, requestWrapper.getAssignedTo(), "assign this lead to");
+        }
+        if ("Closed Won".equalsIgnoreCase(requestWrapper.getStatus())
+                && !java.util.Objects.equals(requestWrapper.getClosedByUserId(), lead.getClosedByUserId())) {
+            assertCanActOn(userId, requestWrapper.getClosedByUserId(), "record this lead as closed by");
         }
 
         if ("Not Interested".equalsIgnoreCase(requestWrapper.getStatus())

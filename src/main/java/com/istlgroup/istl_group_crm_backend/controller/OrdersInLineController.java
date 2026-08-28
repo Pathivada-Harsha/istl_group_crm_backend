@@ -7,6 +7,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -77,7 +78,7 @@ public class OrdersInLineController {
     @PostMapping("/create")
     public ResponseEntity<Map<String, Object>> create(
             @RequestBody OrdersInLineWrapper request,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             OrdersInLineWrapper created = ordersInLineService.create(request, userId);
             Map<String, Object> res = new HashMap<>();

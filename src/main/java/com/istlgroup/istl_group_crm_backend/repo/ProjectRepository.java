@@ -293,22 +293,13 @@ public interface ProjectRepository extends JpaRepository<ProjectEntity, Long> {
         @Param("paidCountDelta") int paidCountDelta
     );
 
-    /**
-     * INCREMENTAL update — called directly from InvoiceService.recordPayment.
-     * Same pattern as above for client invoice receipts.
-     */
-    @Modifying
-    @Query(value = """
-        UPDATE projects SET
-            paid_invoice_value    = paid_invoice_value    + :paymentAmount,
-            pending_invoice_value = GREATEST(0, pending_invoice_value - :paymentAmount),
-            updated_at            = CURRENT_TIMESTAMP
-        WHERE project_unique_id   = :projectId
-    """, nativeQuery = true)
-    void incrementProjectPaidInvoiceValue(
-        @Param("projectId")     String projectId,
-        @Param("paymentAmount") BigDecimal paymentAmount
-    );
+    // REMOVED: incrementProjectPaidInvoiceValue.
+    //
+    // It did "paid_invoice_value = paid_invoice_value + :paymentAmount", making it a
+    // second writer for a column that ProjectStatsService.calculateInvoiceStats already
+    // assigns outright from SUM(receipts). Two writers with different definitions means
+    // the value is only right until one of them next runs. Payment recording now calls
+    // InvoiceService.syncProjectInvoiceStats, so "received" has one definition.
 
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query(value = """
@@ -365,6 +356,16 @@ public interface ProjectRepository extends JpaRepository<ProjectEntity, Long> {
     @Query("SELECT p FROM ProjectEntity p WHERE p.projectUniqueId IN :projectIds AND p.isActive = true")
     List<ProjectEntity> findByProjectUniqueIdIn(@Param("projectIds") List<String> projectIds);
 
+    /**
+     * Projects by unique id, ACTIVE OR NOT — unlike findByProjectUniqueIdIn,
+     * which filters isActive = true. ClientFinancialsService needs the inactive
+     * ones too, so it can report how many projects it excluded instead of
+     * silently losing them.
+     */
+    @Query("SELECT p FROM ProjectEntity p WHERE p.projectUniqueId IN :projectIds")
+    List<ProjectEntity> findAllByProjectUniqueIdIn(@Param("projectIds") List<String> projectIds);
+
+
     // ── Capacity update ───────────────────────────────────────────────────────
 
     @Modifying
@@ -417,4 +418,27 @@ public interface ProjectRepository extends JpaRepository<ProjectEntity, Long> {
     List<Object[]> findCapacityByProjectFiltered(@Param("groupId") String groupId,
                                                   @Param("subGroupName") String subGroupName,
                                                   @Param("projectIds") List<String> projectIds);
+
+    // ═══ Client Financials roll-up ═══════════════════════════════════════════
+    // Both queries below are scalar/entity reads used by ClientFinancialsService.
+    // Neither touches the cached summary columns on this table — see that
+    // service's header for why those are off limits.
+
+    /**
+     * Every project belonging to one client, by customer CODE.
+     * projects.customer_id stores the customers.customer_code string (see
+     * DropdownProjectService.createProjectFromOrderBook), not the numeric id.
+     */
+    List<ProjectEntity> findByCustomerId(String customerId);
+
+    /**
+     * project_unique_id of every project that counts towards a company-wide
+     * total: live and not cancelled. Same rule ClientFinancialsService applies
+     * to a client's own projects, so the client share and the company total it
+     * is divided by are drawn from exactly the same population.
+     */
+    @Query(value = "SELECT project_unique_id FROM projects "
+                 + "WHERE is_active = 1 AND (status IS NULL OR status <> 'CANCELLED')",
+           nativeQuery = true)
+    List<String> findEligibleProjectIds();
 }

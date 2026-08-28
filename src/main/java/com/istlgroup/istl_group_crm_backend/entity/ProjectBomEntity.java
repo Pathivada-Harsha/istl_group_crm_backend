@@ -75,6 +75,18 @@ public class ProjectBomEntity {
     @Column(name = "amount", precision = 18, scale = 2, nullable = false)
     private BigDecimal amount = BigDecimal.ZERO;
 
+    /**
+     * GST rate for this line, COPIED from the catalogue default
+     * ({@code bom_items_master.default_tax_percent}) when the line is created, exactly
+     * as the unit rate is. Never re-read live: a later catalogue change would otherwise
+     * retroactively alter a past project's planned GST.
+     *
+     * <p>Null is meaningful — a line with no catalogue reference has no default rate,
+     * and reporting it as 0% would understate planned GST.
+     */
+    @Column(name = "gst_percent", precision = 5, scale = 2)
+    private BigDecimal gstPercent;
+
     @Column(name = "notes")
     private String notes;
 

@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.service.InvBillService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.InvBillWrapper;
 import lombok.RequiredArgsConstructor;
@@ -72,7 +73,7 @@ public class InvBillController {
     @PostMapping
     public ResponseEntity<?> create(
             @RequestBody InvBillWrapper body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ResponseEntity.ok(billService.create(body, userId));
         } catch (IllegalArgumentException e) {

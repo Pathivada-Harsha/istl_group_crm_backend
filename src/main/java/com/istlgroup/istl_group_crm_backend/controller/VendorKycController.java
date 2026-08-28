@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.entity.VendorKycEntity;
 import com.istlgroup.istl_group_crm_backend.service.VendorKycService;
 import lombok.RequiredArgsConstructor;
@@ -66,7 +67,7 @@ public class VendorKycController {
             @RequestParam("docType")                            String docType,
             @RequestParam(value = "docNumber", required = false) String docNumber,
             @RequestParam("file")                               MultipartFile file,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId
+            @ActingUserId Long userId
     ) {
         try {
             if (file == null || file.isEmpty()) {

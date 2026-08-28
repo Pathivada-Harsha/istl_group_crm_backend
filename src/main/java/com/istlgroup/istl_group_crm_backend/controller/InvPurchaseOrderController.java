@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.service.InvPurchaseOrderService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.InvPurchaseOrderWrapper;
 import lombok.RequiredArgsConstructor;
@@ -56,7 +57,7 @@ public class InvPurchaseOrderController {
     @PostMapping
     public ResponseEntity<?> create(
             @RequestBody InvPurchaseOrderWrapper body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ResponseEntity.ok(poService.create(body, userId));
         } catch (IllegalArgumentException e) {
@@ -72,7 +73,7 @@ public class InvPurchaseOrderController {
     public ResponseEntity<?> updateStatus(
             @PathVariable Long id,
             @RequestBody Map<String, String> body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             String newStatus = body.get("status");
             if (newStatus == null || newStatus.isBlank())
@@ -91,7 +92,7 @@ public class InvPurchaseOrderController {
     public ResponseEntity<?> update(
             @PathVariable Long id,
             @RequestBody InvPurchaseOrderWrapper body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ResponseEntity.ok(poService.update(id, body, userId));
         } catch (IllegalArgumentException e) {
@@ -110,7 +111,7 @@ public class InvPurchaseOrderController {
     public ResponseEntity<?> receiveGoods(
             @PathVariable Long id,
             @RequestBody Map<String, Object> body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             @SuppressWarnings("unchecked")
             Map<String, Number> rawLines = (Map<String, Number>) body.get("lines");

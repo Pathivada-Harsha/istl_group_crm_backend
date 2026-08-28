@@ -16,19 +16,24 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.istlgroup.istl_group_crm_backend.util.GroqClient;
 
 /**
- * Template-agnostic tender extractor: feeds the PDF text to the app's Groq LLM
- * (the same client that powers the CRM assistant) and asks it to return a strict
+ * Template-agnostic tender extractor: feeds the summary block to the app's Groq
+ * LLM (the same client that powers the CRM assistant) and asks it for a strict
  * JSON object keyed to the frontend tenderData.js field names.
  *
- * <p>Unlike the regex parser ({@link TenderPdfExtractor}), which is tuned to one
- * document's exact wording, the LLM copes with arbitrary layouts and — critically
- * for Indian government tenders — normalises money written in <b>Lakh/Crore</b>
- * to plain rupees ("Rs.2017.56Lakhs" → 201756000, "Rs.26.90Crore" → 269000000).
+ * <p>Unlike the regex parser ({@link TenderPdfExtractor}), which is driven by a
+ * label vocabulary, the LLM copes with layouts nobody has taught the vocabulary
+ * about yet. It is <b>never run automatically</b> — the user asks for it from
+ * the import review modal, whether the regex parse came back incomplete or came
+ * back looking plausible but wrong.
  *
- * <p>The returned map matches the same contract as the regex extractor: scalar
- * field keys plus optional {@code boqItems} / {@code eligibilityCriteria} arrays.
- * Any failure (Groq unavailable, non-JSON reply) throws, letting the caller fall
- * back to the regex parser.
+ * <p>Its answers are not privileged: everything it returns goes through the
+ * same {@code TenderFieldValidator} rules as the regex output, so escalating
+ * cannot smuggle in a value the parser would have rejected.
+ *
+ * <p>The returned map matches the regex extractor's contract: scalar field keys
+ * plus optional {@code boqItems} / {@code eligibilityCriteria} arrays. Any
+ * failure (Groq unavailable, non-JSON reply) throws, and the caller keeps the
+ * regex result.
  */
 @Component
 public class TenderPdfAiExtractor {
@@ -36,10 +41,10 @@ public class TenderPdfAiExtractor {
     private static final Logger log = LoggerFactory.getLogger(TenderPdfAiExtractor.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    // The headline fields (NIT summary / IFT) sit at the front of these documents,
-    // which can run to hundreds of pages. Cap the text we send (~36k chars ≈ 9k
-    // tokens) to stay inside Groq's per-request limits while still covering
-    // tenders that carry a long cover/index before the summary table.
+    // The caller hands over the summary block, not the document — a located
+    // "BID INFORMATION SHEET" is a few thousand characters where the first 36k
+    // characters of a 105-page NIT is mostly cover pages and a table of
+    // contents. This cap is a backstop for the case where no block was found.
     private static final int MAX_CHARS = 36000;
 
     private static final Set<String> SCALAR_KEYS = Set.of(
@@ -170,27 +175,50 @@ public class TenderPdfAiExtractor {
           + "- MONEY (estimatedValue, emdAmount): output plain Indian rupees as a whole number with NO "
           + "symbols, commas, or words. Convert units: 1 Lakh = 100000, 1 Crore = 10000000. Examples: "
           + "\"Rs.2017.56Lakhs\" -> 201756000 ; \"Rs.20.18Lakhs\" -> 2018000 ; "
-          + "\"Rs.26.90Crore\" -> 269000000 ; \"₹11,28,82,269\" -> 112882269.\n"
+          + "\"Rs.26.90Crore\" -> 269000000 ; \"₹11,28,82,269\" -> 112882269 ; "
+          + "\"68918769.50\" -> 68918769.50 (already plain rupees, keep it as it is). "
+          + "A bare number is only money when its own label says so: "
+          + "\"Validity of Offer ( Days) 180\" and \"Number of JV Member Allowed 6\" are NOT amounts.\n"
           + "- DATES (submissionDeadline, technicalOpeningDate, financialOpeningDate): output as "
-          + "yyyy-MM-dd. If the document only gives a duration or says \"refer portal\", omit the field.\n"
+          + "yyyy-MM-dd. Indian tenders are ALWAYS day-first: \"08/07/2026\" is 8 July 2026, never "
+          + "7 August. Drop any time component. If the document only gives a duration or says "
+          + "\"refer portal\", omit the field.\n"
+          + "- submissionDeadline is the deadline for BIDS. Do not use the closing date for seeking "
+          + "clarifications, the pre-bid meeting date, the document-download window, or the date the "
+          + "tender was published.\n"
           + "- performanceSecurityPct: numeric only, no % sign (e.g. 5 or 5.0).\n"
           + "- tenderType: one of Open, Limited, EOI, RFP, RFQ, Reverse Auction, Nomination.\n"
-          + "- source: one of GeM, CPPP, State Portal (infer from the portal/website).\n"
+          + "- source: one of GeM, CPPP, State Portal, IREPS / Railways (infer from the portal "
+          + "address). ireps.gov.in is Indian Railways' own system — it is NOT GeM, and a passing "
+          + "mention of GeM in a procurement-policy sentence does not make a tender a GeM tender.\n"
           + "- financialYear: Indian format like \"2026-27\" (often embedded in the tender reference).\n"
           + "- issuingAuthority = the tender inviting authority / procurement entity; "
           + "clientCompany = the owning organisation.\n"
           + "- sector: one of Solar EPC, Rooftop Solar, Ground Mount, Solar Pump, O&M, "
           + "Street Lighting, BESS / Storage, Electrical, Civil, Other.\n"
           + "- clientType: one of Government, PSU, Private, Cooperative, Individual, Developer.\n"
+          + "- issuingAuthority: the body running the procurement. It is often UNLABELLED — a "
+          + "standalone heading at the top of page 1. Never take the sentence that follows a "
+          + "phrase like \"Tendering Authority\" or \"As a Tender Inviting Authority\" in body "
+          + "text; those are boilerplate. If you cannot name a body, omit the field.\n"
+          + "- An NIT names the procuring agency; it does not publish that agency's GSTIN, PAN, CIN "
+          + "or a named contact person. Omit clientGstin, clientPan, clientCin and "
+          + "clientContactPerson unless the document states them against an explicit label.\n"
+          + "- Never infer `state` from a city, station or division name. Only give it if the "
+          + "document names the state.\n"
           + "- Labels vary by issuing body — treat these as the same field: "
           + "tenderNumber = \"Tender No.\" / \"Bid Enquiry No.\" / \"Tender Reference\" / \"NIT No.\" / "
-          + "\"Tender ID\" / \"Work Indent No.\"; "
+          + "\"DNIT\" / \"DNIe-T\" / \"NIeT\" / \"e-NIT\" / \"IFB\" / \"Tender ID\" / \"Work Indent No.\"; "
           + "tenderName = \"Name of Work\" / \"TENDER FOR THE WORK OF\" / \"Work Description\" / \"Subject\"; "
-          + "estimatedValue = \"Estimated Cost\" / \"Amount Put To Tender\" / \"Value of Work\" / "
-          + "\"Approx. Value\" / \"Tender Value\"; "
-          + "emdAmount = \"EMD\" / \"Bid Security\" / \"Earnest Money Deposit\"; "
+          + "estimatedValue = \"Estimated Cost\" / \"Advertised Value\" / \"Amount Put To Tender\" / "
+          + "\"Value of Work\" / \"Approx. Value\" / \"Tender Value\"; "
+          + "emdAmount = \"EMD\" / \"Bid Security\" / \"Earnest Money Deposit\" / \"Earnest Money\"; "
           + "submissionDeadline = \"Last Date for submission of Tenders\" / \"Bid Submission End Date\" / "
-          + "\"Due date of submission\".\n"
+          + "\"Tender Closing Date Time\" / \"Closing Date/Time\" / \"Due date of submission\".\n"
+          + "- A summary grid often puts TWO label/value pairs on one line, e.g. "
+          + "\"Advertised Value 68918769.50 Tendering Section WORKS\" and "
+          + "\"Tender Type Open Bidding System Two Packet System\" — there, tenderType is \"Open\", "
+          + "not \"Open Bidding System Two Packet System\". A value ends where the next label begins.\n"
           + "- tenderName = the WORK DESCRIPTION only. Cover pages run it straight into other "
           + "text: stop at the tender/DNIT reference number, and never include the issuing "
           + "agency's name, postal address, phone/fax, email, website URL, or footer lines such "

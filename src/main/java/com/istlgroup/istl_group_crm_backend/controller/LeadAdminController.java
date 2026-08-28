@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -47,7 +48,7 @@ public class LeadAdminController {
     }
 
     @PostMapping
-    public ResponseEntity<?> create(@RequestHeader("User-Id") Long userId,
+    public ResponseEntity<?> create(@ActingUserId Long userId,
                                     @RequestBody TemplateHeaderRequest body) {
         try {
             return ResponseEntity.status(HttpStatus.CREATED).body(service.createTemplate(body, userId));
@@ -77,7 +78,7 @@ public class LeadAdminController {
 
     @PutMapping("/{id}/scope-items")
     public ResponseEntity<?> saveScopeLines(@PathVariable Long id,
-                                            @RequestHeader("User-Id") Long userId,
+                                            @ActingUserId Long userId,
                                             @RequestBody TemplateScopeLinesRequest body) {
         try {
             return ResponseEntity.ok(service.saveScopeLines(id, body, userId));
@@ -88,7 +89,7 @@ public class LeadAdminController {
 
     @PutMapping("/{id}/bom-items")
     public ResponseEntity<?> saveBomLines(@PathVariable Long id,
-                                          @RequestHeader("User-Id") Long userId,
+                                          @ActingUserId Long userId,
                                           @RequestBody TemplateBomLinesRequest body) {
         try {
             return ResponseEntity.ok(service.saveBomLines(id, body, userId));

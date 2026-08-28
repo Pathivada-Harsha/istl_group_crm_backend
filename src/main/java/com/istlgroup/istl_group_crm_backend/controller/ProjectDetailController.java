@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -13,6 +15,7 @@ import org.springframework.web.bind.annotation.*;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.ProjectPhaseEntity;
+import com.istlgroup.istl_group_crm_backend.service.BomProcurementGuard;
 import com.istlgroup.istl_group_crm_backend.service.ProjectDetailService;
 import com.istlgroup.istl_group_crm_backend.service.ProjectScopeSuggestionService;
 import com.istlgroup.istl_group_crm_backend.service.ProjectStatsService;
@@ -21,6 +24,7 @@ import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.FinanceSaveRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.BomSaveRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.SiteLocationRequest;
+import com.istlgroup.istl_group_crm_backend.util.BomRateVisibility;
 
 /**
  * Detail-view endpoints for a single project:
@@ -45,13 +49,19 @@ public class ProjectDetailController {
     @Autowired
     private ProjectStatsService projectStatsService;
 
+    @Autowired
+    private BomProcurementGuard bomGuard;
+
+    @Autowired
+    private com.istlgroup.istl_group_crm_backend.service.ProjectBomActualsService actualsService;
+
     // ── TECHNICAL SCOPE ──────────────────────────────────────────────────────
 
     @GetMapping("/{projectUniqueId}/scope")
     public ResponseEntity<Map<String, Object>> getScope(
             @PathVariable String projectUniqueId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("scope",  detailService.getScope(projectUniqueId));
@@ -69,8 +79,8 @@ public class ProjectDetailController {
     public ResponseEntity<Map<String, Object>> saveScope(
             @PathVariable String projectUniqueId,
             @RequestBody ScopeRequest request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             detailService.saveScope(projectUniqueId, request, userId);
             // saveScope has committed — recompute physical + the blended overall %
@@ -95,6 +105,34 @@ public class ProjectDetailController {
     }
 
     /**
+     * Clears the scope lines and the scope-origin marker, so a bad lead import can be
+     * undone and Suggest becomes available again. BOM lines survive, unlinked.
+     */
+    @DeleteMapping("/{projectUniqueId}/scope/items")
+    public ResponseEntity<Map<String, Object>> resetScopeItems(
+            @PathVariable String projectUniqueId,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+        try {
+            detailService.resetScopeItems(projectUniqueId);
+            try { projectStatsService.recalculateProjectStats(projectUniqueId); }
+            catch (Exception statsEx) { /* logged inside; the reset already persisted */ }
+            Map<String, Object> data = new HashMap<>();
+            data.put("scope",  detailService.getScope(projectUniqueId));
+            data.put("phases", phasesToMaps(detailService.getPhases(projectUniqueId)));
+            Map<String, Object> resp = new HashMap<>();
+            resp.put("success", true);
+            resp.put("message", "Scope cleared");
+            resp.put("data", data);
+            return ResponseEntity.ok(resp);
+        } catch (CustomException e) {
+            return err(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return err("Failed to clear scope: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
      * Budget-only update for scope items. Updates ONLY plannedBudget on existing phases
      * and sub-items — never touches scope metadata or other phase fields. Used by the
      * Commercial tab's Budget Allocation block so it can't clobber the Technical Scope.
@@ -103,8 +141,8 @@ public class ProjectDetailController {
     public ResponseEntity<Map<String, Object>> saveScopeBudgets(
             @PathVariable String projectUniqueId,
             @RequestBody Map<String, Object> request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> items = (List<Map<String, Object>>) request.get("items");
@@ -129,8 +167,8 @@ public class ProjectDetailController {
     public ResponseEntity<Map<String, Object>> saveProgress(
             @PathVariable String projectUniqueId,
             @RequestBody Map<String, Object> request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> cells = (List<Map<String, Object>>) request.get("cells");
@@ -154,8 +192,8 @@ public class ProjectDetailController {
     @GetMapping("/{projectUniqueId}/scope/default-plan")
     public ResponseEntity<Map<String, Object>> defaultPlan(
             @PathVariable String projectUniqueId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("phases", detailService.defaultEpcPlan(projectUniqueId));
@@ -177,8 +215,8 @@ public class ProjectDetailController {
     @GetMapping("/{projectUniqueId}/scope/suggest")
     public ResponseEntity<Map<String, Object>> suggestScope(
             @PathVariable String projectUniqueId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestParam(value = "target", required = false, defaultValue = "both") String target,
             @RequestParam(value = "source", required = false, defaultValue = "TEMPLATE") String source) {
         try {
@@ -194,8 +232,8 @@ public class ProjectDetailController {
     @GetMapping("/{projectUniqueId}/scope/template-info")
     public ResponseEntity<Map<String, Object>> templateInfo(
             @PathVariable String projectUniqueId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             return ok(suggestionService.templateInfo(projectUniqueId));
         } catch (CustomException e) {
@@ -210,8 +248,8 @@ public class ProjectDetailController {
     @GetMapping("/{projectUniqueId}/budget")
     public ResponseEntity<Map<String, Object>> getBudget(
             @PathVariable String projectUniqueId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("lines", detailService.getBudgetLines(projectUniqueId));
@@ -227,8 +265,8 @@ public class ProjectDetailController {
     public ResponseEntity<Map<String, Object>> saveBudget(
             @PathVariable String projectUniqueId,
             @RequestBody BudgetRequest request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             detailService.saveBudget(projectUniqueId, request, userId);
             Map<String, Object> resp = new HashMap<>();
@@ -248,8 +286,8 @@ public class ProjectDetailController {
     @GetMapping("/{projectUniqueId}/commercial-summary")
     public ResponseEntity<Map<String, Object>> commercialSummary(
             @PathVariable String projectUniqueId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("summary", detailService.getCommercialSummary(projectUniqueId));
@@ -266,8 +304,8 @@ public class ProjectDetailController {
     @GetMapping("/{projectUniqueId}/billing")
     public ResponseEntity<Map<String, Object>> getBilling(
             @PathVariable String projectUniqueId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("lines", detailService.getBilling(projectUniqueId));
@@ -280,8 +318,8 @@ public class ProjectDetailController {
     public ResponseEntity<Map<String, Object>> saveBilling(
             @PathVariable String projectUniqueId,
             @RequestBody FinanceSaveRequest request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             detailService.saveBilling(projectUniqueId, request, userId);
             Map<String, Object> resp = new HashMap<>();
@@ -296,8 +334,8 @@ public class ProjectDetailController {
     @GetMapping("/{projectUniqueId}/cost")
     public ResponseEntity<Map<String, Object>> getCost(
             @PathVariable String projectUniqueId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("lines", detailService.getCost(projectUniqueId));
@@ -310,8 +348,8 @@ public class ProjectDetailController {
     public ResponseEntity<Map<String, Object>> saveCost(
             @PathVariable String projectUniqueId,
             @RequestBody FinanceSaveRequest request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             detailService.saveCost(projectUniqueId, request, userId);
             Map<String, Object> resp = new HashMap<>();
@@ -327,8 +365,8 @@ public class ProjectDetailController {
     @GetMapping("/{projectUniqueId}/commercial-summary-v2")
     public ResponseEntity<Map<String, Object>> commercialSummaryV2(
             @PathVariable String projectUniqueId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("summary", detailService.getCommercialSummaryV2(projectUniqueId));
@@ -342,8 +380,8 @@ public class ProjectDetailController {
     public ResponseEntity<Map<String, Object>> saveSiteLocation(
             @PathVariable String projectUniqueId,
             @RequestBody SiteLocationRequest request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             detailService.saveSiteLocation(projectUniqueId, request, userId);
             Map<String, Object> resp = new HashMap<>();
@@ -358,8 +396,8 @@ public class ProjectDetailController {
     @GetMapping("/{projectUniqueId}/bom")
     public ResponseEntity<Map<String, Object>> getBom(
             @PathVariable String projectUniqueId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             return ok(detailService.getBom(projectUniqueId, canSeeRates(userRole)));
         } catch (CustomException e) { return err(e.getMessage(), HttpStatus.NOT_FOUND); }
@@ -368,23 +406,133 @@ public class ProjectDetailController {
 
     /**
      * Rate gating (§6.5): field-staff access levels see quantities/specs but NOT
-     * pricing (unit_rate / amount / total). Conservative default — gate only clearly
-     * field roles; tune this set once the project_access level model is confirmed.
+     * pricing (unit_rate / amount / total).
+     *
+     * <p>Delegates to {@link BomRateVisibility} — the procurement BOM picker applies
+     * the same rule, and they must never drift.
      */
     private boolean canSeeRates(String userRole) {
-        if (userRole == null) return true;
-        String r = userRole.trim().toUpperCase().replace(' ', '_');
-        java.util.Set<String> noRates = java.util.Set.of(
-                "SITE_ENGINEER", "SITE_TECHNICIAN", "TECHNICIAN", "FIELD_ENGINEER");
-        return !noRates.contains(r);
+        return BomRateVisibility.canSeeRates(userRole);
+    }
+
+    /**
+     * Live BOM lines for the procurement item picker, each with how much has already
+     * been ordered on live purchase orders and how much remains.
+     *
+     * <p>Lives on this controller, not on PurchaseOrderController, for two reasons:
+     * the BOM is a project concern, and this controller reads the {@code User-Role}
+     * header whereas the PO controller reads {@code X-User-Role} with a "USER"
+     * fallback that would hand rate visibility to an unauthenticated caller.
+     *
+     * @param excludePoId when editing an existing PO, that PO's own quantities must
+     *                    not count against itself — pass its id.
+     */
+    @GetMapping("/{projectUniqueId}/bom/procurement-availability")
+    public ResponseEntity<Map<String, Object>> getBomProcurementAvailability(
+            @PathVariable String projectUniqueId,
+            @RequestParam(required = false) Long excludePoId,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+        try {
+            boolean rates = canSeeRates(userRole);
+            Map<String, Object> data = new HashMap<>();
+            data.put("lines", bomGuard.availability(projectUniqueId, excludePoId, rates));
+            data.put("canSeeRates", rates);
+            return ok(data);
+        } catch (Exception e) {
+            return err("Failed to load project BOM: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * Planned vs Procured for this project's BOM — what the Comparison and Procured
+     * sub-tabs render.
+     *
+     * <p>"Procured" is purchase-order value only, never project expenses: this screen
+     * measures procurement, not spend, and its total will not equal the project
+     * financials total.
+     */
+    @GetMapping("/{projectUniqueId}/bom/planned-vs-actual")
+    public ResponseEntity<Map<String, Object>> getBomPlannedVsActual(
+            @PathVariable String projectUniqueId,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+        try {
+            return ok(actualsService.plannedVsActual(projectUniqueId, canSeeRates(userRole)));
+        } catch (CustomException e) { return err(e.getMessage(), HttpStatus.NOT_FOUND); }
+        catch (Exception e) {
+            return err("Failed to load planned vs actual: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * Dry-run the BOM check for a set of purchase-order lines, WITHOUT writing anything.
+     *
+     * <p>Exists so the PO modal can put two things in front of the buyer before the
+     * save: the violations that would block it, and — the point of §A2 — the lines the
+     * guard could only tie to the BOM by inference (item name + make + unit) rather
+     * than by a picked catalogue reference. An inferred match that is wrong consumes
+     * the wrong BOM line's budget, which is worse than no match at all, so it is
+     * confirmable and correctable while the modal is still open.
+     *
+     * <p>On this controller rather than PurchaseOrderController for the same two
+     * reasons as the availability endpoint: the BOM is a project concern, and the PO
+     * controller reads {@code X-User-Role} with a "USER" fallback that would hand rate
+     * visibility to an unauthenticated caller.
+     */
+    @PostMapping("/{projectUniqueId}/bom/po-precheck")
+    public ResponseEntity<Map<String, Object>> precheckPoAgainstBom(
+            @PathVariable String projectUniqueId,
+            @RequestBody Map<String, Object> body,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+        try {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> items = body.get("items") instanceof List<?> l
+                    ? (List<Map<String, Object>>) l : List.of();
+            Long excludePoId = body.get("excludePoId") instanceof Number n ? n.longValue() : null;
+
+            BomProcurementGuard.CheckResult r = bomGuard.check(
+                    projectUniqueId, BomProcurementGuard.fromPoItemMaps(items),
+                    excludePoId, BomProcurementGuard.Mode.WARN);
+
+            boolean rates = canSeeRates(userRole);
+            Map<String, Object> data = new HashMap<>();
+            data.put("violations", r.violations());
+            data.put("fallbackMatches", r.fallbackMatches());
+            // The picker's own list, so the correction dropdown can offer every BOM line
+            // with its remaining quantity without a second round trip.
+            data.put("bomLines", bomGuard.availability(projectUniqueId, excludePoId, rates));
+            data.put("scopes", scopeOptions(projectUniqueId));
+            data.put("canSeeRates", rates);
+            return ok(data);
+        } catch (Exception e) {
+            return err("Failed to check the project BOM: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /** Scope line id → name, so a BOM line can be shown under the phase it belongs to. */
+    private List<Map<String, Object>> scopeOptions(String projectUniqueId) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        try {
+            for (ProjectPhaseEntity p : detailService.getPhases(projectUniqueId)) {
+                Map<String, Object> m = new HashMap<>();
+                m.put("id", p.getId());
+                m.put("name", p.getPhaseName());
+                out.add(m);
+            }
+        } catch (Exception ignored) {
+            // Scope names are a nicety on this response; never fail the check for them.
+        }
+        return out;
     }
 
     @PutMapping("/{projectUniqueId}/bom")
     public ResponseEntity<Map<String, Object>> saveBom(
             @PathVariable String projectUniqueId,
             @RequestBody BomSaveRequest request,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             detailService.saveBom(projectUniqueId, request, userId);
             Map<String, Object> resp = new HashMap<>();
@@ -399,8 +547,8 @@ public class ProjectDetailController {
     @GetMapping("/{projectUniqueId}/items")
     public ResponseEntity<Map<String, Object>> getItems(
             @PathVariable String projectUniqueId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = new HashMap<>();
             data.put("items", detailService.getItems(projectUniqueId));

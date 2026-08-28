@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -81,7 +82,7 @@ public class BorrowerController {
     @PostMapping("/create")
     public ResponseEntity<Map<String, Object>> create(
             @RequestBody BorrowerWrapper body,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ok(borrowerService.createBorrower(body, userId), "Borrower created");
         } catch (CustomException e) {
@@ -96,7 +97,7 @@ public class BorrowerController {
     public ResponseEntity<Map<String, Object>> update(
             @PathVariable Long id,
             @RequestBody BorrowerWrapper body,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ok(borrowerService.updateBorrower(id, body, userId), "Borrower updated");
         } catch (CustomException e) {
@@ -110,7 +111,7 @@ public class BorrowerController {
     @DeleteMapping("/delete/{id}")
     public ResponseEntity<Map<String, Object>> delete(
             @PathVariable Long id,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             borrowerService.deleteBorrower(id, userId);
             return ok(null, "Borrower deleted");
@@ -133,7 +134,7 @@ public class BorrowerController {
     @PostMapping("/resolve")
     public ResponseEntity<Map<String, Object>> resolve(
             @RequestBody BorrowerWrapper body,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ok(borrowerService.resolveBorrower(body, userId), null);
         } catch (CustomException e) {
@@ -168,7 +169,7 @@ public class BorrowerController {
     @PostMapping("/sanction/save")
     public ResponseEntity<Map<String, Object>> saveSanction(
             @RequestBody Map<String, Object> body,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             com.fasterxml.jackson.databind.ObjectMapper mapper =
                     new com.fasterxml.jackson.databind.ObjectMapper();
@@ -190,7 +191,7 @@ public class BorrowerController {
     @DeleteMapping("/sanction/delete/{id}")
     public ResponseEntity<Map<String, Object>> deleteSanction(
             @PathVariable Long id,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             borrowerService.deleteSanction(id, userId);
             return ok(null, "Sanction deleted");
@@ -208,7 +209,7 @@ public class BorrowerController {
     public ResponseEntity<Map<String, Object>> uploadDoc(
             @PathVariable Long id,
             @RequestParam("file") MultipartFile file,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ok(borrowerService.uploadDocument(id, file, userId), "Document stored");
         } catch (CustomException e) {

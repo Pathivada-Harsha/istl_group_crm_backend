@@ -14,7 +14,8 @@ import java.time.LocalDateTime;
         @Index(name = "idx_crm_notifications_created_at",         columnList = "created_at"),
         @Index(name = "idx_crm_notifications_module",             columnList = "module"),
         @Index(name = "idx_crm_notifications_user_read_created",  columnList = "user_id,is_read,created_at"),
-        @Index(name = "idx_crm_notifications_dedupe",             columnList = "user_id,notification_type,reference_id,created_at")
+        @Index(name = "idx_crm_notifications_dedupe",             columnList = "user_id,notification_type,reference_id,created_at"),
+        @Index(name = "idx_crm_notifications_user_deleted",       columnList = "user_id,deleted_at")
 })
 public class NotificationEntity {
 
@@ -51,6 +52,19 @@ public class NotificationEntity {
 
     @Column(name = "updated_at", nullable = false)
     private LocalDateTime updatedAt;
+
+    /**
+     * When the recipient dismissed this notification — null while it is live.
+     *
+     * Deletes are soft on purpose. NotificationScheduler decides whether to
+     * raise a time-based notification by asking whether one already exists for
+     * (user, type, reference) since midnight; a hard delete wipes that evidence
+     * and the job simply re-creates the notification on its next 5-minute pass,
+     * so deleting appeared to do nothing. Keeping the row (hidden from every
+     * read query) means a dismissal sticks for the day it was made.
+     */
+    @Column(name = "deleted_at")
+    private LocalDateTime deletedAt;
 
     @PrePersist
     public void onCreate() {
@@ -95,4 +109,7 @@ public class NotificationEntity {
 
     public LocalDateTime getUpdatedAt() { return updatedAt; }
     public void setUpdatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; }
+
+    public LocalDateTime getDeletedAt() { return deletedAt; }
+    public void setDeletedAt(LocalDateTime deletedAt) { this.deletedAt = deletedAt; }
 }

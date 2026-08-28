@@ -8,6 +8,13 @@ public class OrderBookWrapper {
     private Long id;
     private String orderBookNo;
 
+    /**
+     * Non-blocking notices raised by the save that has already committed — currently
+     * a divergence between this order book's item total and the linked proposal's
+     * value. Never populated on a read; null when there is nothing to say.
+     */
+    private java.util.List<String> warnings;
+
     // Customer & Proposal Reference
     private Long customerId;
     private String customerCode;

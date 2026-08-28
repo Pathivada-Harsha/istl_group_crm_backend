@@ -1,68 +1,534 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
 import java.io.IOException;
-import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.apache.pdfbox.Loader;
-import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.pdfbox.text.PDFTextStripper;
 import org.springframework.stereotype.Component;
 
+import com.istlgroup.istl_group_crm_backend.service.tender.ExtractedField;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderFieldValidator;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderLabels;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderRecords;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderSummaryLocator;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderText;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderTextCleaner;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderValues;
+
 /**
- * Best-effort extractor that turns an uploaded NIT / tender PDF into a partial
- * tender field-map, using Apache PDFBox for text extraction plus labelled
- * regexes keyed to the frontend tenderData.js field names.
+ * Stage 3 — the deterministic extractor. Runs first on every document, costs
+ * nothing, and on a template it recognises it is as good as the LLM.
  *
- * <p>Indian tender documents come from dozens of issuing bodies (CPPP, GeM, state
- * portals, PSU NIT packs) and each words its summary table differently — "Estimated
- * Cost" vs "Amount Put To Tender", "Tender No." vs "Bid Enquiry No.", money written
- * as {@code ₹11,28,82,269} vs {@code Rs.2017.56Lakhs}. Rather than target one
- * template, every field here is driven by an <em>alternation of label synonyms</em>
- * plus shared value grammars (money-with-scale, multi-format dates, identity codes),
- * so a new template usually needs only another synonym in the relevant list.
+ * <p>It reads label/value {@link TenderRecords records} out of the block that
+ * {@link TenderSummaryLocator} says holds the summary, falling back to the
+ * opening pages and only then to the whole document. That ordering is what
+ * keeps a phrase buried in an annexure from outranking the real value on page
+ * one — and every value it produces carries the page and the line it came from,
+ * so a reviewer never has to reopen a 105-page PDF to check one field.
  *
- * <p>Everything is guarded per-field: a miss on one field never aborts the parse —
- * the key is simply omitted, and the frontend fills only the fields that come back
- * (and only where currently blank).
- *
- * <p>The returned map keys match the frontend field-name contract exactly:
- * scalar keys ({@code tenderNumber}, {@code estimatedValue}, …) plus two optional
- * best-effort arrays, {@code boqItems} and {@code eligibilityCriteria}.
+ * <p>Nothing here decides whether a value is <em>good</em>. That is
+ * {@link TenderFieldValidator}'s job, and a field that fails is dropped rather
+ * than shown.
  */
 @Component
 public class TenderPdfExtractor {
 
+    /** Fields that are never taken from the whole document, only from the summary. */
+    private static final boolean SUMMARY_ONLY = true;
+    private static final boolean ANYWHERE = false;
+
+    /**
+     * Dates the tender states but the CRM does not store. They are extracted
+     * anyway — the ordering check (publish → clarification → pre-bid →
+     * submission → technical opening → financial opening) is only worth
+     * anything with them in hand — and dropped once validation has run.
+     */
+    public static final List<String> SUPPORTING_DATES =
+            List.of(TenderLabels.PUBLISH, TenderLabels.CLARIFICATION, TenderLabels.PRE_BID);
+
+    /** Everything the extractor found in one document. */
+    public record Extraction(Map<String, ExtractedField> fields,
+                             List<Map<String, Object>> boqItems,
+                             List<Map<String, Object>> eligibilityCriteria,
+                             TenderText cleaned,
+                             TenderSummaryLocator.Block summary) {
+
+        /** The block the LLM should be given, when it is asked to have a go. */
+        public TenderText summaryText() {
+            return summary == null ? cleaned : cleaned.slice(summary.fromPage(), summary.toPage());
+        }
+    }
+
+    // ── entry points ─────────────────────────────────────────────────────────
+
+    /** Load the raw text of a PDF — shared with the AI path so it never re-parses. */
+    public static String loadText(byte[] pdfBytes) throws IOException {
+        return TenderText.fromPdf(pdfBytes).asText();
+    }
+
+    /** Page-aware load: the shape stages 1–3 actually work on. */
+    public static TenderText load(byte[] pdfBytes) throws IOException {
+        return TenderText.fromPdf(pdfBytes);
+    }
+
+    public Extraction extract(byte[] pdfBytes) throws IOException {
+        return extract(TenderText.fromPdf(pdfBytes));
+    }
+
+    /**
+     * Legacy flat-text entry point, kept because the value grammars are easiest
+     * to assert on a hand-written page of text. Returns the plain field map the
+     * old contract used.
+     */
+    public Map<String, Object> extractFromText(String rawText) {
+        Extraction e = extract(TenderText.fromPlainText(rawText));
+        Map<String, Object> out = new LinkedHashMap<>();
+        e.fields().forEach((k, v) -> out.put(k, v.value()));
+        if (!e.boqItems().isEmpty()) out.put("boqItems", e.boqItems());
+        if (!e.eligibilityCriteria().isEmpty()) out.put("eligibilityCriteria", e.eligibilityCriteria());
+        return out;
+    }
+
+    /** Stages 1 → 2 → 3 over an already-loaded document. */
+    public Extraction extract(TenderText raw) {
+        TenderText cleaned = TenderTextCleaner.clean(raw);
+        List<TenderSummaryLocator.Block> blocks = TenderSummaryLocator.rank(cleaned);
+        return new Pass(raw, cleaned, blocks).run();
+    }
+
+    // ── one document's worth of state ────────────────────────────────────────
+
+    /**
+     * A single extraction. Holds the per-block records so each field can be
+     * looked for in the summary first, and the growing field map so later rules
+     * (financial year, client type, sector) can lean on earlier ones.
+     */
+    private static final class Pass {
+
+        private final TenderText raw;
+        private final TenderText cleaned;
+        private final List<TenderSummaryLocator.Block> blocks;
+        private final List<List<TenderRecords.Record>> recordsByBlock = new ArrayList<>();
+        private final Map<String, ExtractedField> fields = new LinkedHashMap<>();
+
+        /** Text of the best block plus the opening pages — the "trusted" region. */
+        private final String summaryFlat;
+        private final TenderSummaryLocator.Block summary;
+        private TenderFieldValidator.Context ctx;
+
+        Pass(TenderText raw, TenderText cleaned, List<TenderSummaryLocator.Block> blocks) {
+            this.raw = raw;
+            this.cleaned = cleaned;
+            this.blocks = blocks;
+            this.summary = blocks.isEmpty() ? null : blocks.get(0);
+            for (TenderSummaryLocator.Block b : blocks) {
+                recordsByBlock.add(TenderRecords.build(cleaned, b.fromPage(), b.toPage()));
+            }
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < blocks.size(); i++) {
+                if (isWholeDocument(blocks.get(i))) continue;
+                sb.append(cleaned.slice(blocks.get(i).fromPage(), blocks.get(i).toPage()).flat())
+                  .append(' ');
+            }
+            this.summaryFlat = sb.toString().strip();
+            this.ctx = TenderFieldValidator.contextFor(null, summaryFlat);
+        }
+
+        private boolean isWholeDocument(TenderSummaryLocator.Block b) {
+            return b.fromPage() == 1 && b.toPage() == cleaned.pageCount() && cleaned.pageCount() > 3;
+        }
+
+        Extraction run() {
+            identification();
+            parties();
+            classification();
+            location();
+            financials();
+            dates();
+            derived();
+            return new Extraction(fields,
+                    TenderBoqScanner.boq(cleaned),
+                    TenderBoqScanner.eligibility(cleaned.flat()),
+                    cleaned, summary);
+        }
+
+        // ── identification ───────────────────────────────────────────────────
+
+        private void identification() {
+            put(pick("tenderNumber", candidates(TenderLabels.TENDER_NO, ANYWHERE),
+                    r -> reference(r.value()), r -> true, true));
+            // Everything else that reads the reference needs it in the context.
+            ExtractedField ref = fields.get("tenderNumber");
+            ctx = TenderFieldValidator.contextFor(ref == null ? null : ref.value(), summaryFlat);
+
+            put(pick("tenderName", candidates(TenderLabels.TENDER_NAME, ANYWHERE),
+                    r -> {
+                        String t = tidyTenderName(r.value());
+                        return t != null && t.length() >= 15 ? t : null;
+                    },
+                    r -> true, true));
+        }
+
+        // ── parties ──────────────────────────────────────────────────────────
+
+        private void parties() {
+            // Labelled first, but only from a grid cell inside the summary — the
+            // same label appears in a bank-guarantee clause and in a closing GFR
+            // sentence, and both templates leave the real authority unlabelled.
+            ExtractedField authority = pick("issuingAuthority",
+                    candidates(TenderLabels.AUTHORITY, SUMMARY_ONLY),
+                    r -> TenderValues.tidy(r.value()),
+                    TenderRecords.Record::atLineStart, true);
+            if (authority == null) authority = authorityByPosition();
+            put(authority);
+
+            ExtractedField client = pick("clientCompany", candidates(TenderLabels.CLIENT, SUMMARY_ONLY),
+                    r -> TenderValues.tidy(r.value()), r -> r.atLineStart(), true);
+            if (client == null && authority != null && authority.value().contains(",")) {
+                String tail = authority.value()
+                        .substring(authority.value().lastIndexOf(',') + 1).strip();
+                if (tail.length() >= 3) {
+                    client = new ExtractedField("clientCompany", "from the inviting authority",
+                            tail, authority.page(), authority.sourceText(),
+                            ExtractedField.REGEX, false);
+                }
+            }
+            put(client);
+
+            ExtractedField address = pick("clientAddress", candidates(TenderLabels.ADDRESS, SUMMARY_ONLY),
+                    r -> TenderValues.tidy(r.value()), r -> r.atLineStart(), true);
+            if (address == null) address = addressBelowTheLetterhead(authority);
+            put(address);
+
+            ExtractedField email = pick("clientContactEmail", candidates(TenderLabels.EMAIL, SUMMARY_ONLY),
+                    r -> TenderFieldValidator.stripEmailPrefix(firstGroup(r.value(), EMAIL_ANY)),
+                    r -> true, true);
+            if (email == null) {
+                // Unlabelled: the source writes "email-someone@x.com" with no
+                // space, so the prefix has to come off before it is an address.
+                String bare = firstGroup(summaryFlat, EMAIL_ANY);
+                email = field("clientContactEmail", "in the letterhead",
+                        TenderFieldValidator.stripEmailPrefix(bare), pageOf(bare), bare, false);
+            }
+            put(email);
+
+            put(pick("clientContactPhone", candidates(TenderLabels.PHONE, SUMMARY_ONLY),
+                    r -> firstGroup(r.value(), MOBILE), r -> true, true));
+
+            // Registration numbers: only ever from the summary, and PAN only when
+            // labelled. An NIT names the procuring agency; it does not publish
+            // that agency's registrations, so a hit anywhere else is a coincidence.
+            put(field("clientGstin", "in the summary", firstGroup(summaryFlat, GSTIN), 0, null, true));
+            put(field("clientPan", "in the summary", firstGroup(summaryFlat, LABELLED_PAN), 0, null, true));
+            put(field("clientCin", "in the summary", firstGroup(summaryFlat, CIN), 0, null, true));
+        }
+
+        /**
+         * The authority as a standalone heading on page one. Both reference
+         * templates print it there and label it nowhere: "TRIPURA RENEWABLE
+         * ENERGY DEVELOPMENT AGENCY", "SR-CONST-HQ-ELECTRICAL/SOUTHERN RLY".
+         *
+         * <p>Deliberately reads the <em>uncleaned</em> page one, so a short
+         * document whose letterhead repeats on every page keeps it.
+         */
+        private ExtractedField authorityByPosition() {
+            List<String> page1 = raw.page(1);
+            for (int i = 0; i < page1.size() && i < POSITIONAL_SCAN_LINES; i++) {
+                String line = TenderTextCleaner.squeeze(page1.get(i));
+                if (line.length() < 6 || line.length() > 120) continue;
+                if (!TenderLabels.hasNoLabel(line)) continue;
+                if (TenderFieldValidator.check(
+                        new ExtractedField("issuingAuthority", "", line, 1, line,
+                                ExtractedField.REGEX, false), ctx).ok()) {
+                    return new ExtractedField("issuingAuthority", "page 1 letterhead",
+                            line, 1, line, ExtractedField.REGEX, true);
+                }
+            }
+            return null;
+        }
+
+        /** The postal line printed under the letterhead, when there is one. */
+        private ExtractedField addressBelowTheLetterhead(ExtractedField authority) {
+            if (authority == null || authority.page() != 1) return null;
+            List<String> page1 = raw.page(1);
+            int start = -1;
+            for (int i = 0; i < page1.size(); i++) {
+                if (TenderTextCleaner.squeeze(page1.get(i)).equals(authority.value())) { start = i; break; }
+            }
+            if (start < 0) return null;
+            for (int i = start + 1; i < Math.min(page1.size(), start + 4); i++) {
+                String line = TenderTextCleaner.squeeze(page1.get(i));
+                if (line.startsWith("(") || line.contains("@") || line.matches("(?i).*https?://.*")) continue;
+                if (countChar(line, ',') < 2) continue;
+                if (TenderFieldValidator.check(
+                        new ExtractedField("clientAddress", "", line, 1, line,
+                                ExtractedField.REGEX, false), ctx).ok()) {
+                    return new ExtractedField("clientAddress", "under the letterhead",
+                            line, 1, line, ExtractedField.REGEX, false);
+                }
+            }
+            return null;
+        }
+
+        // ── classification ───────────────────────────────────────────────────
+
+        private void classification() {
+            ExtractedField type = pick("tenderType", candidates(TenderLabels.TENDER_TYPE, SUMMARY_ONLY),
+                    r -> mapTenderType(r.value()), r -> true, true);
+            if (type == null) {
+                type = field("tenderType", "from the invitation wording",
+                        inferTenderType(summaryFlat), 0, null, false);
+            }
+            put(type);
+
+            ExtractedField portal = pick("portalLink", candidates(TenderLabels.PORTAL, SUMMARY_ONLY),
+                    r -> trimUrl(firstGroup(r.value(), URL_ANY)), r -> true, true);
+            if (portal == null) {
+                // A portal-shaped address first; failing that, any government
+                // domain in the summary. State portals are often named after the
+                // department rather than after tendering (kptcl.karnataka.gov.in).
+                portal = field("portalLink", "in the summary",
+                        trimUrl(TenderValues.firstNonBlank(
+                                firstGroup(summaryFlat, PORTAL_URL),
+                                firstGroup(summaryFlat, GOV_URL))), 0, null, false);
+            }
+            put(portal);
+
+            put(field("source", "from the portal",
+                    mapSource(portal == null ? null : portal.value(), summaryFlat), 0, null, false));
+        }
+
+        // ── location ─────────────────────────────────────────────────────────
+
+        private void location() {
+            ExtractedField loc = pick("location", candidates(TenderLabels.LOCATION, SUMMARY_ONLY),
+                    r -> TenderValues.clip(TenderValues.tidy(r.value()), 120), r -> true, true);
+            if (loc == null) {
+                loc = field("location", "in the summary",
+                        cleanPlace(firstGroup(summaryFlat, TALUK)), 0, null, false);
+            }
+            put(loc);
+
+            // Scoped to the summary on purpose: a state name mentioned once in an
+            // annexure is not this tender's state, and Template B never names one.
+            put(field("state", "in the summary",
+                    canonicalState(firstGroup(summaryFlat, STATE)), 0, null, false));
+            put(field("district", "in the summary",
+                    cleanPlace(firstGroup(summaryFlat, DISTRICT)), 0, null, false));
+
+            ExtractedField address = fields.get("clientAddress");
+            put(field("clientCity", "from the address",
+                    cleanPlace(firstGroup(address != null ? address.value() : summaryFlat, CITY_PIN)),
+                    0, null, false));
+        }
+
+        // ── money ────────────────────────────────────────────────────────────
+
+        private void financials() {
+            put(pick("estimatedValue", candidates(TenderLabels.ESTIMATED, ANYWHERE),
+                    r -> TenderValues.money(r.value()), r -> true, true));
+            put(pick("emdAmount", candidates(TenderLabels.EMD, ANYWHERE),
+                    r -> TenderValues.money(r.value()), r -> true, true));
+            put(performanceSecurity());
+        }
+
+        /**
+         * The performance-security rate, which is stated in prose rather than in
+         * the summary grid. Two guards keep the wrong percentage out: the figure
+         * must sit close behind a performance-security phrase, and it must not be
+         * qualified by a comparative — TREDA's "(Only for tenders less than 10% of
+         * the estimated cost…)" is a threshold for a different guarantee, and the
+         * rate the bidder owes is the 5% further down the same clause.
+         */
+        private ExtractedField performanceSecurity() {
+            String flat = cleaned.flat();
+            Matcher m = PCT_OF.matcher(flat);
+            while (m.find()) {
+                String before = flat.substring(Math.max(0, m.start() - 120), m.start());
+                if (!SECURITY_ANCHOR.matcher(before).find()) continue;
+                String immediately = before.length() > 40
+                        ? before.substring(before.length() - 40) : before;
+                if (COMPARATIVE.matcher(immediately).find()) continue;
+                if (TenderFieldValidator.mentions(immediately, "difference")) continue;
+                String snippet = flat.substring(Math.max(0, m.start() - 60),
+                        Math.min(flat.length(), m.end() + 20));
+                return field("performanceSecurityPct", "performance security clause",
+                        m.group(1), cleaned.pageAtFlatOffset(m.start()), snippet, false);
+            }
+            return null;
+        }
+
+        // ── dates ────────────────────────────────────────────────────────────
+
+        private void dates() {
+            // Resolved first and kept in the map so the ordering cross-check has
+            // something to order against; the service drops them before the
+            // result reaches the form.
+            for (String key : SUPPORTING_DATES) {
+                put(pick(key, candidates(key, ANYWHERE),
+                        r -> TenderValues.date(r.value()), r -> true, false));
+            }
+
+            put(pick("submissionDeadline", candidates(TenderLabels.SUBMISSION, ANYWHERE),
+                    r -> TenderValues.date(r.value()),
+                    r -> !mentionsAny(r.full(), SUBMISSION_DISQUALIFIERS), true));
+
+            ExtractedField technical = pick("technicalOpeningDate",
+                    candidates(TenderLabels.TECH_OPENING, ANYWHERE),
+                    r -> TenderValues.date(r.value()), r -> true, true);
+            if (technical == null) {
+                // An unqualified "Bid Opening Date" is the technical opening —
+                // the price bid is always opened later and always says so.
+                technical = pick("technicalOpeningDate", candidates(TenderLabels.BID_OPENING, ANYWHERE),
+                        r -> TenderValues.date(r.value()),
+                        r -> !mentionsAny(r.full(), PRICE_WORDS), true);
+            }
+            put(technical);
+
+            ExtractedField financial = pick("financialOpeningDate",
+                    candidates(TenderLabels.FIN_OPENING, ANYWHERE),
+                    r -> TenderValues.date(r.value()), r -> true, true);
+            if (financial == null) {
+                financial = pick("financialOpeningDate", candidates(TenderLabels.BID_OPENING, ANYWHERE),
+                        r -> TenderValues.date(r.value()),
+                        r -> mentionsAny(r.full(), PRICE_WORDS), true);
+            }
+            put(financial);
+        }
+
+        // ── derived ──────────────────────────────────────────────────────────
+
+        private void derived() {
+            ExtractedField ref = fields.get("tenderNumber");
+            ExtractedField submission = fields.get("submissionDeadline");
+            // The reference is the authority on the financial year: TREDA's says
+            // 2025-26 while the document itself was published in June 2026.
+            String fromRef = TenderValues.fyFromReference(ref == null ? null : ref.value());
+            if (fromRef != null) {
+                put(new ExtractedField("financialYear", "from the tender reference", fromRef,
+                        ref.page(), ref.sourceText(), ExtractedField.REGEX, true));
+            } else if (submission != null) {
+                put(field("financialYear", "from the submission deadline",
+                        TenderValues.fyFromDate(submission.value()),
+                        submission.page(), submission.sourceText(), false));
+            }
+
+            ExtractedField name = fields.get("tenderName");
+            put(field("sector", "from the work description",
+                    inferSector((name == null ? "" : name.value()) + " " + summaryFlat),
+                    0, null, false));
+
+            ExtractedField client = fields.get("clientCompany");
+            ExtractedField authority = fields.get("issuingAuthority");
+            put(field("clientType", "from the organisation's name",
+                    mapClientType(client == null ? null : client.value(),
+                                  authority == null ? null : authority.value()),
+                    0, null, false));
+        }
+
+        // ── plumbing ─────────────────────────────────────────────────────────
+
+        /**
+         * Records for a label key, summary block first. A record can appear in
+         * more than one block (the blocks overlap); the first that produces a
+         * valid value wins, so duplicates are harmless.
+         */
+        private List<TenderRecords.Record> candidates(String key, boolean summaryOnly) {
+            List<TenderRecords.Record> out = new ArrayList<>();
+            for (int b = 0; b < blocks.size(); b++) {
+                if (summaryOnly && isWholeDocument(blocks.get(b))) continue;
+                List<TenderRecords.Record> here = new ArrayList<>();
+                for (TenderRecords.Record r : recordsByBlock.get(b)) {
+                    if (r.labelKey().equals(key)) here.add(r);
+                }
+                // A purpose-built label beats a generic one wherever both appear.
+                here.sort((x, y) -> Integer.compare(y.strength(), x.strength()));
+                out.addAll(here);
+            }
+            return out;
+        }
+
+        /** First candidate whose value is non-blank and survives validation. */
+        private ExtractedField pick(String field, List<TenderRecords.Record> candidates,
+                                    Function<TenderRecords.Record, String> toValue,
+                                    Predicate<TenderRecords.Record> accept,
+                                    boolean confident) {
+            for (TenderRecords.Record r : candidates) {
+                // A label mentioned inside a sentence is never a label/value pair.
+                // TREDA's page 2 says "Certified that this DNIe-T contains 105
+                // (one hundred five) pages" — that is not the tender reference.
+                if (r.inProse()) continue;
+                if (!accept.test(r)) continue;
+                String value = toValue.apply(r);
+                if (TenderValues.isBlank(value)) continue;
+                ExtractedField f = new ExtractedField(field, r.labelText(), value.strip(),
+                        r.page(), r.sourceText(), ExtractedField.REGEX, confident);
+                if (TenderFieldValidator.check(f, ctx).ok()) return f;
+            }
+            return null;
+        }
+
+        private ExtractedField field(String name, String label, String value,
+                                     int page, String source, boolean confident) {
+            if (TenderValues.isBlank(value)) return null;
+            ExtractedField f = new ExtractedField(name, label, value.strip(),
+                    page > 0 ? page : pageOf(source == null ? value : source),
+                    source == null ? value : TenderValues.clip(source, 240),
+                    ExtractedField.REGEX, confident);
+            return TenderFieldValidator.check(f, ctx).ok() ? f : null;
+        }
+
+        private void put(ExtractedField f) {
+            if (f != null && !TenderValues.isBlank(f.value())) fields.put(f.field(), f);
+        }
+
+        /** Which page a snippet came from, for provenance on the scan-based rules. */
+        private int pageOf(String snippet) {
+            if (snippet == null || snippet.isBlank()) return 1;
+            String needle = snippet.strip();
+            if (needle.length() > 40) needle = needle.substring(0, 40);
+            for (TenderText.Line line : cleaned.lines()) {
+                if (line.text().contains(needle)) return line.page();
+            }
+            return 1;
+        }
+    }
+
     // ── shared value grammars ────────────────────────────────────────────────
 
-    /** Currency markers seen ahead of an amount. */
-    private static final String CUR = "(?:₹|Rs\\.?|INR|Rupees)";
+    /** How far into page one the unlabelled-authority scan looks. */
+    private static final int POSITIONAL_SCAN_LINES = 20;
 
-    /** An amount, Indian or western comma grouping, optional decimals. */
-    private static final String NUM = "(\\d[\\d,]*(?:\\.\\d+)?)";
-
-    /** Magnitude words that multiply the amount (Lakh/Crore are the common ones). */
-    private static final String SCALE =
-            "(Lakhs?|Lacs?|Crores?|Cr\\b|Millions?|Mn\\b|Billions?|Bn\\b)";
-
-    private static final String MON =
-            "Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
-          + "Aug(?:ust)?|Sept?(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?";
-
-    /** Every date shape we've seen in tender docs: 15.01.2026, 2026-01-15, 15-Jan-2026, January 15, 2026. */
-    private static final String DATE =
-            "(\\d{1,2}[.\\-/]\\d{1,2}[.\\-/]\\d{4}"
-          + "|\\d{4}-\\d{1,2}-\\d{1,2}"
-          + "|\\d{1,2}[\\s\\-.]{1,3}(?:" + MON + ")[\\s\\-.,]{1,3}\\d{4}"
-          + "|(?:" + MON + ")[\\s\\-.]{1,3}\\d{1,2}[\\s,]{1,3}\\d{4})";
+    private static final Pattern EMAIL_ANY =
+            Pattern.compile("((?:e-?mail\\s*[-:]\\s*)?[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,})");
+    private static final Pattern MOBILE =
+            Pattern.compile("((?:\\+91[\\s\\-]?)?[6-9]\\d{9})(?!\\d)");
+    private static final Pattern GSTIN =
+            Pattern.compile("\\b(\\d{2}[A-Z]{5}\\d{4}[A-Z][A-Z\\d]Z[A-Z\\d])\\b");
+    private static final Pattern LABELLED_PAN = Pattern.compile(
+            "\\bPAN\\s*(?:No\\.?|Number)?\\s*[:\\-]\\s*([A-Z]{5}\\d{4}[A-Z])\\b");
+    private static final Pattern CIN =
+            Pattern.compile("\\b([LUu]\\d{5}[A-Za-z]{2}\\d{4}[A-Za-z]{3}\\d{6})\\b");
+    private static final Pattern URL_ANY = Pattern.compile("(https?://\\S+|www\\.[A-Za-z0-9.\\-]+)");
+    private static final Pattern PORTAL_URL = Pattern.compile(
+            "((?:https?://|www\\.)[A-Za-z0-9.\\-]*(?:tender|procure|ireps|gem\\.gov|bid)"
+          + "[A-Za-z0-9./\\-]*)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern GOV_URL = Pattern.compile(
+            "((?:https?://|www\\.)[A-Za-z0-9.\\-]+\\.(?:gov\\.in|nic\\.in)[A-Za-z0-9./\\-]*)",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern TALUK =
+            Pattern.compile("\\b(?:in|at)\\s+([A-Za-z][A-Za-z ]{2,30}?)\\s+Taluk\\b");
+    private static final Pattern DISTRICT =
+            Pattern.compile("\\b([A-Za-z][A-Za-z ]{2,30}?)\\s+District\\b");
+    private static final Pattern CITY_PIN = Pattern.compile(
+            "([A-Za-z][A-Za-z .]{2,30}?)\\s*[-–,]?\\s*(?:PIN|Pin)?\\s*[-–:]?\\s*\\d{3}\\s?\\d{3}\\b");
 
     /** A small set of state names, used to pick out state/district from an address. */
     private static final String STATE_ALT =
@@ -71,481 +537,77 @@ public class TenderPdfExtractor {
           + "Meghalaya|Mizoram|Nagaland|Odisha|Punjab|Rajasthan|Sikkim|Tamil Nadu|Telangana|"
           + "Tripura|Uttar Pradesh|Uttarakhand|West Bengal|Delhi|Puducherry|"
           + "Jammu and Kashmir|Ladakh|Chandigarh";
+    private static final Pattern STATE = Pattern.compile("(" + STATE_ALT + ")", Pattern.CASE_INSENSITIVE);
 
-    // ── label synonym sets (add a new template by extending these) ────────────
+    // ── performance security ─────────────────────────────────────────────────
 
-    private static final String L_TENDER_NO =
-            "Bid\\s*Enquiry\\s*(?:No|Number)|Tender\\s*Enquiry\\s*(?:No|Number)|"
-          + "Tender\\s*Reference\\s*(?:No|Number)?|NIT\\s*(?:No|Number)|"
-          + "Tender\\s*ID|Bid\\s*(?:No|Number)|e-?Tender\\s*(?:No|Number)|"
-          + "Work\\s*Indent\\s*(?:No|Number)|Specification\\s*(?:No|Number)|"
-          + "Package\\s*(?:No|Number)|Tender\\s*(?:No|Number)|Reference\\s*(?:No|Number)";
-
-    private static final String L_TENDER_NAME =
-            "TENDER\\s+FOR\\s+THE\\s+WORK\\s+OF|TENDER\\s+FOR\\s+THE\\s+WORK|TENDER\\s+FOR|"
-          + "Name\\s+of\\s+(?:the\\s+)?Work|Work\\s+Description|Description\\s+of\\s+(?:the\\s+)?Work|"
-          + "Brief\\s+description\\s+of\\s+(?:the\\s+)?work|Title\\s+of\\s+(?:the\\s+)?Work|Subject";
-
-    private static final String L_NAME_END =
-            "Tender\\s*Reference|Bid\\s*Enquiry|Tender\\s*(?:No|Number)\\b|Tender\\s*Type|"
-          + "Availability\\s+of\\s+Tender|Amount\\s+Put|Estimated\\s+(?:Cost|Value)|"
-          + "Earnest\\s+Money|\\bEMD\\b|Bid\\s+Security|Online\\s+bid|Completion\\s+Period|"
-          + "Period\\s+of\\s+completion|Last\\s+[Dd]ate|Bid\\s+Submission|Validity\\s+of\\s+Tender|"
-          + "Page\\s+\\d+\\s+of\\s+\\d+";
-
-    private static final String L_AUTHORITY =
-            "Tender\\s+Inviting\\s+Authority|Bid\\s+Inviting\\s+Authority|"
-          + "Name\\s+of\\s+(?:the\\s+)?(?:Employer|Owner|Department)|Tendering\\s+Authority|"
-          + "Inviting\\s+Authority";
-
-    private static final String L_CLIENT =
-            "Procurement\\s+Entity|Name\\s+of\\s+(?:the\\s+)?Organisation|"
-          + "Name\\s+of\\s+(?:the\\s+)?Organization|Purchasing\\s+Authority|Owner\\s*/\\s*Employer";
-
-    private static final String L_ESTIMATED =
-            "Amount\\s+Put\\s+[Tt]o\\s+Tender|Estimated\\s+(?:Contract\\s+)?(?:Cost|Value|Amount)|"
-          + "Approx(?:imate)?\\.?\\s+(?:Cost|Value)|Value\\s+of\\s+(?:the\\s+)?[Ww]ork|"
-          + "Tender\\s+Value|Contract\\s+Value|Total\\s+Estimated|Estimated\\s+Price";
-
-    private static final String L_EMD =
-            "EMD\\s*/\\s*Bid\\s*[Ss]ecurity|Bid\\s*[Ss]ecurity\\s*\\(\\s*EMD\\s*\\)|"
-          + "Earnest\\s+Money\\s+Deposit|Earnest\\s+Money|Bid\\s*[Ss]ecurity|EMD\\s*[Aa]mount|\\bEMD\\b";
-
-    private static final String L_SUBMIT_DATE =
-            "Last\\s+[Dd]ate\\s+and\\s+[Tt]ime\\s+for\\s+submission|Last\\s+[Dd]ate\\s+for\\s+submission|"
-          + "Last\\s+[Dd]ate\\s+of\\s+(?:bid\\s+)?submission|Bid\\s+Submission\\s+(?:End|Closing)\\s+Date|"
-          + "Due\\s+[Dd]ate\\s+(?:of|for)\\s+submission|Closing\\s+Date|"
-          + "Last\\s+[Dd]ate\\s+for\\s+[Rr]eceipt";
-
-    private static final String L_TECH_DATE =
-            "(?:Time\\s+and\\s+)?Date\\s+of\\s+[Oo]pening\\s+of\\s+Techno[\\s\\-]*Commercial|"
-          + "Techno[\\s\\-]*Commercial\\s+Bid\\s+Opening|Technical\\s+Bid\\s+Opening|"
-          + "Date\\s+of\\s+[Oo]pening\\s+of\\s+Technical|Bid\\s+Opening\\s+Date";
-
-    private static final String L_FIN_DATE =
-            "(?:Date\\s+of\\s+)?[Oo]pening\\s+of\\s+(?:the\\s+)?(?:Price|Financial)\\s*\\(?\\s*"
-          + "(?:Financial|Price)?\\s*\\)?\\s*Bid|Price\\s+Bid\\s+Opening|Financial\\s+Bid\\s+Opening";
-
-    // ── entry points ─────────────────────────────────────────────────────────
-
-    /** Convenience: load the PDF text from bytes, then run the regex extractor. */
-    public Map<String, Object> extract(byte[] pdfBytes) throws IOException {
-        return extractFromText(loadText(pdfBytes));
-    }
-
-    /** Extract raw text from a PDF — shared by the AI parser and this regex one,
-     *  so a fallback never re-parses the file. */
-    public static String loadText(byte[] pdfBytes) throws IOException {
-        try (PDDocument doc = Loader.loadPDF(pdfBytes)) {
-            PDFTextStripper stripper = new PDFTextStripper();
-            stripper.setSortByPosition(true);
-            String text = stripper.getText(doc);
-            return text != null ? text : "";
-        }
-    }
-
-    /** Best-effort regex extractor over already-extracted PDF text. */
-    public Map<String, Object> extractFromText(String rawText) {
-        String text = normalize(rawText);
-
-        // A single-space "flattened" view is easier for label→value regexes; the
-        // raw line-structured text is kept for the BOQ row scan.
-        String flat = text.replaceAll("\\s+", " ").trim();
-
-        Map<String, Object> out = new LinkedHashMap<>();
-
-        // ── identification ──
-        // A reference must carry a digit, so a label like "Bid Enquiry No." that is
-        // itself preceded by "Tender Reference /" can't be mistaken for the value.
-        put(out, "tenderNumber", firstMatch(flat,
-                "(?:" + L_TENDER_NO + ")[^A-Za-z0-9]{0,12}([A-Za-z0-9][A-Za-z0-9/\\-_.]{4,60})",
-                v -> v.matches(".*\\d.*") && !v.matches("(?i)(page|of|and|the)\\b.*")));
-
-        String name = null;
-        for (String candidate : allMatches(flat,
-                "(?:" + L_TENDER_NAME + ")\\s*[:\\-]?\\s*['\"]?(.{15,900}?)['\"]?\\s*(?:" + L_NAME_END + ")")) {
-            String c = tidyTenderName(candidate);
-            if (c != null && c.length() >= 15) { name = c; break; }
-        }
-        put(out, "tenderName", name);
-
-        String authority = labelled(flat, L_AUTHORITY,
-                "(.{5,160}?)\\s*(?:" + L_CLIENT + "|Address|Contact|Email|Telephone|Phone|Tender\\s*(?:No|Reference))");
-        put(out, "issuingAuthority", authority);
-
-        // ── client / developer KYC ──
-        String client = labelled(flat, L_CLIENT,
-                "(.{5,160}?)\\s*(?:Address|Contact|Email|Telephone|Phone|CIN|Tender\\s*(?:No|Reference))");
-        // Fall back to the tail of the inviting-authority line ("…, KPTCL").
-        if (isBlank(client) && authority != null && authority.contains(",")) {
-            client = authority.substring(authority.lastIndexOf(',') + 1).trim();
-        }
-        put(out, "clientCompany", client);
-        put(out, "clientType", mapClientType(client, authority, flat));
-
-        String address = labelled(flat, "Address(?:\\s+[Ff]or\\s+Communication)?",
-                "(.{10,220}?)\\s*(?:Telephone|Phone|Email|e-?mail|Tender\\s*(?:No|Reference)|Amount\\s+Put)");
-        put(out, "clientAddress", address);
-        put(out, "clientContactEmail",
-                group(flat, "([A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,})"));
-        put(out, "clientContactPhone", firstNonNull(
-                group(flat, "(?:Telephone|Phone|Mobile|Contact)\\s*(?:No\\.?s?|Number)?\\s*[:\\-]?\\s*"
-                          + "((?:\\+91[\\s\\-]?)?[6-9]\\d{9})"),
-                group(flat, "(?<!\\d)((?:\\+91[\\s\\-]?)?[6-9]\\d{9})(?!\\d)")));
-        put(out, "clientGstin",
-                group(flat, "\\b(\\d{2}[A-Z]{5}\\d{4}[A-Z][A-Z\\d]Z[A-Z\\d])\\b"));
-        put(out, "clientPan",
-                group(flat, "(?<![A-Z0-9])([A-Z]{5}\\d{4}[A-Z])(?![A-Z0-9])"));
-        put(out, "clientCin",
-                group(flat, "\\b([LUu]\\d{5}[A-Za-z]{2}\\d{4}[A-Za-z]{3}\\d{6})\\b"));
-
-        // "Bengaluru- 560009" / "Bengaluru, 560 009" → city
-        String cityFromPin = group(address != null ? address : flat,
-                "([A-Za-z][A-Za-z .]{2,30}?)\\s*[-–,]?\\s*(?:PIN|Pin)?\\s*[-–:]?\\s*\\d{3}\\s?\\d{3}\\b");
-        put(out, "clientCity", cleanPlace(cityFromPin));
-
-        // ── classification ──
-        String type = labelled(flat, "Tender\\s+Type|Type\\s+of\\s+Tender|Bid\\s+Type",
-                "(.{3,60}?)\\s*(?:Tender\\s*Call|Tender\\s*Inviting|Tender\\s*Portal|Tender\\s*(?:No|Reference)|Estimated|Amount\\s+Put)");
-        put(out, "tenderType", firstNonNull(mapTenderType(type), inferTenderType(flat)));
-
-        String portal = firstNonNull(
-                group(flat, "(?:Tender\\s+Portal|e-?Procurement\\s+(?:Portal|Platform)|Portal\\s+Link|Website)"
-                          + "[^h]{0,40}(https?://\\S+)"),
-                firstMatch(flat, "(https?://[^\\s,;)]+)",
-                        v -> v.matches("(?i).*(procure|gem\\.gov|\\.gov\\.in|\\.nic\\.in|tender).*")));
-        portal = trimUrl(portal);
-        put(out, "portalLink", portal);
-        put(out, "source", mapSource(portal, flat));
-        put(out, "sector", inferSector(firstNonNull(name, "") + " " + flat));
-
-        // ── location ──
-        put(out, "location", firstNonNull(
-                labelled(flat, "Location\\s+of\\s+(?:the\\s+)?[Ww]ork|Site\\s+Location|Place\\s+of\\s+[Ww]ork",
-                        "(.{4,120}?)\\s*(?:Estimated|Tender\\s*Fee|Amount\\s+Put|Completion|\\.)"),
-                group(flat, "\\b(?:in|at)\\s+([A-Za-z][A-Za-z ]{2,30}?)\\s+Taluk\\b")));
-        // Matched case-insensitively, so fold "KARNATAKA" (from a letterhead) back
-        // onto the canonical spelling the dropdown expects.
-        put(out, "state", canonicalState(group(flat, "(" + STATE_ALT + ")")));
-        put(out, "district", firstNonNull(
-                group(flat, "\\b([A-Za-z][A-Za-z ]{2,30}?)\\s+District\\b"),
-                group(flat, "\\d{6}\\s*,\\s*([A-Za-z][A-Za-z ]{2,30}?)\\s*,\\s*(?:" + STATE_ALT + ")")));
-
-        // ── financials (Lakh / Crore normalised to plain rupees) ──
-        put(out, "estimatedValue", moneyAfter(flat, L_ESTIMATED));
-        put(out, "emdAmount", moneyAfter(flat, L_EMD));
-        put(out, "performanceSecurityPct", group(flat,
-                "(\\d{1,2}(?:\\.\\d+)?)\\s*%\\s*(?:\\([^)]{0,25}\\)\\s*)?of\\s+(?:the\\s+)?"
-              + "(?:Amount\\s+Put\\s+[Tt]o\\s+[Tt]ender|Contract\\s+(?:Price|Value|Amount)|"
-              + "Tender\\s+(?:Price|Value)|Total\\s+Contract|Estimated\\s+(?:Cost|Value))"));
-
-        // ── key dates ──
-        String submission = dateAfter(flat, L_SUBMIT_DATE);
-        put(out, "submissionDeadline", submission);
-        put(out, "technicalOpeningDate", dateAfter(flat, L_TECH_DATE));
-        put(out, "financialOpeningDate", dateAfter(flat, L_FIN_DATE));
-        // FY is usually baked into the reference ("KPTCL/2026-27/…"); fall back to
-        // deriving it from the submission date.
-        put(out, "financialYear", firstNonNull(
-                fyFromText((String) out.get("tenderNumber")), financialYear(submission)));
-
-        // ── best-effort child arrays ──
-        List<Map<String, Object>> boq = extractBoq(text);
-        if (!boq.isEmpty()) out.put("boqItems", boq);
-
-        List<Map<String, Object>> elig = extractEligibility(flat);
-        if (!elig.isEmpty()) out.put("eligibilityCriteria", elig);
-
-        return out;
-    }
-
-    // ── BOQ: scan line-by-line for "<n> <description> <unit> [qty]" rows under a
-    //    running scope header. Unit vocabulary is deliberately broad so schedules
-    //    from civil, electrical and supply tenders all land. ──
-    private static final Pattern BOQ_ROW = Pattern.compile(
-            "^\\s*(\\d{1,3})[.)]?\\s+(.{4,300}?)\\s+"
-          + "(Lump\\s*Sum|L\\.?S\\.?|Nos?\\.?|Each|Set|Sets|Lot|Job|Point|Pair|Unit|"
-          + "M\\.?T\\.?|Kgs?|Km|Mtrs?|Metres?|Meters?|RMT|R\\.?Mt|Sq\\.?\\s?m(?:tr)?|Sqm|"
-          + "Cu\\.?\\s?m(?:tr)?|Cum|Ltrs?|Litres?|Tonnes?|Tons?|Bags?|Months?|Days?|Years?)"
-          + "\\b\\s*([\\d,]+(?:\\.\\d+)?)?\\s*$",
+    private static final Pattern SECURITY_ANCHOR = Pattern.compile(
+            "Performance\\s+Security|Performance\\s+Bank\\s+Guarantee|\\bPBG\\b|Security\\s+Deposit",
             Pattern.CASE_INSENSITIVE);
+    private static final Pattern PCT_OF = Pattern.compile(
+            "(\\d{1,2}(?:\\.\\d+)?)\\s*%\\s*(?:\\([^)]{0,25}\\)\\s*)?of\\s+(?:the\\s+)?(?:total\\s+)?"
+          + "(?:Amount\\s+Put\\s+[Tt]o\\s+[Tt]ender|Contract\\s+(?:Price|Value|Amount)"
+          + "|Tender\\s+(?:Price|Value)|Total\\s+Contract|Estimated\\s+(?:Cost|Value)"
+          + "|(?:estimated\\s+)?cost\\s+put\\s+to\\s+the\\s+tender)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern COMPARATIVE = Pattern.compile(
+            "(?:less\\s+than|more\\s+than|not\\s+less\\s+than|at\\s+least|up\\s?to|below|above"
+          + "|exceeding|minimum|maximum|over|than)\\s+\\S{0,12}$", Pattern.CASE_INSENSITIVE);
 
-    private List<Map<String, Object>> extractBoq(String text) {
-        List<Map<String, Object>> rows = new ArrayList<>();
-        String scope = "";
-        for (String raw : text.split("\\r?\\n")) {
-            String line = raw.trim();
-            if (line.isEmpty()) continue;
-            // Table-of-contents rows ("Section-9 …… 204") are not BOQ lines.
-            if (line.contains("....") || line.matches(".*\\.{4,}.*")) continue;
-
-            // Row test first: a priced line like "4 Comprehensive annual
-            // maintenance Month 60" also reads as a CAMC section header, and it
-            // is the row that matters.
-            Matcher m = BOQ_ROW.matcher(line);
-            if (!m.find()) {
-                String header = detectScope(line);
-                if (header != null) scope = header;
-                continue;
-            }
-            String desc = m.group(2).trim().replaceAll("\\s+", " ");
-            // Must read like a description, not a stray numeric table row.
-            if (desc.length() < 5 || !desc.matches(".*[A-Za-z]{3,}.*")) continue;
-
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("itemNo", m.group(1));
-            row.put("scope", scope);
-            row.put("description", clip(desc, 300));
-            row.put("unit", normalizeUnit(m.group(3)));
-            if (m.group(4) != null) row.put("quantity", m.group(4).replace(",", ""));
-            rows.add(row);
-            if (rows.size() >= 200) break;
-        }
-        return rows;
-    }
-
-    /** Section/part headers that group the BOQ rows beneath them. */
-    private String detectScope(String line) {
-        String l = line.toLowerCase(Locale.ROOT);
-        if (l.length() > 90) return null;
-
-        // A captioned part header ("Part - A: Supply of Materials") is the most
-        // specific thing a line can be, so it wins over the keyword rules below —
-        // those would reduce it to just "Supply".
-        Matcher part = Pattern.compile("^part\\s*[-–—]?\\s*([A-Z])\\b[:\\-\\s]*(.{0,60})?",
-                Pattern.CASE_INSENSITIVE).matcher(line);
-        String partTail = null;
-        if (part.find()) {
-            partTail = part.group(2) == null ? "" : part.group(2).trim();
-            if (!partTail.isEmpty()) return partTail;
-        }
-
-        if (l.contains("administrative office building") || l.contains("a.o. building")
-                || l.contains("a. o. building")) return "Administrative Office Building";
-        if (l.contains("gopalpuri")) return "Gopalpuri Colony";
-        if (l.contains("outside cargo jetty")) return "Outside Cargo Jetty Area";
-        if (l.contains("inside cargo jetty")) return "Inside Cargo Jetty Area";
-        if (l.contains("bess")) return "BESS";
-        if (l.contains("comprehensive annual maintenance") || l.contains("camc")) return "CAMC";
-        if (l.contains("civil work")) return "Civil Works";
-        if (l.contains("electrical work")) return "Electrical Works";
-        if (l.contains("erection") && l.contains("commissioning")) return "Erection & Commissioning";
-        if (l.contains("supply of material") || l.contains("supply portion")) return "Supply";
-        if (l.contains("transmission line")) return "Transmission Line";
-        if (l.contains("sub-station") || l.contains("substation")) return "Sub-Station";
-
-        // Bare "Part - B" with no caption: keep the part letter as the scope.
-        if (partTail != null) return "Part " + part.group(1).toUpperCase(Locale.ROOT);
-        return null;
-    }
-
-    private static String normalizeUnit(String u) {
-        if (u == null) return null;
-        String l = u.toLowerCase(Locale.ROOT).replace(".", "").replace(" ", "");
-        if (l.startsWith("lump") || l.equals("ls")) return "Lump Sum";
-        if (l.startsWith("no")) return "Nos";
-        if (l.startsWith("month")) return "Month";
-        if (l.startsWith("sq")) return "Sqm";
-        if (l.startsWith("cu")) return "Cum";
-        if (l.startsWith("mt") && l.length() <= 2) return "MT";
-        return u.trim();
-    }
-
-    // ── Eligibility: pull the high-signal criteria when clearly present. ──
-    private List<Map<String, Object>> extractEligibility(String flat) {
-        List<Map<String, Object>> out = new ArrayList<>();
-
-        String turnover = moneyAfter(flat,
-                "(?:Average\\s+)?Annual\\s+(?:Financial\\s+)?[Tt]urnover|minimum\\s+financial\\s+turnover|"
-              + "financial\\s+turnover\\s+of");
-        if (turnover != null) out.add(criterion("Financial",
-                "Annual Turnover (as per NIT)", turnover, "gte"));
-
-        String liquid = moneyAfter(flat,
-                "Liquid\\s+Assets|[Ww]orking\\s+[Cc]apital|credit\\s+facilities\\s+of|Solvency");
-        if (liquid != null) out.add(criterion("Financial",
-                "Liquid assets / credit facility", liquid, "gte"));
-
-        if (find(flat, "similar\\s+(?:nature\\s+of\\s+)?(?:completed\\s+)?works?")) {
-            out.add(criterion("Technical", "Similar Work Experience",
-                    "As per NIT (completed works of similar nature)", "contains"));
-        }
-        String years = group(flat,
-                "minimum\\s+(?:experience\\s+of\\s+)?(\\d{1,2})\\s*(?:\\([A-Za-z]+\\)\\s*)?years?"
-              + "\\s+(?:of\\s+)?experience");
-        if (years != null) out.add(criterion("Technical",
-                "Minimum years of experience", years, "gte"));
-
-        String licence = group(flat,
-                "((?:Super\\s+Grade|Class[\\s\\-]*A|Class[\\s\\-]*1|Class[\\s\\-]*I)\\s+"
-              + "Electrical\\s+Contractors?'?s?\\s+Licen[cs]e)");
-        if (licence != null) out.add(criterion("Legal", "Electrical contractor licence",
-                cleanName(licence), "contains"));
-
-        if (find(flat, "\\bEPF\\b.{0,60}\\bESI\\b") || find(flat, "PAN\\b.{0,40}\\bGST")) {
-            out.add(criterion("Legal",
-                    "Statutory registrations (PAN, GST, EPF/ESI, ITR)", "Required", "boolean"));
-        }
-        if (find(flat, "(?:not\\s+have\\s+been\\s+)?[Bb]lack\\s?listed")) {
-            out.add(criterion("Legal", "Not blacklisted / debarred", "Required", "boolean"));
-        }
-        if (find(flat, "\\bISO\\s*[:\\-]?\\s*\\d{4}")) {
-            out.add(criterion("Technical", "ISO certification", "Required", "boolean"));
-        }
-        return out;
-    }
-
-    private Map<String, Object> criterion(String category, String name, String required, String operator) {
-        Map<String, Object> c = new LinkedHashMap<>();
-        c.put("category", category);
-        c.put("criterionName", name);
-        c.put("requiredValue", required);
-        c.put("ourValue", "");
-        c.put("operator", operator);
-        return c;
-    }
-
-    // ── label→value plumbing ──────────────────────────────────────────────────
-
-    /** Match {@code (labelAlt) <sep> valueRegex} and return the first capture group. */
-    private static String labelled(String flat, String labelAlt, String valueRegex) {
-        return group(flat, "(?:" + labelAlt + ")\\s*[:\\-]?\\s*" + valueRegex);
-    }
-
-    /** How far past a label we keep looking for that label's figure. */
-    private static final int MONEY_WINDOW = 120;
-
-    private static final Pattern AMOUNT = Pattern.compile(
-            CUR + "?\\s*\\.?\\s*" + NUM + "\\s*" + SCALE + "?", Pattern.CASE_INSENSITIVE);
+    // ── date disambiguation ──────────────────────────────────────────────────
 
     /**
-     * First amount following any of the label synonyms, normalised to plain rupees.
-     *
-     * <p>Two wrinkles this handles. Page furniture ("… Page 3 of 205 …") often sits
-     * between a label and its figure, so every number inside the window is tried
-     * until one is plausibly an amount rather than just the first. And column
-     * headers such as "(Rs. in lakhs)" supply the magnitude when the figure itself
-     * carries no unit — so {@code Rs.2017.56Lakhs} and {@code (Rs. in lakhs) 2017.56}
-     * both yield 201756000.
+     * Words that mean a "closing date" is somebody else's deadline. TREDA's
+     * summary carries four dated rows before the bid deadline — clarification
+     * opens, clarification closes, pre-bid, document download.
      */
-    private static String moneyAfter(String flat, String labelAlt) {
-        Matcher label = Pattern.compile("(?:" + labelAlt + ")", Pattern.CASE_INSENSITIVE).matcher(flat);
-        while (label.find()) {
-            String window = flat.substring(label.end(),
-                    Math.min(flat.length(), label.end() + MONEY_WINDOW));
-            Matcher a = AMOUNT.matcher(window);
-            while (a.find()) {
-                // Only the text immediately before the figure can qualify its scale.
-                String context = window.substring(Math.max(0, a.start() - 45), a.start());
-                String scale = a.group(2) != null ? a.group(2) : scaleFromContext(context);
-                String v = money(a.group(1), scale);
-                if (v != null) return v;
-            }
+    private static final List<String> SUBMISSION_DISQUALIFIERS = List.of(
+            "clarification", "pre-bid", "pre bid", "prebid", "corrigendum", "download",
+            "uploading", "publish", "opening", "bank guarantee", "validity", "amendment");
+    private static final List<String> PRICE_WORDS = List.of("price", "financial");
+
+    private static boolean mentionsAny(String haystack, List<String> needles) {
+        if (haystack == null) return false;
+        String l = haystack.toLowerCase(Locale.ROOT);
+        for (String n : needles) {
+            if (l.contains(n)) return true;
         }
-        return null;
+        return false;
     }
 
-    /** First date following any of the label synonyms, as yyyy-MM-dd. */
-    private static String dateAfter(String flat, String labelAlt) {
-        Matcher m = Pattern.compile("(?:" + labelAlt + ").{0,60}?" + DATE,
-                Pattern.CASE_INSENSITIVE).matcher(flat);
-        while (m.find()) {
-            String iso = toIso(m.group(1));
-            if (iso != null) return iso;
-        }
-        return null;
-    }
-
-    // ── small helpers ─────────────────────────────────────────────────────────
-
-    /**
-     * Fold the typographic characters PDF extraction leaves behind - non-breaking
-     * and narrow spaces, soft hyphens, en/em dashes, curly quotes and fi/fl
-     * ligatures. Without this a label that reads "Tender No." on screen can carry
-     * a NBSP that \s never matches, and every regex below silently misses.
-     */
-    private static String normalize(String t) {
-        if (t == null) return "";
-        return t.replace(' ', ' ').replace(' ', ' ').replace(' ', ' ')
-                .replace(' ', ' ').replace(' ', ' ')
-                .replace("­", "").replace("​", "")
-                .replace("ﬁ", "fi").replace("ﬂ", "fl")
-                .replaceAll("[‐-―−]", "-")
-                .replaceAll("[‘’‛]", "'")
-                .replaceAll("[“”]", "\"");
-    }
-
-    private static void put(Map<String, Object> m, String key, String val) {
-        if (val != null && !val.trim().isEmpty()) m.put(key, val.trim());
-    }
-
-    private static boolean isBlank(String s) { return s == null || s.trim().isEmpty(); }
-
-    private static String group(String src, String regex) {
+    private static String firstGroup(String src, Pattern p) {
         if (src == null) return null;
-        Matcher m = Pattern.compile(regex, Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(src);
-        return m.find() ? m.group(1).trim() : null;
+        Matcher m = p.matcher(src);
+        return m.find() ? m.group(1).strip() : null;
     }
 
-    /** All group-1 captures, in document order — lets a caller pick the best one. */
-    private static List<String> allMatches(String src, String regex) {
-        List<String> out = new ArrayList<>();
-        if (src == null) return out;
-        Matcher m = Pattern.compile(regex, Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(src);
-        while (m.find() && out.size() < 20) out.add(m.group(1).trim());
-        return out;
-    }
-
-    /** First group-1 capture that satisfies {@code ok} — used where a label can
-     *  legitimately appear inside another label's value. */
-    private static String firstMatch(String src, String regex, Predicate<String> ok) {
-        for (String v : allMatches(src, regex)) {
-            if (ok.test(v)) return v;
+    private static int countChar(String s, char c) {
+        int n = 0;
+        for (int i = 0; i < s.length(); i++) {
+            if (s.charAt(i) == c) n++;
         }
-        return null;
+        return n;
     }
 
-    private static boolean find(String src, String regex) {
-        return src != null && Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(src).find();
+    // ── value tidying ────────────────────────────────────────────────────────
+
+    /**
+     * A tender reference stops at the comma that introduces its date. TREDA
+     * prints "DNIe-T No.F.6 (542)/TREDA/NCES/2025-26/2110, dated 12/06/2026";
+     * without this the trailing date was all that came back.
+     */
+    static String reference(String raw) {
+        String s = TenderValues.tidy(raw);
+        if (s == null) return null;
+        int cut = s.indexOf(',');
+        if (cut > 3) s = s.substring(0, cut);
+        s = s.replaceAll("(?i)\\s+dated\\b.*$", "");
+        s = s.replaceAll("^[^A-Za-z0-9]+", "").replaceAll("[^A-Za-z0-9)\\]]+$", "").strip();
+        if (s.length() < 4 || s.length() > 90) return null;
+        if (!s.matches("[A-Za-z0-9][A-Za-z0-9/_.()\\[\\]\\-\\s]*")) return null;
+        return s;
     }
 
-    private static String firstNonNull(String a, String b) {
-        return !isBlank(a) ? a : b;
-    }
-
-    /** Amount + magnitude word → plain rupees, e.g. ("2017.56", "Lakhs") → 201756000. */
-    private static String money(String num, String scale) {
-        if (num == null) return null;
-        String d = num.replace(",", "");
-        BigDecimal v;
-        try { v = new BigDecimal(d); } catch (Exception e) { return null; }
-        BigDecimal mult = BigDecimal.ONE;
-        if (scale != null) {
-            String s = scale.toLowerCase(Locale.ROOT).replace(".", "");
-            if (s.startsWith("lakh") || s.startsWith("lac")) mult = new BigDecimal("100000");
-            else if (s.startsWith("cr")) mult = new BigDecimal("10000000");
-            else if (s.startsWith("million") || s.equals("mn")) mult = new BigDecimal("1000000");
-            else if (s.startsWith("billion") || s.equals("bn")) mult = new BigDecimal("1000000000");
-        }
-        // Without a magnitude word a tender figure is never a handful of rupees —
-        // a small bare number is a serial/page number the lazy match ran into, so
-        // reject it and let the caller try the next occurrence.
-        if (mult.equals(BigDecimal.ONE) && v.compareTo(new BigDecimal("1000")) < 0) return null;
-        v = v.multiply(mult).setScale(2, RoundingMode.HALF_UP).stripTrailingZeros();
-        return v.toPlainString();
-    }
-
-    /** "(Rs. in lakhs)" style text between a label and its figure. */
-    private static String scaleFromContext(String filler) {
-        if (filler == null) return null;
-        String l = filler.toLowerCase(Locale.ROOT);
-        if (l.contains("lakh") || l.contains("lac")) return "Lakh";
-        if (l.contains("crore")) return "Crore";
-        if (l.contains("million")) return "Million";
-        return null;
-    }
-
-    /** Longest work description we keep; beyond this the title stops being a title. */
+    /** Longest work description kept; beyond this the title stops being a title. */
     private static final int TITLE_MAX = 300;
 
     /**
@@ -563,14 +625,13 @@ public class TenderPdfExtractor {
             Pattern.CASE_INSENSITIVE);
 
     /**
-     * Turn a raw cover-page capture into a usable work title.
+     * Turn a raw capture into a usable work title.
      *
-     * <p>Cover pages run the work description straight into the tender reference,
-     * the issuing agency, its address, phone, email, URL and a "SIGNATURE OF THE
-     * BIDDER" footer — all of which the greedy capture swallows. Cut at the first
-     * such marker, then cap the length on a clause boundary so the field stays a
-     * title rather than a paragraph. The untouched original is always still in the
-     * attached PDF.
+     * <p>Cover pages run the work description straight into the tender
+     * reference, the issuing agency, its address, phone, email, URL and a
+     * "SIGNATURE OF THE BIDDER" footer. Cut at the first such marker, then cap
+     * the length on a clause boundary so the field stays a title rather than a
+     * paragraph. The untouched original is always still in the attached PDF.
      *
      * <p>Shared by the regex and AI paths, so both produce the same shape.
      */
@@ -597,17 +658,13 @@ public class TenderPdfExtractor {
 
     /** Drop dangling punctuation left behind by a cut. */
     private static String trimTail(String s) {
-        return s.replaceAll("[\\s,;:./\\-]+$", "").trim();
+        return s.replaceAll("[\\s,;:./\\-]+$", "").strip();
     }
 
     private static String cleanName(String v) {
-        if (v == null) return null;
-        String s = v.replaceAll("\\s+", " ")
-                    .replaceAll("^[\\s:'\"\\-]+", "")
-                    .replaceAll("['\"\\s]+$", "")
-                    .trim();
-        // Page furniture can survive the flattening; strip it from either end.
-        s = s.replaceAll("(?i)\\s*Page\\s+\\d+\\s+of\\s+\\d+\\s*", " ").trim();
+        String s = TenderValues.tidy(v);
+        if (s == null) return null;
+        s = s.replaceAll("(?i)\\s*Page\\s+\\d+\\s+of\\s+\\d+\\s*", " ").strip();
         return s.isEmpty() ? null : s;
     }
 
@@ -615,29 +672,25 @@ public class TenderPdfExtractor {
     private static String canonicalState(String v) {
         if (v == null) return null;
         for (String s : STATE_ALT.split("\\|")) {
-            if (s.equalsIgnoreCase(v.trim())) return s;
+            if (s.equalsIgnoreCase(v.strip())) return s;
         }
         return v;
     }
 
     private static String cleanPlace(String v) {
         if (v == null) return null;
-        String s = v.replaceAll("\\s+", " ").replaceAll("^[,\\-\\s]+|[,\\-\\s]+$", "").trim();
-        // Drop a leading address fragment: keep the last word-group before the PIN.
+        String s = v.replaceAll("\\s+", " ").replaceAll("^[,\\-\\s]+|[,\\-\\s]+$", "").strip();
         int comma = s.lastIndexOf(',');
-        if (comma >= 0 && comma < s.length() - 1) s = s.substring(comma + 1).trim();
+        if (comma >= 0 && comma < s.length() - 1) s = s.substring(comma + 1).strip();
         return s.length() < 3 || s.length() > 40 ? null : s;
-    }
-
-    private static String clip(String v, int max) {
-        if (v == null) return null;
-        return v.length() <= max ? v : v.substring(0, max).trim();
     }
 
     private static String trimUrl(String v) {
         if (v == null) return null;
-        return v.replaceAll("[.,);\\]]+$", "").trim();
+        return v.replaceAll("[.,);\\]]+$", "").strip();
     }
+
+    // ── vocabulary mapping ───────────────────────────────────────────────────
 
     private static String mapTenderType(String v) {
         if (v == null) return null;
@@ -652,7 +705,6 @@ public class TenderPdfExtractor {
         return null;
     }
 
-    /** Unlabelled documents still say what kind of bid this is in the invitation text. */
     private static String inferTenderType(String flat) {
         if (find(flat, "\\bopen\\s+(?:e-?)?tender")) return "Open";
         if (find(flat, "\\blimited\\s+(?:e-?)?tender")) return "Limited";
@@ -662,13 +714,23 @@ public class TenderPdfExtractor {
         return null;
     }
 
+    /**
+     * Which portal the tender came from. IREPS is Indian Railways' own
+     * e-procurement system — neither GeM nor CPPP nor a state portal — and its
+     * documents close with a GFR sentence that merely names GeM, which is why
+     * GeM now has to be evidenced by a portal address or a bid reference rather
+     * than a bare mention.
+     */
     private static String mapSource(String portal, String flat) {
         String l = (portal == null ? "" : portal.toLowerCase(Locale.ROOT));
+        if (l.contains("ireps")) return "IREPS / Railways";
         if (l.contains("gem.gov")) return "GeM";
         if (l.contains("eprocure.gov")) return "CPPP";
-        if (!l.isEmpty() && (l.contains("procure") || l.contains(".gov") || l.contains(".nic")))
+        if (!l.isEmpty() && (l.contains("procure") || l.contains(".gov") || l.contains(".nic"))) {
             return "State Portal";
-        if (find(flat, "\\bGeM\\b")) return "GeM";
+        }
+        if (find(flat, "ireps\\.gov\\.in")) return "IREPS / Railways";
+        if (find(flat, "gem\\.gov\\.in|Government\\s+e-?Marketplace|GEM/2\\d{3}/")) return "GeM";
         if (find(flat, "eprocure\\.gov\\.in|Central\\s+Public\\s+Procurement")) return "CPPP";
         if (find(flat, "e-?[Pp]rocurement")) return "State Portal";
         return null;
@@ -686,95 +748,32 @@ public class TenderPdfExtractor {
         if (l.contains("operation and maintenance") || l.contains("o&m")
                 || l.contains("annual maintenance")) return "O&M";
         if (l.contains("sub-station") || l.contains("substation") || l.contains("transmission line")
-                || l.contains("kv ") || l.contains("switchgear") || l.contains("transformer"))
+                || l.contains("kv ") || l.contains("switchgear") || l.contains("transformer")) {
             return "Electrical";
+        }
         if (l.contains("civil work") || l.contains("construction of building")) return "Civil";
         return null;
     }
 
     /** Government body vs PSU vs private, inferred from the organisation's name. */
-    private static String mapClientType(String client, String authority, String flat) {
+    private static String mapClientType(String client, String authority) {
         String s = ((client == null ? "" : client) + " " + (authority == null ? "" : authority))
                 .toLowerCase(Locale.ROOT);
         if (s.isBlank()) return null;
         if (s.contains("corporation limited") || s.contains("nigam") || s.contains("ltd")
-                || s.contains("limited") || s.contains("vidyut") || s.contains("discom"))
+                || s.contains("limited") || s.contains("vidyut") || s.contains("discom")) {
             return "PSU";
+        }
         if (s.contains("department") || s.contains("ministry") || s.contains("municipal")
                 || s.contains("nagar") || s.contains("panchayat") || s.contains("board")
-                || s.contains("authority") || s.contains("government") || s.contains("directorate"))
+                || s.contains("authority") || s.contains("government") || s.contains("directorate")
+                || s.contains("agency") || s.contains("railway") || s.contains("rly")) {
             return "Government";
-        if (find(flat, "\\bPvt\\.?\\s*Ltd|Private\\s+Limited")) return "Private";
+        }
         return null;
     }
 
-    /** Any supported date spelling → yyyy-MM-dd, or null if it isn't a real date. */
-    private static String toIso(String v) {
-        if (v == null) return null;
-        String s = v.trim();
-
-        Matcher m = Pattern.compile("^(\\d{4})-(\\d{1,2})-(\\d{1,2})$").matcher(s);
-        if (m.find()) return iso(Integer.parseInt(m.group(1)),
-                Integer.parseInt(m.group(2)), Integer.parseInt(m.group(3)));
-
-        m = Pattern.compile("^(\\d{1,2})[.\\-/](\\d{1,2})[.\\-/](\\d{4})$").matcher(s);
-        if (m.find()) {
-            int a = Integer.parseInt(m.group(1)), b = Integer.parseInt(m.group(2));
-            // Indian documents are dd/mm; only swap when that reading is impossible.
-            int day = a, month = b;
-            if (a > 12 && b <= 12) { day = a; month = b; }
-            else if (b > 12 && a <= 12) { day = b; month = a; }
-            return iso(Integer.parseInt(m.group(3)), month, day);
-        }
-
-        m = Pattern.compile("^(\\d{1,2})[\\s\\-.]{1,3}(" + MON + ")[\\s\\-.,]{1,3}(\\d{4})$",
-                Pattern.CASE_INSENSITIVE).matcher(s);
-        if (m.find()) return iso(Integer.parseInt(m.group(3)), monthOf(m.group(2)),
-                Integer.parseInt(m.group(1)));
-
-        m = Pattern.compile("^(" + MON + ")[\\s\\-.]{1,3}(\\d{1,2})[\\s,]{1,3}(\\d{4})$",
-                Pattern.CASE_INSENSITIVE).matcher(s);
-        if (m.find()) return iso(Integer.parseInt(m.group(3)), monthOf(m.group(1)),
-                Integer.parseInt(m.group(2)));
-
-        return null;
-    }
-
-    private static String iso(int year, int month, int day) {
-        if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1990 || year > 2100) return null;
-        return String.format("%04d-%02d-%02d", year, month, day);
-    }
-
-    private static int monthOf(String name) {
-        String k = name.substring(0, 3).toLowerCase(Locale.ROOT);
-        switch (k) {
-            case "jan": return 1;  case "feb": return 2;  case "mar": return 3;
-            case "apr": return 4;  case "may": return 5;  case "jun": return 6;
-            case "jul": return 7;  case "aug": return 8;  case "sep": return 9;
-            case "oct": return 10; case "nov": return 11; case "dec": return 12;
-            default: return 0;
-        }
-    }
-
-    /** Pull "2026-27" straight out of a tender reference when it carries the FY. */
-    private static String fyFromText(String ref) {
-        if (ref == null) return null;
-        Matcher m = Pattern.compile("(20\\d{2})\\s*[-/]\\s*(\\d{2})\\b").matcher(ref);
-        if (!m.find()) return null;
-        int start = Integer.parseInt(m.group(1));
-        int end = Integer.parseInt(m.group(2));
-        if (end != (start + 1) % 100) return null;
-        return start + "-" + m.group(2);
-    }
-
-    /** Indian FY from an ISO date: Apr–Mar → "2026-27". */
-    private static String financialYear(String iso) {
-        if (iso == null) return null;
-        Matcher m = Pattern.compile("(\\d{4})-(\\d{2})-\\d{2}").matcher(iso);
-        if (!m.find()) return null;
-        int year = Integer.parseInt(m.group(1));
-        int month = Integer.parseInt(m.group(2));
-        int start = (month >= 4) ? year : year - 1;
-        return start + "-" + String.format("%02d", (start + 1) % 100);
+    private static boolean find(String src, String regex) {
+        return src != null && Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(src).find();
     }
 }

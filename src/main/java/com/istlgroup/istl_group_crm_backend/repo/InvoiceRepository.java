@@ -242,10 +242,26 @@ public interface InvoiceRepository extends JpaRepository<InvoiceEntity, Long> {
 
     // ── Project-level aggregations for syncing projects table ────────────────
 
-    @Query(value = "SELECT COALESCE(SUM(total_amount), 0) FROM invoices WHERE project_id = :projectId AND deleted_at IS NULL", nativeQuery = true)
+    // "Billed" excludes draft and cancelled invoices — an invoice that was never
+    // issued is not billed value. This matches DashboardRepo.sumInvoicedValue(),
+    // which feeds the admin dashboard's Total Billed Value tile.
+    //
+    // These two used to filter on deleted_at alone, so the Project Dashboard
+    // counted drafts and cancellations that the admin dashboard did not, and the
+    // same company billed a different number on each page. The column collation
+    // is case-insensitive, so the lowercase literals also match 'Draft'.
+    @Query(value = """
+        SELECT COALESCE(SUM(total_amount), 0) FROM invoices
+        WHERE project_id = :projectId AND deleted_at IS NULL
+          AND COALESCE(status, '') NOT IN ('draft', 'cancelled')
+        """, nativeQuery = true)
     BigDecimal sumTotalAmountByProjectId(@Param("projectId") String projectId);
 
-    @Query(value = "SELECT COUNT(*) FROM invoices WHERE project_id = :projectId AND deleted_at IS NULL", nativeQuery = true)
+    @Query(value = """
+        SELECT COUNT(*) FROM invoices
+        WHERE project_id = :projectId AND deleted_at IS NULL
+          AND COALESCE(status, '') NOT IN ('draft', 'cancelled')
+        """, nativeQuery = true)
     Long countByProjectId(@Param("projectId") String projectId);
 
     @Query(value = "SELECT COALESCE(SUM(paid_amount), 0) FROM invoices WHERE project_id = :projectId AND deleted_at IS NULL", nativeQuery = true)

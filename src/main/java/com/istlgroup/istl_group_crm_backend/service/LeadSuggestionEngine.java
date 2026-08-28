@@ -39,6 +39,12 @@ public class LeadSuggestionEngine {
     public static final String W_BASIS_UNRESOLVED    = "BASIS_UNRESOLVED";
     public static final String W_NEEDS_SITE_VISIT    = "NEEDS_SITE_VISIT";
     public static final String W_NO_TEMPLATE_NO_HISTORY = "NO_TEMPLATE_NO_HISTORY";
+    // Template misconfiguration — the basis needs a number the template never carried.
+    // Distinct from BASIS_UNRESOLVED (which means "no rule matched"): here the rule
+    // is known and simply incomplete, so the fix is on the template, not the lead.
+    public static final String W_NEEDS_BASIS_VALUE     = "NEEDS_BASIS_VALUE";
+    public static final String W_NEEDS_STEP_VALUE      = "NEEDS_STEP_VALUE";
+    public static final String W_NEEDS_SITE_VISIT_FIELD = "NEEDS_SITE_VISIT_FIELD";
     // Auto-sizing (make-driven) codes
     public static final String W_NEEDS_MODULE_WATT     = "NEEDS_MODULE_WATT";
     public static final String W_NEEDS_INVERTER_KW     = "NEEDS_INVERTER_KW";
@@ -220,27 +226,40 @@ public class LeadSuggestionEngine {
      * {@code driverAttr} = this line's selected make numeric attribute (module Wp /
      * inverter kW) for the driver bases; {@code moduleCount}/{@code inverterCount} =
      * the counts resolved from the driver lines, for the dependent bases.
+     *
+     * Every branch returns null — never a number — when an input it needs is
+     * absent, so an un-sizeable line reads as blank-with-a-reason rather than as a
+     * genuine quantity. A basis whose factor was never entered used to fall through
+     * {@code nz(...)} to zero, which is indistinguishable from a real zero and was
+     * the single largest source of the zeros estimators were seeing.
      */
     private BigDecimal quantityForTemplateLine(LeadBomTemplateItemEntity t, CapacityInfo cap,
                                                Map<String, String> siteVisit,
                                                BigDecimal moduleCount, BigDecimal inverterCount,
                                                BigDecimal driverAttr, List<String> flags) {
         String basis = t.getBasis() == null ? LeadBomTemplateItemEntity.BASIS_FIXED : t.getBasis();
-        BigDecimal value = nz(t.getBasisValue());
+        BigDecimal value = t.getBasisValue();
         BigDecimal kw = cap != null && cap.isUsable() ? cap.scaleBase() : null;
 
+        // The template's own gaps are reported before the lead's, because they
+        // affect every lead seeded from this template and are fixed elsewhere.
         switch (basis) {
             case LeadBomTemplateItemEntity.BASIS_FIXED:
+                if (!isConfigured(value)) { flags.add(W_NEEDS_BASIS_VALUE); return null; }
                 return round3(value);
             case LeadBomTemplateItemEntity.BASIS_PER_KW:
+                if (!isConfigured(value)) { flags.add(W_NEEDS_BASIS_VALUE); return null; }
                 if (kw == null) { flags.add(W_NEEDS_CAPACITY); return null; }
                 return round3(value.multiply(kw));
             case LeadBomTemplateItemEntity.BASIS_PER_STEP:
+                BigDecimal step = t.getStepValue();
+                if (!isConfigured(step)) { flags.add(W_NEEDS_STEP_VALUE); return null; }
                 if (kw == null) { flags.add(W_NEEDS_CAPACITY); return null; }
-                BigDecimal step = nz(t.getStepValue());
-                if (step.signum() <= 0) { flags.add(W_BASIS_UNRESOLVED); return null; }
                 return ceilDiv(kw, step);
             case LeadBomTemplateItemEntity.BASIS_FROM_SITE_VISIT:
+                if (t.getSiteVisitField() == null || t.getSiteVisitField().isBlank()) {
+                    flags.add(W_NEEDS_SITE_VISIT_FIELD); return null;
+                }
                 BigDecimal fromVisit = fromSiteVisit(t.getSiteVisitField(), siteVisit);
                 if (fromVisit == null) { flags.add(W_NEEDS_SITE_VISIT); return null; }
                 return round3(fromVisit);
@@ -253,15 +272,27 @@ public class LeadSuggestionEngine {
                 if (driverAttr == null || driverAttr.signum() <= 0) { flags.add(W_NEEDS_INVERTER_KW); return null; }
                 return ceilDiv(kw, driverAttr); // ceil(kW / invKw)
             case LeadBomTemplateItemEntity.BASIS_PER_MODULE:
+                if (!isConfigured(value)) { flags.add(W_NEEDS_BASIS_VALUE); return null; }
                 if (moduleCount == null) { flags.add(W_NEEDS_MODULE_DRIVER); return null; }
                 return ceilMul(value, moduleCount); // ceil(factor * module count)
             case LeadBomTemplateItemEntity.BASIS_PER_INVERTER:
+                if (!isConfigured(value)) { flags.add(W_NEEDS_BASIS_VALUE); return null; }
                 if (inverterCount == null) { flags.add(W_NEEDS_INVERTER_DRIVER); return null; }
                 return ceilMul(value, inverterCount); // ceil(factor * inverter count)
             default:
                 flags.add(W_BASIS_UNRESOLVED);
-                return round3(value);
+                return null;
         }
+    }
+
+    /**
+     * A basis factor counts as configured only when it is present AND positive.
+     * A zero is treated as never-entered rather than as "no quantity": a template
+     * line that yields zero for every lead is always a mistake, and admitting it
+     * as a real answer is exactly what hides the mistake.
+     */
+    private static boolean isConfigured(BigDecimal v) {
+        return v != null && v.signum() > 0;
     }
 
     /** Apply a resolved basis to a MINED row (which already carries a real qty). */
@@ -429,6 +460,9 @@ public class LeadSuggestionEngine {
             case W_BASIS_UNRESOLVED:  return "Some items had no matching template rule — a sensible default was used; verify.";
             case W_NEEDS_SITE_VISIT:  return "Some quantities come from the site visit and were left blank — fill them in.";
             case W_NEEDS_CAPACITY:    return "This lead has no usable capacity, so per-kW quantities were left blank.";
+            case W_NEEDS_BASIS_VALUE: return "Some template lines have a quantity rule but no value set for it — fix them in Lead Scope / BOM Templates.";
+            case W_NEEDS_STEP_VALUE:  return "Some per-step template lines have no kW-per-unit set — fix them in Lead Scope / BOM Templates.";
+            case W_NEEDS_SITE_VISIT_FIELD: return "Some template lines read from the site visit but name no field — fix them in Lead Scope / BOM Templates.";
             case W_NEEDS_MODULE_WATT: return "Pick a module make with a wattage so the module count can be computed.";
             case W_NEEDS_INVERTER_KW: return "Pick an inverter make with a kW rating so the inverter count can be computed.";
             case W_NEEDS_MODULE_DRIVER:   return "A per-module item couldn't size — there is no module (watt-peak) line to scale from.";

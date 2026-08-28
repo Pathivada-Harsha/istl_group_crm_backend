@@ -1,6 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -97,6 +98,108 @@ class LeadSuggestionEngineTest {
         assertNull(qty(out.get(0)));                                  // PER_KW blanked
         assertEquals(0, qty(out.get(1)).compareTo(new BigDecimal("1.000"))); // FIXED still computes
         assertTrue(warnings.stream().anyMatch(w -> LeadSuggestionEngine.W_NEEDS_CAPACITY.equals(w.get("code"))));
+    }
+
+    // ── A basis whose value was never entered ──────────────────────────────────
+    // These are the zeros estimators kept seeing: the rule was set but the number
+    // it multiplies was left blank, and nz() quietly turned that into a quantity
+    // of zero. Nothing here may produce a number.
+
+    @Test
+    void fixedWithNoQuantityIsBlankNotZero() {
+        CapacityInfo cap = CapacityUtil.parse("50", "kW", "Solar_Rooftop");
+        List<Map<String, Object>> warnings = new ArrayList<>();
+        List<Map<String, Object>> out = engine.expandTemplateBom(
+                List.of(tpl("Lightning Arrestor", "Safety", LeadBomTemplateItemEntity.BASIS_FIXED, null, null, null)),
+                cap, Map.of(), warnings);
+
+        assertNull(qty(out.get(0)), "a fixed line with no quantity configured must not read as zero");
+        assertTrue(flags(out.get(0)).contains(LeadSuggestionEngine.W_NEEDS_BASIS_VALUE));
+        assertTrue(warnings.stream().anyMatch(w -> LeadSuggestionEngine.W_NEEDS_BASIS_VALUE.equals(w.get("code"))));
+    }
+
+    /** A zero factor sizes every lead to zero, so it counts as never-entered too. */
+    @Test
+    void aZeroFactorIsTreatedAsNotConfigured() {
+        CapacityInfo cap = CapacityUtil.parse("50", "kW", "Solar_Rooftop");
+        List<Map<String, Object>> out = engine.expandTemplateBom(
+                List.of(tpl("PV Modules", "Modules", LeadBomTemplateItemEntity.BASIS_PER_KW, "0", null, null)),
+                cap, Map.of(), new ArrayList<>());
+
+        assertNull(qty(out.get(0)));
+        assertTrue(flags(out.get(0)).contains(LeadSuggestionEngine.W_NEEDS_BASIS_VALUE));
+    }
+
+    @Test
+    void perKwWithNoFactorBlamesTheTemplateNotTheCapacity() {
+        CapacityInfo cap = CapacityUtil.parse("50", "kW", "Solar_Rooftop");
+        List<Map<String, Object>> out = engine.expandTemplateBom(
+                List.of(tpl("PV Modules", "Modules", LeadBomTemplateItemEntity.BASIS_PER_KW, null, null, null)),
+                cap, Map.of(), new ArrayList<>());
+
+        assertNull(qty(out.get(0)));
+        assertTrue(flags(out.get(0)).contains(LeadSuggestionEngine.W_NEEDS_BASIS_VALUE));
+    }
+
+    /**
+     * The template's own gap is reported ahead of the lead's, because it applies
+     * to every lead and is fixed in a different place.
+     */
+    @Test
+    void aMissingFactorOutranksAMissingCapacity() {
+        CapacityInfo cap = CapacityUtil.parse("", "", "Solar_Rooftop"); // unusable
+        List<Map<String, Object>> out = engine.expandTemplateBom(
+                List.of(tpl("PV Modules", "Modules", LeadBomTemplateItemEntity.BASIS_PER_KW, null, null, null)),
+                cap, Map.of(), new ArrayList<>());
+
+        assertTrue(flags(out.get(0)).contains(LeadSuggestionEngine.W_NEEDS_BASIS_VALUE));
+        assertFalse(flags(out.get(0)).contains(LeadSuggestionEngine.W_NEEDS_CAPACITY));
+    }
+
+    @Test
+    void perStepWithNoStepValueNamesTheStep() {
+        CapacityInfo cap = CapacityUtil.parse("120", "kW", "Solar_Rooftop");
+        List<Map<String, Object>> out = engine.expandTemplateBom(
+                List.of(tpl("Inverter", "Inverter", LeadBomTemplateItemEntity.BASIS_PER_STEP, null, null, null)),
+                cap, Map.of(), new ArrayList<>());
+
+        assertNull(qty(out.get(0)));
+        assertTrue(flags(out.get(0)).contains(LeadSuggestionEngine.W_NEEDS_STEP_VALUE));
+    }
+
+    @Test
+    void perModuleWithNoFactorIsBlankRatherThanZero() {
+        CapacityInfo cap = CapacityUtil.parse("50", "kW", "Solar_Rooftop");
+        List<Map<String, Object>> out = engine.expandTemplateBom(
+                List.of(tpl("MC4 Connectors", "Electrical", LeadBomTemplateItemEntity.BASIS_PER_MODULE, null, null, null)),
+                cap, Map.of(), new ArrayList<>());
+
+        assertNull(qty(out.get(0)));
+        assertTrue(flags(out.get(0)).contains(LeadSuggestionEngine.W_NEEDS_BASIS_VALUE));
+    }
+
+    @Test
+    void siteVisitLineWithNoFieldNamesTheField() {
+        CapacityInfo cap = CapacityUtil.parse("50", "kW", "Solar_Rooftop");
+        List<Map<String, Object>> out = engine.expandTemplateBom(
+                List.of(tpl("DC Cable", "Cable", LeadBomTemplateItemEntity.BASIS_FROM_SITE_VISIT, null, null, null)),
+                cap, Map.of(), new ArrayList<>());
+
+        assertNull(qty(out.get(0)));
+        assertTrue(flags(out.get(0)).contains(LeadSuggestionEngine.W_NEEDS_SITE_VISIT_FIELD));
+    }
+
+    /** A line whose value IS set still computes exactly as before. */
+    @Test
+    void aConfiguredLineIsUnaffected() {
+        CapacityInfo cap = CapacityUtil.parse("50", "kW", "Solar_Rooftop");
+        List<Map<String, Object>> warnings = new ArrayList<>();
+        List<Map<String, Object>> out = engine.expandTemplateBom(
+                List.of(tpl("PV Modules", "Modules", LeadBomTemplateItemEntity.BASIS_PER_KW, "1.7", null, null)),
+                cap, Map.of(), warnings);
+
+        assertEquals(0, qty(out.get(0)).compareTo(new BigDecimal("85.000")));
+        assertTrue(warnings.isEmpty());
     }
 
     // ── Mined scaling — the hard case ───────────────────────────────────────────

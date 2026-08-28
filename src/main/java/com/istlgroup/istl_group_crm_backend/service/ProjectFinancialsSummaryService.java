@@ -15,7 +15,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Money-in / money-out per project, for LIST screens.
+ * Money-in / money-out per project, for LIST screens and for the client
+ * roll-up behind the Customers > Financials tab (ClientFinancialsService).
  *
  * Deliberately computed LIVE from receipts / invoices / bills — exactly like
  * ProjectDashboardService.buildFinancialData — and NOT from the cached
@@ -65,16 +66,16 @@ public class ProjectFinancialsSummaryService {
             BigDecimal b = billed.getOrDefault(id, BigDecimal.ZERO);
             BigDecimal r = received.getOrDefault(id, BigDecimal.ZERO);
             BigDecimal p = payable.getOrDefault(id, BigDecimal.ZERO);
-            BigDecimal s = viaAdv.getOrDefault(id, BigDecimal.ZERO)
-                    .add(viaDirect.getOrDefault(id, BigDecimal.ZERO));
-            out.put(id, new Financials(b, r, p, s));
+            BigDecimal sa = viaAdv.getOrDefault(id, BigDecimal.ZERO);
+            BigDecimal sd = viaDirect.getOrDefault(id, BigDecimal.ZERO);
+            out.put(id, new Financials(b, r, p, sa, sd));
         }
         return out;
     }
 
     /** Snapshot for a project with no financial activity at all. */
     public static Financials empty() {
-        return new Financials(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO);
+        return new Financials(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO);
     }
 
     /** (project_id, amount) rows → map, skipping null keys and null sums. */
@@ -98,18 +99,28 @@ public class ProjectFinancialsSummaryService {
         private final BigDecimal received;
         private final BigDecimal payable;
         private final BigDecimal spent;
+        // The two sources `spent` is made of, kept separately so the Client
+        // Financials tab can show WHERE the cash went without re-querying.
+        // spentViaAdvances + spentViaBillPayments == spent, always.
+        private final BigDecimal spentViaAdvances;
+        private final BigDecimal spentViaBillPayments;
 
-        Financials(BigDecimal billed, BigDecimal received, BigDecimal payable, BigDecimal spent) {
+        Financials(BigDecimal billed, BigDecimal received, BigDecimal payable,
+                   BigDecimal spentViaAdvances, BigDecimal spentViaBillPayments) {
             this.billed   = billed;
             this.received = received;
             this.payable  = payable;
-            this.spent    = spent;
+            this.spentViaAdvances     = spentViaAdvances;
+            this.spentViaBillPayments = spentViaBillPayments;
+            this.spent    = spentViaAdvances.add(spentViaBillPayments);
         }
 
         public BigDecimal getBilled()   { return billed; }
         public BigDecimal getReceived() { return received; }
         public BigDecimal getPayable()  { return payable; }
         public BigDecimal getSpent()    { return spent; }
+        public BigDecimal getSpentViaAdvances()     { return spentViaAdvances; }
+        public BigDecimal getSpentViaBillPayments() { return spentViaBillPayments; }
 
         /** Invoiced but not yet collected — clamped, advances can exceed billing. */
         public BigDecimal getPendingReceipts() { return billed.subtract(received).max(BigDecimal.ZERO); }

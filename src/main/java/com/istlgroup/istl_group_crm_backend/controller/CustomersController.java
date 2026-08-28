@@ -1,6 +1,9 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.service.ClientFinancialsService;
 import com.istlgroup.istl_group_crm_backend.service.CustomersService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.*;
 import lombok.RequiredArgsConstructor;
@@ -20,7 +23,8 @@ import java.util.Map;
 //@CrossOrigin(origins = "${cros.allowed-origins}")
 public class CustomersController {
     
-    private final CustomersService customersService;
+    private final CustomersService        customersService;
+    private final ClientFinancialsService clientFinancialsService;
     
     /**
      * Get all customers
@@ -32,8 +36,8 @@ public class CustomersController {
             @RequestParam(required = false) String subGroupName,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         
         Map<String, Object> response = new HashMap<>();
         try {
@@ -67,8 +71,8 @@ public class CustomersController {
     public ResponseEntity<Map<String, Object>> getCustomersByGroup(
             @RequestParam String groupName,
             @RequestParam(required = false) String subGroupName,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         
         Map<String, Object> response = new HashMap<>();
         try {
@@ -95,8 +99,8 @@ public class CustomersController {
     @PostMapping("/filter")
     public ResponseEntity<Map<String, Object>> filterCustomers(
             @RequestBody CustomerFilterRequestWrapper filterRequest,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         
         Map<String, Object> response = new HashMap<>();
         try {
@@ -130,8 +134,8 @@ public class CustomersController {
     @GetMapping("/{id}")
     public ResponseEntity<Map<String, Object>> getCustomerById(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             CustomerWrapper customer = customersService.getCustomerById(id, userId, userRole);
             
@@ -155,7 +159,7 @@ public class CustomersController {
     @PostMapping("/create")
     public ResponseEntity<Map<String, Object>> createCustomer(
             @RequestBody CustomerRequestWrapper requestWrapper,
-            @RequestHeader("User-Id") Long userId) {
+            @ActingUserId Long userId) {
         try {
             CustomerWrapper customer = customersService.createCustomer(requestWrapper, userId);
             
@@ -181,8 +185,8 @@ public class CustomersController {
     public ResponseEntity<Map<String, Object>> updateCustomer(
             @PathVariable Long id,
             @RequestBody CustomerRequestWrapper requestWrapper,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             CustomerWrapper customer = customersService.updateCustomer(id, requestWrapper, userId, userRole);
             
@@ -207,8 +211,8 @@ public class CustomersController {
     @DeleteMapping("/delete/{id}")
     public ResponseEntity<Map<String, Object>> deleteCustomer(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             customersService.deleteCustomer(id, userId, userRole);
             
@@ -232,8 +236,8 @@ public class CustomersController {
     @GetMapping("/{id}/overview")
     public ResponseEntity<Map<String, Object>> getCustomerOverview(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> overview = customersService.getCustomerOverview(id);
             Map<String, Object> response = new HashMap<>();
@@ -245,6 +249,38 @@ public class CustomersController {
             errorResponse.put("success", false);
             errorResponse.put("message", e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
+        }
+    }
+
+    /**
+     * Client Financials roll-up: money in / money out across every project this
+     * client has, computed LIVE from invoices / receipts / bills / payments.
+     *
+     * Distinct from /overview above, which totals the invoices and receipts
+     * carrying this customer_id directly. This one aggregates the PROJECTS, so
+     * its figures are the same ones each project's own dashboard shows and the
+     * two screens can be reconciled against each other line by line.
+     *
+     * GET /customers/{id}/financials
+     */
+    @GetMapping("/{id}/financials")
+    public ResponseEntity<Map<String, Object>> getClientFinancials(
+            @PathVariable Long id,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+        Map<String, Object> response = new HashMap<>();
+        try {
+            response.put("success", true);
+            response.put("data", clientFinancialsService.getClientFinancials(id));
+            return ResponseEntity.ok(response);
+        } catch (CustomException e) {
+            response.put("success", false);
+            response.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
+        } catch (Exception e) {
+            response.put("success", false);
+            response.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
         }
     }
 }

@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,8 +30,8 @@ public class FollowupsController {
      */
     @GetMapping("/all")
     public ResponseEntity<Map<String, Object>> getAllFollowups(
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             if (!"SUPERADMIN".equalsIgnoreCase(userRole) && !"ADMIN".equalsIgnoreCase(userRole)) {
                 Map<String, Object> errorResponse = new HashMap<>();
@@ -79,8 +81,8 @@ public class FollowupsController {
      */
     @GetMapping("/my-followups")
     public ResponseEntity<Map<String, Object>> getMyFollowups(
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestParam(value = "groupName",    required = false) String groupName,
             @RequestParam(value = "subGroupName", required = false) String subGroupName,
             @RequestParam(value = "status",       required = false) String status,
@@ -131,7 +133,7 @@ public class FollowupsController {
      */
     @PostMapping("/create")
     public ResponseEntity<Map<String, Object>> createFollowup(
-            @RequestHeader("User-Id") Long userId,
+            @ActingUserId Long userId,
             @RequestBody FollowupRequestWrapper request) {
         try {
             FollowupWrapper created = followupsService.createFollowup(request, userId);
@@ -161,7 +163,7 @@ public class FollowupsController {
     @PutMapping("/update/{followupId}")
     public ResponseEntity<Map<String, Object>> updateFollowup(
             @PathVariable Long followupId,
-            @RequestHeader("User-Id") Long userId,
+            @ActingUserId Long userId,
             @RequestBody FollowupRequestWrapper request) {
         try {
             FollowupWrapper updated = followupsService.updateFollowup(followupId, request, userId);
@@ -289,7 +291,7 @@ public class FollowupsController {
     @DeleteMapping("/delete/{followupId}")
     public ResponseEntity<Map<String, Object>> deleteFollowup(
             @PathVariable Long followupId,
-            @RequestHeader("User-Id") Long userId) {
+            @ActingUserId Long userId) {
         try {
             followupsService.deleteFollowup(followupId, userId);
 

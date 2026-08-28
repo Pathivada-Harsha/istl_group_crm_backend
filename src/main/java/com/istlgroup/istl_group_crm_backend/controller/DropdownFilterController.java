@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.DropdownGroupWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.DropdownProjectWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.DropdownSubGroupWrapper;
@@ -25,8 +27,8 @@ public class DropdownFilterController {
 
     @GetMapping("/groups")
     public ResponseEntity<List<DropdownGroupWrapper>> getAllGroups(
-            @RequestHeader(value = "User-Id",   required = false) Long   userId,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId Long   userId,
+            @ActingUserRole String userRole) {
 
         // Always return all groups regardless of project access.
         // Project-level access filtering is applied only at the /projects endpoint.
@@ -36,8 +38,8 @@ public class DropdownFilterController {
     @GetMapping("/subgroups")
     public ResponseEntity<List<DropdownSubGroupWrapper>> getSubGroups(
             @RequestParam String groupName,
-            @RequestHeader(value = "User-Id",   required = false) Long   userId,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId Long   userId,
+            @ActingUserRole String userRole) {
 
         // Always return all subgroups for the given group regardless of project access.
         // Project-level access filtering is applied only at the /projects endpoint.
@@ -48,16 +50,19 @@ public class DropdownFilterController {
     public ResponseEntity<List<DropdownProjectWrapper>> getProjects(
             @RequestParam String groupName,
             @RequestParam String subGroupName,
-            @RequestHeader(value = "User-Id",   required = false) Long   userId,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId Long   userId,
+            @ActingUserRole String userRole) {
 
         List<DropdownProjectWrapper> allProjects =
             filterService.getProjectsByGroupAndSubGroup(groupName, subGroupName);
 
-        // Admins and ACCOUNTS_* see all projects — no filtering
-        // Also treat missing headers as bypass (unauthenticated internal call)
-        if (userId == null || userRole == null || userRole.isBlank()
-                || projectAccessService.isBypassRole(userRole)) {
+        // Bypass roles (admin / ACCOUNTS_*) see every project.
+        //
+        // This used to also bypass when the identity headers were absent — "an
+        // unauthenticated internal call" — which meant any caller could see every
+        // project simply by not sending them. Identity now comes from the session and
+        // is never absent, so there is nothing left to bypass on.
+        if (projectAccessService.isBypassRole(userRole)) {
             return ResponseEntity.ok(allProjects);
         }
 
@@ -98,7 +103,7 @@ public class DropdownFilterController {
      * Returns the list of users the caller is allowed to assign a follow-up to,
      * scoped by role hierarchy AND team membership.
      *
-     * Required headers: User-Id, User-Role
+     * Acting identity comes from the session, not from any header.
      *
      * Rules (enforced in DropdownFilterService):
      *   SUPERADMIN / ADMIN  → all active users
@@ -107,9 +112,31 @@ public class DropdownFilterController {
      */
     @GetMapping("/leads-users")
     public ResponseEntity<List<LeadsUserWrapper>> getLeadsUsers(
-            @RequestHeader(value = "User-Id",   required = false) Long userId,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         return ResponseEntity.ok(filterService.getLeadsUsers(userId, userRole));
+    }
+
+    /**
+     * GET /filters/assignable-users
+     * ─────────────────────────────────────────────────────────────────────────
+     * The users the caller may assign a lead to, or attribute a lead action to.
+     * One rule, the reporting graph:
+     *   top-level role (hierarchy level 1–2) → all active users
+     *   everyone else                        → their reporting subtree
+     *                                          (themselves + all transitive reports)
+     *
+     * Acting identity and role both come from the session, never from a header —
+     * the same rule backs the write-side guard, so it must not be forgeable.
+     *
+     * Superseded /filters/leads-users for the Leads pickers; that endpoint stays
+     * on the old role-allow-list rule for its other consumers (Tasks, Expenses,
+     * Procurement, Proposals, Customers).
+     */
+    @GetMapping("/assignable-users")
+    public ResponseEntity<List<LeadsUserWrapper>> getAssignableUsers(
+            @ActingUserId Long userId) {
+        return ResponseEntity.ok(filterService.getAssignableUsers(userId));
     }
 
     /**
@@ -133,12 +160,12 @@ public class DropdownFilterController {
      * returned (any role). SUPERADMIN / ADMIN get everyone.
      * Deliberately separate from /leads-users so other dropdowns are unaffected.
      *
-     * Required headers: User-Id, User-Role
+     * Acting identity comes from the session, not from any header.
      */
     @GetMapping("/followup-assignees")
     public ResponseEntity<List<LeadsUserWrapper>> getFollowupAssignees(
-            @RequestHeader(value = "User-Id",   required = false) Long userId,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         return ResponseEntity.ok(filterService.getFollowupAssignees(userId, userRole));
     }
 

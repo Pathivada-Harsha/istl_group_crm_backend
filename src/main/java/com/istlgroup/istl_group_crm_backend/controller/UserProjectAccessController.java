@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
 import com.istlgroup.istl_group_crm_backend.entity.ProjectAccessEntity;
 import com.istlgroup.istl_group_crm_backend.service.ProjectAccessService;
 import lombok.RequiredArgsConstructor;
@@ -32,7 +33,7 @@ public class UserProjectAccessController {
     @GetMapping("/{userId}")
     public ResponseEntity<?> listAccessForUser(
             @PathVariable Long userId,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserRole String userRole) {
 
         if (!accessService.isAdmin(userRole)) {
             return ResponseEntity.status(403)

@@ -84,6 +84,10 @@ public class QuotationMapper {
                 .lineTotal(entity.getLineTotal())
                 .deliveryLeadTime(entity.getDeliveryLeadTime())
                 .make(entity.getMake())               // FIX: map make field
+                .bomLineId(entity.getBomLineId())
+                .bomItemId(entity.getBomItemId())
+                .variantId(entity.getVariantId())
+                .bomMatch(entity.getBomMatch())
                 .build();
     }
 }

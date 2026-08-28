@@ -14,6 +14,7 @@ import com.istlgroup.istl_group_crm_backend.repo.VendorRepository;
 import java.util.Optional;
 import com.istlgroup.istl_group_crm_backend.service.ProjectAccessService;
 import com.istlgroup.istl_group_crm_backend.util.RoleNormalizer;
+import com.istlgroup.istl_group_crm_backend.service.BomProcurementGuard.Violation;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -44,6 +45,36 @@ public class QuotationService {
     private final ProjectAccessService projectAccessService;
     private final RoleHierarchyRepo roleHierarchyRepo;
     private final VendorRepository vendorRepository;
+    private final BomProcurementGuard bomGuard;
+
+    /** A saved quotation plus any project-BOM warnings raised while saving it. */
+    public record QuotationSaveResult(QuotationEntity quotation, List<Violation> bomWarnings) {}
+
+    /**
+     * Resolve each quotation line against the project BOM, stamp the resulting link
+     * onto the line, and return the warnings.
+     *
+     * <p>Always WARN: a quotation records what a vendor sent, so an off-BOM item or a
+     * quantity above what remains is flagged but permitted. Hard enforcement happens at
+     * the purchase order, where money is committed.
+     */
+    private List<Violation> stampBomMatch(String projectUniqueId, List<QuotationItemEntity> items) {
+        if (items == null || items.isEmpty()) return List.of();
+
+        BomProcurementGuard.CheckResult r =
+                bomGuard.warn(projectUniqueId, BomProcurementGuard.fromQuotationItems(items));
+
+        for (int i = 0; i < items.size(); i++) {
+            QuotationItemEntity it = items.get(i);
+            int lineNo = it.getLineNo() != null ? it.getLineNo() : i + 1;
+            Long resolved = r.bomLineIdByLine().get(lineNo);
+            if (resolved != null) it.setBomLineId(resolved);
+            it.setBomMatch(r.matchByLine()
+                    .getOrDefault(lineNo, BomProcurementGuard.Match.NONE).name());
+        }
+        return r.violations();
+    }
+
     /**
      * Get quotations with role-based and project-based filtering
      */
@@ -158,6 +189,16 @@ public class QuotationService {
      */
     @Transactional
     public QuotationEntity createQuotation(QuotationEntity quotation, Long userId) {
+        return createQuotationChecked(quotation, userId).quotation();
+    }
+
+    /**
+     * Create quotation, returning any project-BOM warnings alongside the saved entity.
+     * Warnings never block the save (§4.3).
+     */
+    @Transactional
+    public QuotationSaveResult createQuotationChecked(QuotationEntity quotation, Long userId) {
+        List<Violation> bomWarnings = new ArrayList<>();
         try {
             log.info("Creating quotation for user: {}", userId);
             
@@ -262,6 +303,10 @@ public class QuotationService {
                              item.getQuotation() != null ? item.getQuotation().getId() : "NULL");
                 }
                 
+                // Project BOM check — WARN only (§4.3). Off-BOM items and over-quantities
+                // are flagged on the quotation but never prevent saving it.
+                bomWarnings.addAll(stampBomMatch(savedQuotation.getProjectId(), itemsToSave));
+
                 // Save all items
                 List<QuotationItemEntity> savedItems = quotationItemRepository.saveAll(itemsToSave);
                 log.info("Successfully saved {} items", savedItems.size());
@@ -270,10 +315,10 @@ public class QuotationService {
                 savedQuotation.setItems(savedItems);
             }
             
-            log.info("Quotation created successfully: {} (ID: {}) by user: {}", 
+            log.info("Quotation created successfully: {} (ID: {}) by user: {}",
                     savedQuotation.getQuoteNo(), savedQuotation.getId(), userId);
-            return savedQuotation;
-            
+            return new QuotationSaveResult(savedQuotation, bomWarnings);
+
         } catch (Exception e) {
             log.error("Error creating quotation: {}", e.getMessage(), e);
             throw new RuntimeException("Failed to create quotation: " + e.getMessage());
@@ -316,12 +361,25 @@ public class QuotationService {
     }
 
     /**
-     * Update quotation
+     * Update quotation.
+     *
+     * <p>Kept so existing callers (notably the link-po path) are untouched; BOM warnings
+     * are discarded here. Use {@link #updateQuotationChecked} to surface them.
      */
     @Transactional
     public QuotationEntity updateQuotation(Long id, QuotationEntity updatedQuotation) {
+        return updateQuotationChecked(id, updatedQuotation).quotation();
+    }
+
+    /**
+     * Update quotation, returning any project-BOM warnings alongside the saved entity.
+     * Warnings never block the save (§4.3).
+     */
+    @Transactional
+    public QuotationSaveResult updateQuotationChecked(Long id, QuotationEntity updatedQuotation) {
     log.info("🔄 Updating quotation ID: {}", id);
-    
+
+    List<Violation> bomWarnings = new ArrayList<>();
     QuotationEntity existing = getQuotationById(id);
     
     // Update basic fields
@@ -377,6 +435,16 @@ public class QuotationService {
             newItem.setTaxPercent(itemData.getTaxPercent() != null ? itemData.getTaxPercent() : BigDecimal.valueOf(18));
             newItem.setLineNo(i + 1);
             newItem.setCreatedAt(LocalDateTime.now());
+            // These were being dropped on every edit — the columns exist but were never
+            // copied, so editing a quotation silently blanked the unit and the make.
+            newItem.setUnit(itemData.getUnit());
+            newItem.setMake(itemData.getMake());
+            newItem.setDeliveryLeadTime(itemData.getDeliveryLeadTime());
+            // Project BOM linkage — must be copied here too, or the link vanishes the
+            // first time anyone edits the quotation.
+            newItem.setBomLineId(itemData.getBomLineId());
+            newItem.setBomItemId(itemData.getBomItemId());
+            newItem.setVariantId(itemData.getVariantId());
             
             // Calculate line total
             BigDecimal qty = newItem.getQuantity();
@@ -388,7 +456,12 @@ public class QuotationService {
             
             newItems.add(newItem);
         }
-        
+
+        // Project BOM check — WARN only. A quotation records what a vendor sent, so an
+        // off-BOM item or an over-quantity is flagged but never blocks the save; all hard
+        // enforcement happens at the PO, where money is committed.
+        bomWarnings.addAll(stampBomMatch(existing.getProjectId(), newItems));
+
         // Step 3: Save new items
         if (!newItems.isEmpty()) {
             log.info("💾 Saving {} new items", newItems.size());
@@ -406,8 +479,8 @@ public class QuotationService {
     // Save the updated quotation
     QuotationEntity saved = quotationRepository.save(existing);
     log.info("✅ Quotation {} updated successfully", saved.getQuoteNo());
-    
-    return saved;
+
+    return new QuotationSaveResult(saved, bomWarnings);
 }
     
     /**

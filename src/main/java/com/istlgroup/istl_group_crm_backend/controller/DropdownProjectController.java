@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.entity.DropdownProjectEntity;
 import com.istlgroup.istl_group_crm_backend.service.DropdownFilterService;
 import com.istlgroup.istl_group_crm_backend.service.DropdownProjectService;
@@ -30,14 +32,14 @@ public class DropdownProjectController {
             @RequestParam(required = false) String groupId,
             @RequestParam(required = false) String subGroupName,
             @RequestParam(required = false) String status,
-            @RequestHeader(value = "User-Id", required = false) Long userId,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
 
         // Per-user visibility (mirrors the Order Book list): bypass roles
         // (SUPERADMIN / ADMIN / ACCOUNTS_* / level ≤ 2) see all; everyone else sees
         // only projects granted to them (project_access) or that they created / are
-        // assigned to. Identity comes from the User-Id / User-Role headers the
-        // frontend already sends — same trust model as Order Book / Leads.
+        // assigned to. Identity comes from the authenticated session, not from the
+        // User-Id / User-Role headers the frontend still sends and the server ignores.
         List<Map<String, Object>> all = filterService.getAllActiveProjects(userId, userRole);
 
         return ResponseEntity.ok(all.stream()

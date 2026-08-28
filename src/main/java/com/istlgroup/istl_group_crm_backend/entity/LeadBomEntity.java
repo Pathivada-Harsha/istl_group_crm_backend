@@ -92,6 +92,16 @@ public class LeadBomEntity {
     @Column(name = "auto_qty")
     private Boolean autoQty = Boolean.TRUE;
 
+    // ── Provenance: which template version this line's basis was copied from ──
+    // The basis above is a SNAPSHOT, so correcting a template never reaches leads
+    // already seeded from it. Recording the version is what lets the BOM tab say
+    // "this was built from an older template" and offer to re-run the suggestion.
+    @Column(name = "source_template_id")
+    private Long sourceTemplateId;
+
+    @Column(name = "template_version")
+    private Integer templateVersion;
+
     // ── Audit ────────────────────────────────────────────────────────────────
     @Column(name = "created_by")
     private Long createdBy;

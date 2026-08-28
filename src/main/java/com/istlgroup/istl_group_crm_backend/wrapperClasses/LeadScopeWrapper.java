@@ -72,6 +72,17 @@ public class LeadScopeWrapper {
     }
 
     /**
+     * PUT /leads/{leadId}/capacity — the plant capacity every auto-sized BOM
+     * quantity is derived from. Its own endpoint so the BOM tab can commit the
+     * capacity the estimator typed there without carrying the whole lead form.
+     */
+    @Data
+    public static class CapacityRequest {
+        private String capacity;
+        private String capacityUnit;
+    }
+
+    /**
      * PUT /leads/{leadId}/scope/items — whole-list replace.
      * Lines absent from {@code items} are soft-deleted.
      */
@@ -106,6 +117,10 @@ public class LeadScopeWrapper {
         private String siteVisitField;
         private BigDecimal driverAttr;
         private Boolean autoQty;
+        // Which template version the basis above was copied from, so a lead can
+        // tell that its BOM predates the template it came from.
+        private Long sourceTemplateId;
+        private Integer templateVersion;
     }
 
     /** PUT /leads/{leadId}/bom — whole-list replace. */

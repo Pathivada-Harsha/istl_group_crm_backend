@@ -1,5 +1,8 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserService;
 import com.istlgroup.istl_group_crm_backend.entity.VendorEntity;
 import com.istlgroup.istl_group_crm_backend.entity.ProjectEntity;
 import com.istlgroup.istl_group_crm_backend.repo.ProjectRepository;
@@ -24,6 +27,7 @@ import java.util.Map;
 @Slf4j
 public class VendorController {
     
+    private final ActingUserService actingUserService;   // acting identity, from the session
     private final VendorService vendorService;
     private final ProjectAccessService projectAccessService;
     private final ProjectRepository projectRepository;
@@ -48,13 +52,12 @@ public class VendorController {
             @RequestParam(defaultValue = "10") int size,
             @RequestParam(defaultValue = "name") String sortBy,
             @RequestParam(defaultValue = "ASC") String sortDirection,
-            @RequestHeader("X-User-Id") Long userId,
-            @RequestHeader("X-User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             HttpServletRequest request
     ) {
         try {
             // Project access check — if a specific project is selected, verify user has access
-            // Project access check — guard against null/zero userId from missing headers
             if (userId != null && userId > 0
                     && projectId != null && !projectId.isBlank()
                     && !projectAccessService.canAccessProject(projectId, userId, userRole)) {
@@ -173,8 +176,8 @@ public class VendorController {
      */
     @GetMapping("/by-group-subgroup")
     public ResponseEntity<Map<String, Object>> getVendorsByGroupAndSubGroup(
-            @RequestHeader("X-User-Id") Long userId,
-            @RequestHeader("X-User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestParam(required = false) String groupName,
             @RequestParam(required = false) String subGroupName) {
         try {
@@ -234,22 +237,16 @@ public class VendorController {
     @PostMapping
     public ResponseEntity<?> createVendor(
             @RequestBody VendorEntity vendor,
-            @RequestHeader(value = "X-User-Id",   required = false) Long   xUserId,
-            @RequestHeader(value = "User-Id",      required = false) Long   userId,
-            @RequestHeader(value = "X-User-Role",  required = false) String xUserRole,
-            @RequestHeader(value = "User-Role",    required = false) String userRole
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole
     ) {
         try {
-            // Accept userId from either X-User-Id or User-Id header (frontend sends both)
-            Long resolvedUserId = (xUserId != null && xUserId > 0) ? xUserId
-                                : (userId  != null && userId  > 0) ? userId
-                                : null;
+            // The four-header dance this used to do (X-User-Id / User-Id / X-User-Role /
+            // User-Role, first non-null wins) is gone: identity is the session's, so
+            // there is exactly one id and it is never absent — a session that cannot be
+            // resolved never reaches this method, it is rejected as 401 upstream.
+            Long resolvedUserId = userId;
 
-            if (resolvedUserId == null) {
-                log.warn("createVendor called with no valid userId in headers");
-                return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                        .body(createErrorResponse("User identity could not be determined. Please log in again."));
-            }
 
             // Validate required fields
             if (vendor.getName() == null || vendor.getName().trim().isEmpty()) {
@@ -355,12 +352,10 @@ public class VendorController {
             @RequestParam(required = false) String searchTerm,
             @RequestParam(required = false) String createdAtFrom,
             @RequestParam(required = false) String createdAtTo,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId,
-            @RequestHeader(value = "X-User-Role", required = false) String userRole
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole
     ) {
         try {
-            if (userId == null) userId = 1L;
-            if (userRole == null) userRole = "USER";
             
             VendorService.VendorStats stats = vendorService.getStatistics(
                     groupName, subGroupName, projectId, status, category, searchTerm,
@@ -376,40 +371,16 @@ public class VendorController {
     
     // Helper methods
     
+    // Acting identity, from the authenticated session. These used to read X-User-Id /
+    // X-User-Role off the request, so any caller could claim any id and any role. A
+    // request that cannot be attributed to a session user is now 401, never guessed.
+
     private Long getUserIdFromRequest(HttpServletRequest request) {
-        Object userIdAttr = request.getAttribute("userId");
-        if (userIdAttr != null) {
-            if (userIdAttr instanceof Long) return (Long) userIdAttr;
-            if (userIdAttr instanceof Integer) return ((Integer) userIdAttr).longValue();
-            if (userIdAttr instanceof String) return Long.parseLong((String) userIdAttr);
-        }
-        
-        String userIdHeader = request.getHeader("X-User-Id");
-        if (userIdHeader != null) {
-            try {
-                return Long.parseLong(userIdHeader);
-            } catch (NumberFormatException e) {
-                log.warn("Invalid userId in header: {}", userIdHeader);
-            }
-        }
-        
-        // No userId in request — log warning and return null (caller must handle)
-        log.warn("createVendor: no userId found in request attributes or X-User-Id header");
-        return null;
+        return actingUserService.requireUserId(request);
     }
-    
+
     private String getUserRoleFromRequest(HttpServletRequest request) {
-        Object userRoleAttr = request.getAttribute("userRole");
-        if (userRoleAttr != null) {
-            return userRoleAttr.toString();
-        }
-        
-        String userRoleHeader = request.getHeader("X-User-Role");
-        if (userRoleHeader != null) {
-            return userRoleHeader;
-        }
-        
-        return "USER"; // default role when header missing
+        return actingUserService.requireRole(request);
     }
     
     private Map<String, Object> createSuccessResponse(String message, Object data) {
@@ -437,7 +408,7 @@ public class VendorController {
      */
     @GetMapping("/dropdown")
     public ResponseEntity<List<Map<String, Object>>> getVendorsForDropdown(
-            @RequestHeader("X-User-Id") Long userId) {
+            @ActingUserId Long userId) {
         
         try {
             log.info("Fetching vendor dropdown for user: {}", userId);
@@ -457,7 +428,7 @@ public class VendorController {
     /*
     @GetMapping("/dropdown/with-history")
     public ResponseEntity<List<Map<String, Object>>> getVendorsWithHistory(
-            @RequestHeader("X-User-Id") Long userId,
+            @ActingUserId Long userId,
             @RequestParam(required = false) String projectId) {
         
         try {

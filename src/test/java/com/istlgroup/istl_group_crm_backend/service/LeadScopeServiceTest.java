@@ -2,6 +2,7 @@ package com.istlgroup.istl_group_crm_backend.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
@@ -132,6 +133,116 @@ class LeadScopeServiceTest {
 
         Map<String, Object> data = leadScopeService.saveBom(leadId, bom(lump), USER_ID, ROLE);
         assertEquals(0, num(data.get("totalAmount")).compareTo(new BigDecimal("75000.00")));
+    }
+
+    /**
+     * A line that could not be sized is saved blank and comes back blank. Coercing
+     * it to zero on save is what turned "this could not be calculated, here's why"
+     * into a quantity that reads as a real answer the moment the BOM was saved.
+     */
+    @Test
+    void anUnsizeableLineSurvivesTheRoundTripAsBlank() throws Exception {
+        BomLineRequest unsized = new BomLineRequest();
+        unsized.setItemName("PV Modules");
+        unsized.setBasis("PER_WATT_PEAK");
+        unsized.setUnitRate(new BigDecimal("10000"));
+        // No quantity: the make carries no wattage, so nothing could be derived.
+
+        leadScopeService.saveBom(leadId, bom(unsized), USER_ID, ROLE);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> line = ((List<Map<String, Object>>) leadScopeService.getBom(leadId).get("lines")).get(0);
+        assertNull(line.get("quantity"), "a blank quantity must not come back as zero");
+    }
+
+    /** Provenance is what lets a lead notice its BOM predates the template. */
+    @Test
+    void savedLinesKeepTheTemplateVersionTheyWereBuiltFrom() throws Exception {
+        BomLineRequest l = bomLine("Solar Module", "10", "5000");
+        l.setSourceTemplateId(4242L);
+        l.setTemplateVersion(7);
+
+        leadScopeService.saveBom(leadId, bom(l), USER_ID, ROLE);
+
+        Map<String, Object> data = leadScopeService.getBom(leadId);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> saved = ((List<Map<String, Object>>) data.get("lines")).get(0);
+        assertEquals(4242L, saved.get("sourceTemplateId"));
+        assertEquals(7, saved.get("templateVersion"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> status = (Map<String, Object>) data.get("templateStatus");
+        assertNotNull(status, "the tab needs a verdict on whether this BOM is current");
+        assertEquals(4242L, status.get("savedTemplateId"));
+    }
+
+    /**
+     * A hand-built or Excel-imported BOM carries no basis on any line, and must
+     * never be told it might be running on stale template rules — there is no
+     * template involved. `basisLineCount == 0` is the load-bearing test for that.
+     */
+    @Test
+    void aHandBuiltBomIsNeverNaggedAboutTemplates() throws Exception {
+        leadScopeService.saveBom(leadId, bom(bomLine("Some material", "3", "100")), USER_ID, ROLE);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> status = (Map<String, Object>) leadScopeService.getBom(leadId).get("templateStatus");
+        assertEquals(0, status.get("basisLineCount"));
+        assertEquals("NONE", status.get("reviewHint"));
+    }
+
+    /** A line saved with provenance is not a candidate for the "unknown" notice. */
+    @Test
+    void aStampedLineIsNotCountedAsUnstamped() throws Exception {
+        BomLineRequest l = bomLine("Solar Module", "10", "5000");
+        l.setBasis("PER_KW");
+        l.setBasisValue(new BigDecimal("1.7"));
+        l.setSourceTemplateId(4242L);
+        l.setTemplateVersion(7);
+        leadScopeService.saveBom(leadId, bom(l), USER_ID, ROLE);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> status = (Map<String, Object>) leadScopeService.getBom(leadId).get("templateStatus");
+        assertEquals(1, status.get("basisLineCount"));
+        assertEquals(0, status.get("unstampedLineCount"));
+    }
+
+    /**
+     * The population this feature exists for: a pre-migration line whose template
+     * rule carried no value, so it stored a 0 that was never really calculated.
+     * A stored zero counts as un-sized — otherwise it reads as a real answer.
+     */
+    @Test
+    void aStoredZeroFromAnUnconfiguredBasisCountsAsUnsized() throws Exception {
+        BomLineRequest broken = new BomLineRequest();
+        broken.setItemName("PV Modules");
+        broken.setBasis("PER_KW");
+        broken.setQuantity(BigDecimal.ZERO);   // what the old code wrote
+        broken.setBasisValue(null);            // …because the template had no factor
+
+        leadScopeService.saveBom(leadId, bom(broken), USER_ID, ROLE);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> status = (Map<String, Object>) leadScopeService.getBom(leadId).get("templateStatus");
+        assertEquals(1, status.get("basisLineCount"));
+        assertEquals(1, status.get("unstampedLineCount"));
+        assertEquals(1, status.get("unsizedLineCount"));
+    }
+
+    /** A zero from a line whose factor IS set is a real answer, not a failure. */
+    @Test
+    void aStoredZeroFromAConfiguredBasisIsNotUnsized() throws Exception {
+        BomLineRequest genuine = new BomLineRequest();
+        genuine.setItemName("Spare Fuses");
+        genuine.setBasis("FIXED");
+        genuine.setBasisValue(new BigDecimal("5"));
+        genuine.setQuantity(BigDecimal.ZERO);
+
+        leadScopeService.saveBom(leadId, bom(genuine), USER_ID, ROLE);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> status = (Map<String, Object>) leadScopeService.getBom(leadId).get("templateStatus");
+        assertEquals(0, status.get("unsizedLineCount"));
     }
 
     @Test

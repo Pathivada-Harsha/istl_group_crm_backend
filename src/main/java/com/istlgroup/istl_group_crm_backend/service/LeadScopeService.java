@@ -34,6 +34,7 @@ import com.istlgroup.istl_group_crm_backend.entity.SiteVisitEntity;
 import com.istlgroup.istl_group_crm_backend.repo.BomItemVariantRepo;
 import com.istlgroup.istl_group_crm_backend.repo.BomItemsMasterRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadAccessRepo;
+import com.istlgroup.istl_group_crm_backend.repo.TeamRepository;
 import com.istlgroup.istl_group_crm_backend.repo.LeadBomRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadBomTemplateItemRepo;
 import com.istlgroup.istl_group_crm_backend.repo.TemplateLineVariantRepo;
@@ -49,9 +50,11 @@ import com.istlgroup.istl_group_crm_backend.repo.ScopeActivitySuggestionRepo;
 import com.istlgroup.istl_group_crm_backend.repo.SiteVisitRepo;
 import com.istlgroup.istl_group_crm_backend.util.CapacityUtil;
 import com.istlgroup.istl_group_crm_backend.util.CapacityUtil.CapacityInfo;
+import com.istlgroup.istl_group_crm_backend.util.VariantAttributes;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.BomLineRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.BomSaveRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.BudgetCategoryRequest;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.CapacityRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.BudgetItemRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.ExtraLineRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.ExtrasSaveRequest;
@@ -111,6 +114,15 @@ public class LeadScopeService {
     @Autowired
     private LeadSuggestionEngine suggestionEngine;
 
+    /**
+     * Borrowed for one question only: "can this template line produce a quantity
+     * today?" — asked when deciding whether re-running the suggestion would
+     * actually fix a lead's blank line. Reusing the admin's verdict keeps that
+     * judgement in one place instead of a second copy that can drift.
+     */
+    @Autowired
+    private LeadAdminService leadAdminService;
+
     @Autowired
     private LeadsRepo leadsRepo;
 
@@ -119,6 +131,10 @@ public class LeadScopeService {
 
     @Autowired
     private LeadAccessRepo leadAccessRepo;
+
+    /** L3 team scoping — the same source LeadsService uses for list visibility. */
+    @Autowired
+    private TeamRepository teamRepository;
 
     @Autowired
     private ScopeActivitySuggestionRepo scopeActivitySuggestionRepo;
@@ -131,24 +147,52 @@ public class LeadScopeService {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Allowed when the caller is level ≤ 2, is the lead's creator/assignee, or
-     * holds an explicit lead_access grant. Throws otherwise.
+     * Who may edit a lead's scope / BOM / budget.
+     *
+     * <p>Mirrors the lead-visibility rule {@link LeadsService} already applies to
+     * the list — L1/L2 every lead, L3 their team's leads, L4 and below their own —
+     * so a lead you can open is a lead you can estimate. Before, this only let
+     * L1/L2 and the lead's creator/assignee through, which left an L3 manager
+     * looking at a team lead with every tab visible and every action rejected.
+     *
+     * <p>An explicit {@code lead_access} grant still works at any level.
      */
     private void authorize(Long leadId, Long userId, String userRole) throws CustomException {
         LeadsEntity lead = leadsRepo.findById(leadId)
                 .orElseThrow(() -> new CustomException("Lead not found"));
 
         int level = roleHierarchyService.getLevelOrder(userRole);
-        if (level <= 2) return;
+        if (level <= 2) return;                       // L1 / L2 — every lead
 
-        if (userId != null
-                && (userId.equals(lead.getCreatedBy()) || userId.equals(lead.getAssignedTo()))) {
-            return;
+        if (ownsLead(lead, userId)) return;           // own lead, any level
+
+        // L3 — anything belonging to someone they share a team with. Matches
+        // LeadsRepo.findByTeamMemberLeads, which is what put the lead on their
+        // list in the first place.
+        if (level == 3) {
+            List<Long> teamMemberIds = teamRepository.findTeamMemberIdsByUserId(userId);
+            if (teamMemberIds != null) {
+                for (Long memberId : teamMemberIds) {
+                    if (ownsLead(lead, memberId)) return;
+                }
+            }
         }
 
         if (leadAccessRepo.existsByLeadIdAndUserId(leadId, userId)) return;
 
         throw new CustomException("You are not authorized to access this lead's estimation");
+    }
+
+    /**
+     * Creator, assignee, or the BD executive the lead was routed to. The BD leg
+     * matters because round-robin sets only {@code bdAssignedTo} — without it the
+     * executive who owns the lead in practice cannot price it.
+     */
+    private boolean ownsLead(LeadsEntity lead, Long userId) {
+        if (userId == null) return false;
+        return userId.equals(lead.getCreatedBy())
+                || userId.equals(lead.getAssignedTo())
+                || userId.equals(lead.getBdAssignedTo());
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -471,6 +515,223 @@ public class LeadScopeService {
         CapacityInfo cap = lead == null ? null
                 : CapacityUtil.parse(lead.getCapacity(), lead.getCapacityUnit(), lead.getSubGroupName());
         data.put("capacityKw", cap != null && cap.isUsable() ? cap.scaleBase() : null);
+        // The raw stored capacity too, so the tab can tell "no capacity recorded"
+        // from "a capacity that doesn't parse" and can pre-fill the unit it saves back.
+        data.put("capacity", lead == null ? null : lead.getCapacity());
+        data.put("capacityUnit", lead == null ? null : lead.getCapacityUnit());
+        data.put("templateStatus", bomTemplateStatus(lead, lines));
+        return data;
+    }
+
+    /**
+     * Whether this lead's saved BOM was built from the template version that is
+     * live today. Each line snapshots its basis at suggestion time, so a template
+     * corrected afterwards leaves the lead on the old rules with nothing to show
+     * for it — this is what the BOM tab reads to say so and offer a re-run.
+     */
+    private Map<String, Object> bomTemplateStatus(LeadsEntity lead, List<LeadBomEntity> lines) {
+        String projectType = lead == null ? null : lead.getSubGroupName();
+        LeadScopeTemplateEntity tpl = projectType == null ? null
+                : leadScopeTemplateRepo.findFirstByProjectTypeAndIsActiveTrueAndDeletedAtIsNull(projectType).orElse(null);
+
+        // The OLDEST version among the saved lines: one stale line is enough for
+        // the BOM as a whole to be out of date.
+        Long savedTemplateId = null;
+        Integer savedVersion = null;
+        for (LeadBomEntity l : lines) {
+            if (l.getSourceTemplateId() == null) continue;
+            if (savedVersion == null || (l.getTemplateVersion() != null && l.getTemplateVersion() < savedVersion)) {
+                savedTemplateId = l.getSourceTemplateId();
+                savedVersion = l.getTemplateVersion();
+            }
+        }
+
+        Integer currentVersion = tpl == null ? null : (tpl.getVersion() == null ? 1 : tpl.getVersion());
+        boolean outdated = tpl != null && savedTemplateId != null
+                && (!savedTemplateId.equals(tpl.getId())
+                    || (savedVersion != null && currentVersion != null && savedVersion < currentVersion));
+
+        // Lines that came from a template at all, and how many of those predate
+        // provenance being recorded. A BOM with no basis anywhere was hand-built
+        // or imported and must never be nagged about templates.
+        int basisLineCount = 0, unstampedCount = 0, unsizedCount = 0;
+        List<LeadBomEntity> unstampedUnsized = new ArrayList<>();
+        List<LeadBomEntity> unstamped = new ArrayList<>();
+        for (LeadBomEntity l : lines) {
+            if (l.getBasis() == null || l.getBasis().isBlank()) continue;
+            basisLineCount++;
+            boolean unsized = isUnsized(l);
+            if (unsized) unsizedCount++;
+            if (l.getSourceTemplateId() != null) continue;
+            unstampedCount++;
+            unstamped.add(l);
+            if (unsized) unstampedUnsized.add(l);
+        }
+
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("hasTemplate", tpl != null);
+        m.put("templateName", tpl == null ? null : tpl.getName());
+        m.put("currentTemplateId", tpl == null ? null : tpl.getId());
+        m.put("currentTemplateVersion", currentVersion);
+        m.put("savedTemplateId", savedTemplateId);
+        m.put("savedTemplateVersion", savedVersion);
+        m.put("outdated", outdated);
+        m.put("basisLineCount", basisLineCount);
+        m.put("unstampedLineCount", unstampedCount);
+        m.put("unsizedLineCount", unsizedCount);
+
+        String provenance = tpl == null ? "NONE"
+                : basisLineCount == 0 ? "MANUAL"      // hand-built — never nagged
+                : outdated ? "OUTDATED"                // we KNOW it's stale; say the definite thing
+                : unstampedCount > 0 ? "UNKNOWN"
+                : "CURRENT";
+        m.put("provenance", provenance);
+
+        // "Unknown provenance" on its own is not worth saying — most such BOMs are
+        // perfectly current, and warning about all of them is crying wolf. It is
+        // only worth raising when re-running would actually change something, and
+        // worth raising LOUDLY only when it would fix a line that can't size today.
+        String reviewHint = "NONE";
+        List<Map<String, Object>> changedExamples = new ArrayList<>();
+        if ("UNKNOWN".equals(provenance)) {
+            List<LeadBomTemplateItemEntity> tplLines =
+                    leadBomTemplateItemRepo.findByTemplateIdAndDeletedAtIsNullOrderBySeqNoAscIdAsc(tpl.getId());
+            Map<Long, LeadBomTemplateItemEntity> byItemId = new LinkedHashMap<>();
+            Map<String, LeadBomTemplateItemEntity> byKey = new LinkedHashMap<>();
+            for (LeadBomTemplateItemEntity t : tplLines) {
+                if (t.getBomItemId() != null) byItemId.putIfAbsent(t.getBomItemId(), t);
+                String key = t.getMatchKey() != null && !t.getMatchKey().isBlank()
+                        ? t.getMatchKey() : suggestionEngine.normalize(t.getItemName());
+                byKey.putIfAbsent(key, t);
+            }
+
+            boolean changed = false, fixesUnsized = false;
+            // Unsized lines first, so the example we show is one the estimator can
+            // see is broken right now.
+            List<LeadBomEntity> ordered = new ArrayList<>(unstampedUnsized);
+            for (LeadBomEntity l : unstamped) if (!unstampedUnsized.contains(l)) ordered.add(l);
+
+            for (LeadBomEntity l : ordered) {
+                LeadBomTemplateItemEntity t = l.getBomItemId() == null ? null : byItemId.get(l.getBomItemId());
+                if (t == null) t = byKey.get(suggestionEngine.normalize(l.getItemName()));
+                if (t == null || !ruleDiffers(l, t)) continue; // a dropped item is a scope change, not a fix
+                changed = true;
+                boolean unsized = unstampedUnsized.contains(l);
+                if (unsized && leadAdminService.canProduceQuantity(t)) fixesUnsized = true;
+                if (changedExamples.size() < 3) {
+                    Map<String, Object> ex = new LinkedHashMap<>();
+                    ex.put("itemName", l.getItemName());
+                    ex.put("savedBasisLabel", basisDisplayLabel(l.getBasis()));
+                    ex.put("templateBasisLabel", basisDisplayLabel(t.getBasis()));
+                    ex.put("unsized", unsized);
+                    changedExamples.add(ex);
+                }
+            }
+            reviewHint = fixesUnsized ? "STRONG" : changed ? "SOFT" : "NONE";
+        }
+        m.put("reviewHint", reviewHint);
+        m.put("changedExamples", changedExamples);
+        return m;
+    }
+
+    /**
+     * A line that cannot produce a quantity from its OWN saved snapshot, and shows
+     * nothing for it. Blank-or-zero, because lines saved before blank quantities
+     * were storable hold a 0 that was never really calculated.
+     *
+     * Deliberately excludes missing capacity and make availability: those are the
+     * lead's own inputs, they already have their own notice and per-row reason, and
+     * counting them here would nag every capacity-less lead about the template.
+     */
+    private static boolean isUnsized(LeadBomEntity l) {
+        if (Boolean.FALSE.equals(l.getAutoQty())) return false;
+        BigDecimal q = l.getQuantity();
+        if (q != null && q.signum() != 0) return false;
+        switch (l.getBasis() == null ? "" : l.getBasis()) {
+            case LeadBomTemplateItemEntity.BASIS_FIXED:
+            case LeadBomTemplateItemEntity.BASIS_PER_KW:
+            case LeadBomTemplateItemEntity.BASIS_PER_MODULE:
+            case LeadBomTemplateItemEntity.BASIS_PER_INVERTER:
+                return !isPositive(l.getBasisValue());
+            case LeadBomTemplateItemEntity.BASIS_PER_STEP:
+                return !isPositive(l.getStepValue());
+            case LeadBomTemplateItemEntity.BASIS_FROM_SITE_VISIT:
+                return l.getSiteVisitField() == null || l.getSiteVisitField().isBlank();
+            case LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK:
+            case LeadBomTemplateItemEntity.BASIS_PER_INVERTER_KW:
+                return !isPositive(l.getDriverAttr());
+            default:
+                return false;
+        }
+    }
+
+    /** Whether the template's rule for this material has moved since the lead snapshotted it. */
+    private static boolean ruleDiffers(LeadBomEntity l, LeadBomTemplateItemEntity t) {
+        return !java.util.Objects.equals(l.getBasis(), t.getBasis())
+                || cmp(l.getBasisValue(), t.getBasisValue()) != 0
+                || cmp(l.getStepValue(), t.getStepValue()) != 0
+                || !java.util.Objects.equals(blankToNull(l.getSiteVisitField()), blankToNull(t.getSiteVisitField()));
+    }
+
+    /** Null-safe numeric comparison — 1.70 and 1.7 are the same rule, not a change. */
+    private static int cmp(BigDecimal a, BigDecimal b) {
+        if (a == null && b == null) return 0;
+        if (a == null) return -1;
+        if (b == null) return 1;
+        return a.compareTo(b);
+    }
+
+    private static String blankToNull(String s) { return s == null || s.isBlank() ? null : s.trim(); }
+
+    private static boolean isPositive(BigDecimal v) { return v != null && v.signum() > 0; }
+
+    /** Matches the labels in the template admin's basis dropdown. */
+    private static String basisDisplayLabel(String basis) {
+        switch (basis == null ? "" : basis) {
+            case LeadBomTemplateItemEntity.BASIS_FIXED:           return "Fixed quantity";
+            case LeadBomTemplateItemEntity.BASIS_PER_KW:          return "Per kW";
+            case LeadBomTemplateItemEntity.BASIS_PER_STEP:        return "Per step";
+            case LeadBomTemplateItemEntity.BASIS_FROM_SITE_VISIT: return "From site visit";
+            case LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK:   return "Module count (from Wp)";
+            case LeadBomTemplateItemEntity.BASIS_PER_INVERTER_KW: return "Inverter count (from kW)";
+            case LeadBomTemplateItemEntity.BASIS_PER_MODULE:      return "Per module count";
+            case LeadBomTemplateItemEntity.BASIS_PER_INVERTER:    return "Per inverter count";
+            default: return basis;
+        }
+    }
+
+    /**
+     * Set the plant capacity from the BOM tab. Capacity is what every auto-sized
+     * quantity is derived from, so the tab that shows those quantities is also
+     * where an estimator discovers it is missing — this lets them fix it there
+     * instead of leaving to the lead form and losing their place.
+     */
+    public Map<String, Object> updateCapacity(Long leadId, CapacityRequest body, Long userId, String userRole)
+            throws CustomException {
+        authorize(leadId, userId, userRole);
+        LeadsEntity lead = leadsRepo.findById(leadId)
+                .orElseThrow(() -> new CustomException("Lead not found"));
+
+        String value = body == null || body.getCapacity() == null ? null : body.getCapacity().trim();
+        if (value == null || value.isBlank()) throw new CustomException("Enter a capacity");
+
+        String unit = body.getCapacityUnit() == null || body.getCapacityUnit().isBlank()
+                ? (lead.getCapacityUnit() == null || lead.getCapacityUnit().isBlank() ? "kW" : lead.getCapacityUnit())
+                : body.getCapacityUnit().trim();
+
+        CapacityInfo cap = CapacityUtil.parse(value, unit, lead.getSubGroupName());
+        if (!cap.isUsable()) {
+            throw new CustomException("\"" + value + " " + unit + "\" is not a capacity the BOM can size from.");
+        }
+
+        lead.setCapacity(value);
+        lead.setCapacityUnit(unit);
+        leadsRepo.save(lead);
+
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("capacity", value);
+        data.put("capacityUnit", unit);
+        data.put("capacityKw", cap.scaleBase());
         return data;
     }
 
@@ -533,14 +794,19 @@ public class LeadScopeService {
             line.setSiteVisitField(r.getSiteVisitField());
             line.setDriverAttr(r.getDriverAttr());
             line.setAutoQty(r.getAutoQty() == null ? Boolean.TRUE : r.getAutoQty());
+            line.setSourceTemplateId(r.getSourceTemplateId());
+            line.setTemplateVersion(r.getTemplateVersion());
 
-            BigDecimal qty = r.getQuantity() != null ? r.getQuantity() : BigDecimal.ZERO;
+            // A null quantity is stored as null, not coerced to zero: a line that
+            // could not be sized has to come back blank on reload, or the reason
+            // shown at suggestion time turns into a zero that reads as an answer.
+            BigDecimal qty = r.getQuantity();
             BigDecimal rate = r.getUnitRate() != null ? r.getUnitRate() : BigDecimal.ZERO;
             line.setQuantity(qty);
             line.setUnitRate(rate);
             line.setAmount(r.getAmount() != null
                     ? r.getAmount().setScale(2, RoundingMode.HALF_UP)
-                    : qty.multiply(rate).setScale(2, RoundingMode.HALF_UP));
+                    : nz(qty).multiply(rate).setScale(2, RoundingMode.HALF_UP));
             line.setNotes(r.getNotes());
 
             keptIds.add(leadBomRepo.save(line).getId());
@@ -859,6 +1125,11 @@ public class LeadScopeService {
         data.put("projectType", projectType);
         data.put("targetCapacity", displayCapacity(cap));
         data.put("capacityKw", cap.isUsable() ? cap.scaleBase() : null); // resolved kW for live recompute
+        // Stamped onto every saved line so the lead can later tell that its BOM
+        // predates the template it was built from.
+        data.put("templateId", activeTemplate == null ? null : activeTemplate.getId());
+        data.put("templateVersion", activeTemplate == null ? null
+                : (activeTemplate.getVersion() == null ? 1 : activeTemplate.getVersion()));
         data.put("scopeItems", scopeItems);
         data.put("bomLines", bomLines);
         data.put("warnings", warnings);
@@ -991,6 +1262,9 @@ public class LeadScopeService {
         return cap.value().stripTrailingZeros().toPlainString() + (cap.unit() != null ? " " + cap.unit() : "");
     }
 
+    /** Zero-for-null, used where a blank quantity still has to roll into a total. */
+    private static BigDecimal nz(BigDecimal v) { return v == null ? BigDecimal.ZERO : v; }
+
     // ─────────────────────────────────────────────────────────────────────────
     // MAPPERS (exact JSON shapes the frontend expects)
     // ─────────────────────────────────────────────────────────────────────────
@@ -1054,7 +1328,22 @@ public class LeadScopeService {
         m.put("siteVisitField", l.getSiteVisitField());
         m.put("driverAttr", l.getDriverAttr());
         m.put("autoQty", l.getAutoQty() == null ? Boolean.TRUE : l.getAutoQty());
+        m.put("sourceTemplateId", l.getSourceTemplateId());
+        m.put("templateVersion", l.getTemplateVersion());
+        putDriverAttrNaming(m, l.getBasis(), l.getBomItemId());
         return m;
+    }
+
+    /**
+     * The catalogue attribute this line's basis reads off the selected make, named
+     * the way the catalogue names it. Without this a line that can't size can only
+     * say "the make is missing something"; with it, it can say which something.
+     */
+    private void putDriverAttrNaming(Map<String, Object> line, String basis, Long bomItemId) {
+        String key = VariantAttributes.attrKeyForBasis(basis);
+        if (key == null) return;
+        line.put("driverAttrKey", key);
+        line.put("driverAttrLabel", VariantAttributes.labelForKey(variantSchemaJson(bomItemId), key));
     }
 
     /**
@@ -1071,6 +1360,9 @@ public class LeadScopeService {
         int n = Math.min(bomLines.size(), templateBom.size());
         for (int i = 0; i < n; i++) {
             LeadBomTemplateItemEntity tl = templateBom.get(i);
+            // Named even when nothing is attached — a driver line with no catalogue
+            // item still has to be able to say what it was looking for.
+            putDriverAttrNaming(bomLines.get(i), tl.getBasis(), tl.getBomItemId());
             if (tl.getBomItemId() == null || tl.getId() == null) continue;
 
             List<BomItemVariantEntity> active =
@@ -1172,34 +1464,21 @@ public class LeadScopeService {
         return active.get(0).getId();
     }
 
+    // These three delegate to VariantAttributes so the suggestion path, template
+    // validation and the catalogue health check all agree on when a make carries
+    // the number a basis needs.
     private String attrKeyForBasis(String basis) {
-        if (LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK.equals(basis)) return "wattage";
-        if (LeadBomTemplateItemEntity.BASIS_PER_INVERTER_KW.equals(basis)) return "capacity";
-        return null;
+        return VariantAttributes.attrKeyForBasis(basis);
     }
 
     /** Parse a variant's attribute_values JSON to a flat map; null on blank/malformed. */
     private Map<String, Object> parseAttrs(String json) {
-        if (json == null || json.isBlank()) return null;
-        try {
-            return objectMapper.readValue(json, new TypeReference<Map<String, Object>>() {});
-        } catch (Exception e) {
-            return null;
-        }
+        return VariantAttributes.parseValues(json);
     }
 
     /** Numeric value of one attribute key on a variant (e.g. wattage/capacity); null if absent/non-numeric. */
     private BigDecimal numericAttr(BomItemVariantEntity v, String key) {
-        if (v == null || key == null) return null;
-        Map<String, Object> attrs = parseAttrs(v.getAttributeValues());
-        if (attrs == null) return null;
-        Object raw = attrs.get(key);
-        if (raw == null) return null;
-        try {
-            return new BigDecimal(String.valueOf(raw).trim());
-        } catch (Exception e) {
-            return null;
-        }
+        return v == null ? null : VariantAttributes.numeric(v.getAttributeValues(), key);
     }
 
     private Map<String, Object> extraLineMap(LeadBudgetExtraEntity e) {

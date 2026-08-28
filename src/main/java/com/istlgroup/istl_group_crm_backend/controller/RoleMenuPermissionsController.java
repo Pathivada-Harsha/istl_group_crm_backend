@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.entity.MenuItemsEntity;
 import com.istlgroup.istl_group_crm_backend.service.RoleMenuPermissionsService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.MenuPermissionWrapper;
@@ -46,7 +47,7 @@ public class RoleMenuPermissionsController {
     @PostMapping("/addMenuItem")
     public ResponseEntity<Map<String, Object>> addMenuItem(
             @RequestBody Map<String, String> body,
-            @RequestHeader("User-Id") Long creatorUserId) {
+            @ActingUserId Long creatorUserId) {
 
         String name = body.get("name");
         if (name == null || name.trim().isEmpty()) {

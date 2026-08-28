@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.service.InvTransactionService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.InvTransactionWrapper;
 import lombok.RequiredArgsConstructor;
@@ -44,7 +45,7 @@ public class InvTransactionController {
     @PostMapping
     public ResponseEntity<?> create(
             @RequestBody InvTransactionWrapper body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ResponseEntity.ok(txnService.create(body, userId));
         } catch (IllegalArgumentException e) {
@@ -72,7 +73,7 @@ public class InvTransactionController {
     @DeleteMapping("/{id}")
     public ResponseEntity<?> delete(
             @PathVariable Long id,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ResponseEntity.ok(txnService.deleteTransaction(id, userId));
         } catch (IllegalArgumentException e) {
@@ -104,7 +105,7 @@ public class InvTransactionController {
     @PostMapping("/batch-inward")
     public ResponseEntity<?> batchInward(
             @RequestBody InvTransactionWrapper body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             body.setType("INWARD");
             return ResponseEntity.ok(txnService.createBatchInward(body, userId));
@@ -143,7 +144,7 @@ public class InvTransactionController {
     @PostMapping("/batch-outward")
     public ResponseEntity<?> batchOutward(
             @RequestBody InvTransactionWrapper body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             body.setType("OUTWARD");
             return ResponseEntity.ok(txnService.createBatch(body, userId));

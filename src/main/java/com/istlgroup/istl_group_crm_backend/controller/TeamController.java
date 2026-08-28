@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,7 +48,7 @@ public class TeamController {
     // ── POST /teams/create ────────────────────────────────────────────────────
     @PostMapping("/create")
     public ResponseEntity<?> createTeam(
-            @RequestHeader("User-Id") Long userId,
+            @ActingUserId Long userId,
             @RequestBody TeamRequestWrapper request) {
         try {
             TeamResponseWrapper created = teamService.createTeam(request, userId);

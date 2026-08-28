@@ -40,13 +40,11 @@ public class DropdownProjectService {
         project.setSubGroupName(subGroup.getSubGroupName());
         project.setCreatedBy(userId);
 
-        if (project.getProjectUniqueId() == null || project.getProjectUniqueId().isEmpty()) {
-            String generatedCode = generateProjectCode();
-            project.setProjectUniqueId(generatedCode);
-        }
-
         // Projects are now standalone — no auto-customer creation.
         // Customers are created directly; projects come from Order Books.
+        if (project.getProjectUniqueId() == null || project.getProjectUniqueId().isEmpty()) {
+            return saveWithGeneratedCode(project);
+        }
         return projectRepository.save(project);
     }
 
@@ -125,11 +123,39 @@ public class DropdownProjectService {
         }
     }
 
-    private String generateProjectCode() {
-        String year = String.valueOf(LocalDateTime.now().getYear());
-        long countInYear = projectRepository.countByProjectUniqueIdStartingWith("PROJ-" + year);
-        long nextSequence = countInYear + 1;
-        return String.format("PROJ-%s-%04d", year, nextSequence);
+    /**
+     * Saves the project, then stamps its code from the row's own auto-increment id
+     * and saves again — the same two-step {@code OrderBookService.createOrderBook}
+     * uses for {@code orderBookNo}.
+     *
+     * <p>Replaces a count-based sequence ({@code count("PROJ-yyyy") + 1}), which
+     * <b>reissued codes</b>: delete a project and the count drops, so the next one
+     * minted the code that was just freed. That is not merely cosmetic — the freed
+     * code is still referenced by the deleted project's order book, and
+     * {@code order_book.uq_orderbook_project} then rejects the new link, marking the
+     * transaction rollback-only and failing the whole order book save with
+     * "Transaction silently rolled back". An identity column never repeats.
+     *
+     * <p>Codes are now globally sequential rather than restarting each year, so the
+     * year is a label rather than a counter — the same trade already made for
+     * {@code ORD-yyyy-NNNNNN}. Existing codes are untouched.
+     */
+    private DropdownProjectEntity saveWithGeneratedCode(DropdownProjectEntity project) {
+        // Placeholder first: project_unique_id is NOT NULL and unique, and the id
+        // only exists after the insert.
+        project.setProjectUniqueId("TEMP-" + java.util.UUID.randomUUID().toString().substring(0, 8));
+        DropdownProjectEntity saved = projectRepository.save(project);
+        saved.setProjectUniqueId(String.format("PROJ-%d-%04d",
+            LocalDateTime.now().getYear(), saved.getId()));
+        // saveAndFlush, NOT save. project_access, project_advances and
+        // project_expenses carry a foreign key onto projects.project_unique_id (the
+        // rest key off projects.id and are unaffected), and grantAccess inserts into
+        // project_access immediately after this returns. A plain save() only queues
+        // the UPDATE, and Hibernate's auto-flush does not run it: auto-flush fires
+        // before a query only when the query's tables overlap the pending changes,
+        // and that insert touches project_access, not projects. The row would still
+        // read TEMP-… and the child insert would fail the foreign key.
+        return projectRepository.saveAndFlush(saved);
     }
 
     /**
@@ -199,9 +225,8 @@ public class DropdownProjectService {
             .findBysubGroupName(orderBook.getSubGroupName())
             .orElseThrow(() -> new RuntimeException("Sub group not found: " + orderBook.getSubGroupName()));
         projectEntity.setSubGroup(subGroup);
-        projectEntity.setProjectUniqueId(generateProjectCode());
 
-        return projectRepository.save(projectEntity);
+        return saveWithGeneratedCode(projectEntity);
     }
 
     /**

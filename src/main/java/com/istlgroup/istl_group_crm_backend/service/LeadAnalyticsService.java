@@ -18,7 +18,7 @@ public class LeadAnalyticsService {
 
     @Autowired private LeadAnalyticsRepo repo;
     @Autowired private com.istlgroup.istl_group_crm_backend.service.RoleHierarchyService roleHierarchyService;
-    @Autowired private com.istlgroup.istl_group_crm_backend.repo.TeamRepository teamRepository;
+    @Autowired private UserScopeService userScopeService;   // canonical reporting-subtree scoping (C1)
 
     // Priority weights for the weighted conversion rate. Business-tunable: a High
     // lead converting is worth 3x a Low lead converting. Change here if priorities
@@ -215,21 +215,25 @@ public class LeadAnalyticsService {
 
     // ── helpers ───────────────────────────────────────────────────────────────
     // ═════════════════════════════════════════════════════════════════════════
-    //  TEAM LEAD PERFORMANCE — per-person breakdown, scoped exactly like the
-    //  Leads-Enquiry page: L1/L2 see everyone, L3 see their team, L4+ see self.
+    //  TEAM LEAD PERFORMANCE — per-person breakdown, scoped by the reporting
+    //  graph, exactly like the Leads "Assign To" picker:
+    //    top-level role (hierarchy level 1–2) → every active user
+    //    everyone else                        → their reporting subtree
+    //                                           (themselves + all transitive reports)
+    //
+    //  This replaces the old level-band scoping (L1/L2 → all, L3 → the free-text
+    //  team lookup, L4+ → self). There is no "level 3" special case any more: a
+    //  manager at ANY level sees everyone beneath them, and a user with no reports
+    //  sees only themselves. Rows, metrics and columns are unchanged — only the
+    //  set of people included moved.
     // ═════════════════════════════════════════════════════════════════════════
     public Map<String, Object> buildTeamLeadPerformance(Long userId, String userRole) {
         int level = roleHierarchyService.getLevelOrder(userRole);
-        List<Long> allowedIds;
-        if (level <= 2) {
-            allowedIds = repo.findAllActiveUserIds();
-        } else if (level == 3) {
-            List<Long> members = teamRepository.findTeamMemberIdsByUserId(userId);
-            allowedIds = (members == null || members.isEmpty())
-                ? Collections.singletonList(userId) : members;
-        } else {
-            allowedIds = Collections.singletonList(userId);
-        }
+        boolean topLevel = userScopeService.isTopLevel(userId);
+
+        List<Long> allowedIds = topLevel
+            ? repo.findAllActiveUserIds()
+            : new ArrayList<>(userScopeService.getActionableUserIds(userId));
 
         List<Map<String, Object>> rows = new ArrayList<>();
         if (!allowedIds.isEmpty()) {
@@ -249,7 +253,10 @@ public class LeadAnalyticsService {
             }
         }
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("scope", level <= 2 ? "all" : (level == 3 ? "team" : "self"));
+        // Same three values the frontend's SCOPE_LABEL already understands, but now
+        // derived from the subtree's shape rather than a hierarchy level: a manager
+        // with reports is "team", a leaf user is "self".
+        out.put("scope", topLevel ? "all" : (allowedIds.size() > 1 ? "team" : "self"));
         out.put("levelOrder", level);
         out.put("members", rows);
         return out;

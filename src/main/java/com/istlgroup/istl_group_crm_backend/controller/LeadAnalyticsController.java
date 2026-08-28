@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.HashMap;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,8 +26,8 @@ public class LeadAnalyticsController {
             @RequestParam(value = "range", required = false, defaultValue = "last_12_months") String range,
             @RequestParam(value = "from", required = false) String from,
             @RequestParam(value = "to", required = false) String to,
-            @RequestHeader(value = "User-Id", required = false) Long userId,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> resp = new HashMap<>();
             resp.put("success", true);
@@ -41,8 +43,8 @@ public class LeadAnalyticsController {
 
     @GetMapping("/team-performance")
     public ResponseEntity<Map<String, Object>> teamPerformance(
-            @RequestHeader(value = "User-Id") Long userId,
-            @RequestHeader(value = "User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> resp = new HashMap<>();
             resp.put("success", true);

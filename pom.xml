@@ -157,6 +157,75 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>
 
+            <!--
+                Resolves each dependency's jar path into a property named
+                "<groupId>:<artifactId>:jar", so surefire below can point
+                -javaagent at the Mockito jar without hardcoding a version or a
+                path into ~/.m2. Binds to the initialize phase by default.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>resolve-agent-paths</id>
+                        <goals>
+                            <goal>properties</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+                Load Mockito as a JVM agent instead of letting it attach itself.
+
+                Mockito's inline mock maker needs an instrumentation agent. With no
+                configuration it SELF-ATTACHES at runtime, and prints:
+
+                  "Mockito is currently self-attaching to enable the inline-mock-maker.
+                   This will no longer work in future releases of the JDK."
+
+                Self-attach is already disabled by default on modern JDKs, so Mockito
+                falls back to spawning an EXTERNAL process to do the attach. When that
+                spawn fails — on this machine, under memory/paging pressure — every
+                mock-based test dies at once with:
+
+                  MockitoInitializationException: Could not initialize inline Byte Buddy
+                  mock maker ... Could not self-attach to current VM using external process
+
+                which reads like the test suite is broken when nothing is wrong with it.
+                Passing the agent up front removes the attach step entirely: no spawn, no
+                dependence on free memory, and no deprecation warning.
+
+                -Xshare:off avoids a CDS-vs-instrumentation warning on some JDK builds.
+
+                NOTE: passing -DargLine=... on the command line REPLACES this value and
+                takes the agent with it. Use -Dsurefire.argLine or add to MAVEN_OPTS
+                instead if you need to cap heap for a single run.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!--
+                        The heap caps are not tuning, they are a fix. An uncapped forked
+                        test JVM defaults its max heap to 1/4 of physical RAM and commits
+                        it up front; on this machine that commit fails against the Windows
+                        paging file and surefire reports only:
+
+                          "The forked VM terminated without properly saying goodbye"
+                          os::commit_memory(... 547356672 ...) failed;
+                          error='The paging file is too small for this operation to complete'
+
+                        which looks like a crashed test run rather than a machine that
+                        cannot hand out the memory. The whole 325-test suite fits well
+                        inside these numbers, so capping them makes "mvnw clean install"
+                        work without every developer having to remember MAVEN_OPTS.
+                    -->
+                    <argLine>-javaagent:${org.mockito:mockito-core:jar} -Xshare:off -Xmx768m -XX:MaxMetaspaceSize=320m</argLine>
+                </configuration>
+            </plugin>
+
         </plugins>
     </build>
 

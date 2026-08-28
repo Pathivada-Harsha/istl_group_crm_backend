@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.util.RoleNormalizer;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,11 +45,16 @@ public class RoleHierarchyController {
     }
 
     // POST /role-hierarchy/save  (create or update by roleName PK)
+    //
+    // callerRole is the SESSION role, not a header. These three endpoints rewrite the
+    // permission model itself, and until this changed any logged-in user could reach
+    // them by sending "User-Role: SUPERADMIN" — which Pages/NewRolePermissions.js did
+    // unconditionally, so the gate was open to everyone who could load that page.
     @PostMapping("/save")
     public ResponseEntity<?> save(
-            @RequestHeader("User-Role") String callerRole,
+            @ActingUserRole String callerRole,
             @RequestBody RoleHierarchyEntity entity) {
-        if (!"SUPERADMIN".equalsIgnoreCase(callerRole)) {
+        if (!"SUPERADMIN".equals(RoleNormalizer.normalize(callerRole))) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
                     .body(Map.of("message", "Only SUPERADMIN can modify role hierarchy"));
         }
@@ -64,9 +71,9 @@ public class RoleHierarchyController {
     @PutMapping("/{roleName}")
     public ResponseEntity<?> update(
             @PathVariable String roleName,
-            @RequestHeader("User-Role") String callerRole,
+            @ActingUserRole String callerRole,
             @RequestBody RoleHierarchyEntity entity) {
-        if (!"SUPERADMIN".equalsIgnoreCase(callerRole)) {
+        if (!"SUPERADMIN".equals(RoleNormalizer.normalize(callerRole))) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
                     .body(Map.of("message", "Only SUPERADMIN can modify role hierarchy"));
         }
@@ -82,8 +89,8 @@ public class RoleHierarchyController {
     @DeleteMapping("/{roleName}")
     public ResponseEntity<?> delete(
             @PathVariable String roleName,
-            @RequestHeader("User-Role") String callerRole) {
-        if (!"SUPERADMIN".equalsIgnoreCase(callerRole)) {
+            @ActingUserRole String callerRole) {
+        if (!"SUPERADMIN".equals(RoleNormalizer.normalize(callerRole))) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN)
                     .body(Map.of("message", "Only SUPERADMIN can delete role hierarchy entries"));
         }
