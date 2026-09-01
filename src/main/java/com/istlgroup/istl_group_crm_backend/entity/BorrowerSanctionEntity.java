@@ -80,7 +80,7 @@ public class BorrowerSanctionEntity {
     private BigDecimal equityPct;
 
     /** As printed, e.g. "75:25". Kept as text — it is a ratio, not a number. */
-    @Column(name = "debt_equity_ratio", length = 30)
+    @Column(name = "debt_equity_ratio", length = 255)
     private String debtEquityRatio;
 
     // ── rate build-up (registry sheet: Rate of Interest) ──
@@ -94,6 +94,12 @@ public class BorrowerSanctionEntity {
     @Column(name = "roi_pct", precision = 6, scale = 3)
     private BigDecimal roiPct;
 
+    /**
+     * Not populated by any extractor or form field — nothing ever writes a
+     * value here. {@link com.istlgroup.istl_group_crm_backend.service.SanctionDerivedCalculator}
+     * resolves the rate actually in force from {@code roiPct}/{@code interestRateText}/
+     * {@code baseRatePct}+{@code spreadPct} instead; this column is inert.
+     */
     @Column(name = "interest_rate_pct", precision = 6, scale = 3)
     private BigDecimal interestRatePct;
 
@@ -102,14 +108,8 @@ public class BorrowerSanctionEntity {
     private String interestRateText;
 
     // ── project details (registry sheet) ──
-    @Column(name = "technology", length = 120)
+    @Column(name = "technology", columnDefinition = "TEXT")
     private String technology;
-
-    @Column(name = "village", length = 180)
-    private String village;
-
-    @Column(name = "district", length = 120)
-    private String district;
 
     /** Registry sheet: Product → Instrument. */
     @Column(name = "instrument", length = 120)
@@ -128,6 +128,15 @@ public class BorrowerSanctionEntity {
     private BigDecimal minDscr;
 
     /**
+     * The average-DSCR covenant (over the loan tenor) is a distinct figure from
+     * {@link #minDscr} (the floor in any individual year) — some letters state
+     * both in one sentence, e.g. "...maintain a minimum average DSCR of 1.15x
+     * over the loan tenor, and a minimum DSCR of 1.10x in any individual year."
+     */
+    @Column(name = "avg_dscr", precision = 6, scale = 3)
+    private BigDecimal avgDscr;
+
+    /**
      * DSRA / ISRA / cash sweep stay text on purpose. Letters write these as
      * phrases — "equivalent to one quarter's debt service", "to be built up by
      * COD", "100% above 1.30x DSCR" — and a numeric column would have to either
@@ -138,6 +147,21 @@ public class BorrowerSanctionEntity {
 
     @Column(name = "isra", columnDefinition = "TEXT")
     private String isra;
+
+    /**
+     * Reviewer-confirmed reserve amount, in plain rupees. Null means "not
+     * manually confirmed" — {@code SanctionDerivedCalculator.fillGaps} then
+     * fills the read with the calculated figure ({@code derivedDsraAmount})
+     * every time, the same "printed wins, else computed" precedence already
+     * used for {@code debtAmount}/{@code equityAmount}. Set this once a
+     * reviewer types their own figure over the calculated suggestion.
+     */
+    @Column(name = "dsra_amount", precision = 18, scale = 2)
+    private BigDecimal dsraAmount;
+
+    /** Same precedence as {@link #dsraAmount}, against {@code derivedIsraAmount}. */
+    @Column(name = "isra_amount", precision = 18, scale = 2)
+    private BigDecimal israAmount;
 
     @Column(name = "cash_sweep", columnDefinition = "TEXT")
     private String cashSweep;
@@ -150,6 +174,40 @@ public class BorrowerSanctionEntity {
 
     @Column(name = "moratorium_months")
     private Integer moratoriumMonths;
+
+    /**
+     * SERVICED | CAPITALIZED — how interest accrued during the moratorium is
+     * treated once the amortizing phase begins. Defaults to SERVICED
+     * (interest paid as it accrues, principal never grows) unless the letter
+     * states otherwise; see {@code SanctionDocExtractor.extractInterestMoratoriumTreatment}
+     * and {@code BorrowerService.withMeta} for how "not stated" is
+     * distinguished from "stated as Served" on the review screen.
+     */
+    @Column(name = "interest_during_moratorium", nullable = false, length = 20)
+    private String interestDuringMoratorium = "SERVICED";
+
+    /**
+     * MONTHLY | BI_MONTHLY | QUARTERLY | HALF_YEARLY | YEARLY | OTHER — the
+     * repayment cycle, driving how often instalment dates fall in the
+     * generated schedule and how many repayment periods a DSRA/ISRA covenant
+     * phrase ("next two quarters") resolves to. Defaults to QUARTERLY: the
+     * interval every schedule used before this column existed.
+     */
+    @Column(name = "repayment_frequency", nullable = false, length = 20)
+    private String repaymentFrequency = "QUARTERLY";
+
+    /** Custom interval in months; only meaningful when repaymentFrequency is OTHER. */
+    @Column(name = "repayment_frequency_other_months")
+    private Integer repaymentFrequencyOtherMonths;
+
+    /**
+     * JSON array of per-period repayment percentages ("[2.5,1.4,2.5,...]"),
+     * one entry per amortizing period. NULL means no reviewer-entered
+     * profile yet — LoanReserveCalculator then generates an equal 100/N
+     * split on every read rather than anything being stored for that case.
+     */
+    @Column(name = "repayment_profile_json", columnDefinition = "TEXT")
+    private String repaymentProfileJson;
 
     // ── timeline (registry sheet: Time Lines) ──
     @Column(name = "disbursement_date")
@@ -169,6 +227,10 @@ public class BorrowerSanctionEntity {
 
     @Column(name = "scheduled_cod")
     private LocalDate scheduledCod;
+
+    /** When commercial operation was actually achieved; null until the project gets there. */
+    @Column(name = "actual_cod")
+    private LocalDate actualCod;
 
     // ── base case assumptions (registry sheet) ──
     @Column(name = "plf_pct", precision = 6, scale = 3)

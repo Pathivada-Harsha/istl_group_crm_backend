@@ -48,8 +48,19 @@ public class BorrowerEntity {
     @Column(name = "guarantor_name")
     private String guarantorName;
 
+    /** Legacy free-text group name; still populated by the extractor as a signal. */
     @Column(name = "group_name")
     private String groupName;
+
+    /** FK to company_groups — the Parent Group or Sub Group this company sits directly under. NULL = standalone. */
+    @Column(name = "group_id")
+    private Long groupId;
+
+    @Column(name = "is_subsidiary", nullable = false)
+    private Boolean isSubsidiary = false;
+
+    @Column(name = "is_spv", nullable = false)
+    private Boolean isSpv = false;
 
     /**
      * The registry sheet's "Cat" / "Sub Cat". Deliberately not named
