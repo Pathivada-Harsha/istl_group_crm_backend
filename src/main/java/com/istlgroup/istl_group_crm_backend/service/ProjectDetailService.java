@@ -41,6 +41,8 @@ import com.istlgroup.istl_group_crm_backend.repo.ProjectBillingRepo;
 import com.istlgroup.istl_group_crm_backend.repo.ProjectCostRepo;
 import com.istlgroup.istl_group_crm_backend.entity.ProjectBomEntity;
 import com.istlgroup.istl_group_crm_backend.repo.ProjectBomRepo;
+import com.istlgroup.istl_group_crm_backend.repo.ProjectBomAuditRepo;
+import com.istlgroup.istl_group_crm_backend.entity.ProjectBomAuditEntity;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.BomLineRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.BomSaveRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.SiteLocationRequest;
@@ -55,7 +57,12 @@ public class ProjectDetailService {
     @Autowired private ProjectBillingRepo billingRepo;
     @Autowired private ProjectCostRepo    costRepo;
     @Autowired private ProjectProgressPeriodRepo progressRepo;
-    @Autowired private ProjectBomRepo     bomRepo;
+    @Autowired private ProjectBomRepo      bomRepo;
+    @Autowired private ProjectBomAuditRepo bomAuditRepo;
+    @Autowired private com.istlgroup.istl_group_crm_backend.repo.BomItemsMasterRepo bomItemsMasterRepo;
+
+    private static final org.slf4j.Logger log =
+            org.slf4j.LoggerFactory.getLogger(ProjectDetailService.class);
     @Autowired private ProjectItemRepo    itemRepo;
     @Autowired private LeadScopeTemplateRepo leadScopeTemplateRepo;
     @Autowired private ScopeTemplateExpander expander;
@@ -270,6 +277,38 @@ public class ProjectDetailService {
         // controller AFTER this transaction commits (full recalc in its own tx), so
         // the just-saved phases are visible and the headline updates immediately.
         return scope;
+    }
+
+    /**
+     * Clears a project's scope lines back to empty and un-marks its origin.
+     *
+     * <p>The way out of a bad lead import: without it a PM whose imported scope is
+     * wrong has no route forward, because Suggest is hidden while the scope is marked
+     * lead-derived. Clearing {@code scope_source} re-enables it.
+     *
+     * <p>BOM lines are <b>kept</b> — "reset scope" does not imply wiping a PM's
+     * materials. They are unlinked from the phases that are about to disappear and
+     * reappear in the BOM tab's "General" bucket, fully editable.
+     */
+    @Transactional
+    public void resetScopeItems(String projectUniqueId) throws CustomException {
+        DropdownProjectEntity project = requireProject(projectUniqueId);
+        Long projectId = project.getId();
+
+        List<ProjectPhaseEntity> phases = phaseRepo.findByProjectIdOrderBySeqNo(projectId);
+        // Unlink first: project_bom.scope_item_id would otherwise point at deleted phases.
+        bomRepo.clearScopeLinksByProjectId(projectId);
+        for (ProjectPhaseEntity p : phases) {
+            progressRepo.deleteByPhaseId(p.getId());   // periods are keyed by phase_id
+            phaseRepo.delete(p);
+        }
+
+        scopeRepo.findByProjectId(projectId).ifPresent(scope -> {
+            scope.setScopeSource(null);                // re-enables Suggest
+            scope.setSourceTemplateId(null);
+            scope.setTemplateVersion(null);
+            scopeRepo.save(scope);
+        });
     }
 
     /**
@@ -637,6 +676,9 @@ public class ProjectDetailService {
         m.put("notes", l.getNotes());
         m.put("bomItemId", l.getBomItemId());
         m.put("variantId", l.getVariantId());
+        // Not gated: a GST RATE is not a price. The planned-vs-actual summary needs it
+        // to split the slabs even for a role that may not see amounts.
+        m.put("gstPercent", l.getGstPercent());
         if (l.getBomItemId() != null) m.put("variants", expander.variantChoicesFor(l.getBomItemId()));
         // Auto-sizing metadata so a reloaded BOM stays live.
         m.put("basis", l.getBasis());
@@ -677,8 +719,13 @@ public class ProjectDetailService {
         if (req.getLines() != null) {
             for (BomLineRequest l : req.getLines()) {
                 ProjectBomEntity b;
+                // Snapshot the pre-edit values for the audit trail. Null on both means
+                // this is a new line rather than an amendment.
+                BigDecimal priorQty = null, priorRate = null;
                 if (l.getId() != null && byId.containsKey(l.getId())) {
                     b = byId.get(l.getId());
+                    priorQty  = b.getQuantity();
+                    priorRate = b.getUnitRate();
                 } else {
                     b = new ProjectBomEntity();
                     b.setProjectId(projectId);
@@ -699,6 +746,13 @@ public class ProjectDetailService {
                 b.setQuantity(qty);
                 b.setUnitRate(rate);
                 b.setAmount(l.getAmount() != null ? l.getAmount() : qty.multiply(rate));
+                // Planned GST is COPIED from the catalogue the first time this line has a
+                // catalogue reference, exactly as the unit rate is. Never refreshed: the
+                // BOM must keep the rate that applied when it was drawn up, or a catalogue
+                // edit would silently restate a finished project's planned GST.
+                if (b.getGstPercent() == null && b.getBomItemId() != null) {
+                    b.setGstPercent(catalogueGstPercent(b.getBomItemId()));
+                }
                 b.setNotes(l.getNotes());
                 // Auto-sizing snapshot.
                 b.setBasis(l.getBasis());
@@ -708,15 +762,89 @@ public class ProjectDetailService {
                 b.setDriverAttr(l.getDriverAttr());
                 b.setAutoQty(l.getAutoQty() == null ? Boolean.TRUE : l.getAutoQty());
                 b.setDeletedAt(null);
-                keptIds.add(bomRepo.save(b).getId());
+                // Audit AFTER the save so a newly added line records its own id (§A3);
+                // before the save its id is still null and the row could only be traced
+                // by name. The pre-edit values are held in locals, so nothing is lost by
+                // reading them after the write.
+                ProjectBomEntity saved = bomRepo.save(b);
+                auditBomChange(projectId, priorQty, priorRate, saved, userId);
+                keptIds.add(saved.getId());
                 seq++;
             }
         }
         // Soft-delete the lines that weren't in the payload.
         java.time.LocalDateTime now = java.time.LocalDateTime.now();
         for (ProjectBomEntity l : existing) {
-            if (!keptIds.contains(l.getId())) { l.setDeletedAt(now); bomRepo.save(l); }
+            if (!keptIds.contains(l.getId())) {
+                l.setDeletedAt(now);
+                bomRepo.save(l);
+                writeAudit(projectId, l.getId(), l.getItemName(), "REMOVED",
+                           plain(l.getQuantity()), null, userId);
+            }
         }
+    }
+
+    /**
+     * Record a BOM amendment. Procurement can amend the BOM to unblock a purchase
+     * order that breached it, so who raised a quantity — and by how much — is worth
+     * keeping. Only quantity and rate changes are logged; cosmetic edits are noise.
+     *
+     * @param priorQty  quantity before this save, or null if the line is new
+     * @param priorRate rate before this save, or null if the line is new
+     */
+    private void auditBomChange(Long projectId, BigDecimal priorQty, BigDecimal priorRate,
+                                ProjectBomEntity b, Long userId) {
+        if (priorQty == null && priorRate == null) {
+            writeAudit(projectId, b.getId(), b.getItemName(), "ADDED", null, plain(b.getQuantity()), userId);
+            return;
+        }
+        if (priorQty != null && b.getQuantity() != null && priorQty.compareTo(b.getQuantity()) != 0) {
+            writeAudit(projectId, b.getId(), b.getItemName(), "quantity",
+                       plain(priorQty), plain(b.getQuantity()), userId);
+        }
+        if (priorRate != null && b.getUnitRate() != null && priorRate.compareTo(b.getUnitRate()) != 0) {
+            writeAudit(projectId, b.getId(), b.getItemName(), "unit_rate",
+                       plain(priorRate), plain(b.getUnitRate()), userId);
+        }
+    }
+
+    /**
+     * The catalogue's default GST rate for an item, or null when the item cannot be
+     * read. Null is a real answer — it puts the line in the "no GST rate available"
+     * row of the planned-vs-actual summary rather than silently claiming 0%.
+     */
+    private BigDecimal catalogueGstPercent(Long bomItemId) {
+        if (bomItemId == null) return null;
+        try {
+            return bomItemsMasterRepo.findById(bomItemId)
+                    .map(com.istlgroup.istl_group_crm_backend.entity.BomItemsMasterEntity::getDefaultTaxPercent)
+                    .orElse(null);
+        } catch (Exception e) {
+            log.warn("Could not read catalogue GST for bom item {}: {}", bomItemId, e.getMessage());
+            return null;
+        }
+    }
+
+    private void writeAudit(Long projectId, Long bomLineId, String itemName, String field,
+                            String oldValue, String newValue, Long userId) {
+        try {
+            ProjectBomAuditEntity a = new ProjectBomAuditEntity();
+            a.setProjectId(projectId);
+            a.setProjectBomId(bomLineId);
+            a.setItemName(itemName);
+            a.setField(field);
+            a.setOldValue(oldValue);
+            a.setNewValue(newValue);
+            a.setChangedBy(userId);
+            bomAuditRepo.save(a);
+        } catch (Exception e) {
+            // Never let the audit trail block a legitimate BOM save.
+            log.warn("Could not record BOM audit for project {} line {}: {}", projectId, bomLineId, e.getMessage());
+        }
+    }
+
+    private static String plain(BigDecimal v) {
+        return v == null ? null : v.stripTrailingZeros().toPlainString();
     }
 
     private List<FinanceLineRequest> echoCost(List<ProjectCostEntity> list) {

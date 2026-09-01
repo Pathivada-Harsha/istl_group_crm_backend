@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.service.TelecallerLeadService;
 import com.istlgroup.istl_group_crm_backend.service.FollowupsService;
@@ -29,8 +31,8 @@ public class TelecallerLeadController {
     // ── GET /telecaller/my-leads ──────────────────────────────────────────────
     @GetMapping("/my-leads")
     public ResponseEntity<Map<String, Object>> getMyLeads(
-            @RequestHeader("User-Id")   Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId   Long userId,
+            @ActingUserRole String userRole,
             @RequestParam(defaultValue = "0")   int page,
             @RequestParam(defaultValue = "20")  int size,
             @RequestParam(required = false)    String telecallerStatus,
@@ -82,8 +84,8 @@ public class TelecallerLeadController {
     @GetMapping("/lead/{leadId}")
     public ResponseEntity<Map<String, Object>> getLeadDetail(
             @PathVariable               Long leadId,
-            @RequestHeader("User-Id")   Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long userId,
+            @ActingUserRole String userRole) {
         try {
             ensureTelecaller(userRole);
             var lead = telecallerLeadService.getLeadDetailForTelecaller(leadId, userId);
@@ -102,8 +104,8 @@ public class TelecallerLeadController {
     @PutMapping("/lead/{leadId}/status")
     public ResponseEntity<Map<String, Object>> updateStatus(
             @PathVariable               Long leadId,
-            @RequestHeader("User-Id")   Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId   Long userId,
+            @ActingUserRole String userRole,
             @RequestBody TelecallerStatusUpdateRequest req) {
         try {
             ensureTelecaller(userRole);
@@ -123,8 +125,8 @@ public class TelecallerLeadController {
     // Now accepts the same filter params as my-leads so stats match the view
     @GetMapping("/dashboard-stats")
     public ResponseEntity<Map<String, Object>> getDashboardStats(
-            @RequestHeader("User-Id")   Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId   Long userId,
+            @ActingUserRole String userRole,
             @RequestParam(required = false) String assignedFrom,
             @RequestParam(required = false) String assignedTo,
             @RequestParam(required = false) String groupName,
@@ -164,8 +166,8 @@ public class TelecallerLeadController {
     @PutMapping("/lead/{leadId}/details")
     public ResponseEntity<Map<String, Object>> updateLeadDetails(
             @PathVariable               Long leadId,
-            @RequestHeader("User-Id")   Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId   Long userId,
+            @ActingUserRole String userRole,
             @RequestBody                Map<String, String> fields) {
         try {
             ensureTelecaller(userRole);
@@ -186,8 +188,8 @@ public class TelecallerLeadController {
     @PostMapping("/lead/{leadId}/followup")
     public ResponseEntity<Map<String, Object>> createFollowup(
             @PathVariable               Long leadId,
-            @RequestHeader("User-Id")   Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId   Long userId,
+            @ActingUserRole String userRole,
             @RequestBody                FollowupRequestWrapper req) {
         try {
             ensureTelecaller(userRole);
@@ -214,8 +216,8 @@ public class TelecallerLeadController {
     @PostMapping(value = "/lead/{leadId}/upload-bill", consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<Map<String, Object>> uploadBillFile(
             @PathVariable               Long leadId,
-            @RequestHeader("User-Id")   Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId   Long userId,
+            @ActingUserRole String userRole,
             @RequestParam("file")       org.springframework.web.multipart.MultipartFile file) {
         try {
             ensureTelecaller(userRole);
@@ -239,8 +241,8 @@ public class TelecallerLeadController {
     @GetMapping("/lead/{leadId}/bill")
     public ResponseEntity<?> downloadBillFile(
             @PathVariable               Long leadId,
-            @RequestHeader("User-Id")   Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long userId,
+            @ActingUserRole String userRole) {
         try {
             var lead = telecallerLeadService.getLeadEntityForBill(leadId, userId, userRole);
             if (lead.getTcBillFileData() == null || lead.getTcBillFileData().length == 0) {

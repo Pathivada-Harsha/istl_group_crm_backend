@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.service.WarehouseService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.WarehouseWrapper;
 import lombok.RequiredArgsConstructor;
@@ -59,7 +60,7 @@ public class WarehouseAdminController {
     @PostMapping
     public ResponseEntity<?> create(
             @RequestBody WarehouseWrapper body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ResponseEntity.ok(warehouseService.create(body, userId));
         } catch (IllegalArgumentException e) {

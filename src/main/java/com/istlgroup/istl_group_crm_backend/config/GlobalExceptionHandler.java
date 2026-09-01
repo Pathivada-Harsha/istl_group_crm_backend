@@ -1,6 +1,9 @@
 package com.istlgroup.istl_group_crm_backend.config;
 
+import com.istlgroup.istl_group_crm_backend.customException.BomEnforcementException;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.customException.NotPermittedException;
+import com.istlgroup.istl_group_crm_backend.customException.SessionExpiredException;
 import com.istlgroup.istl_group_crm_backend.customException.SessionLimitException;
 import jakarta.persistence.EntityNotFoundException;
 import org.springframework.http.HttpStatus;
@@ -12,6 +15,7 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.HashMap;
 import java.util.Map;
 
 @RestControllerAdvice
@@ -54,6 +58,55 @@ public class GlobalExceptionHandler {
                     "message", ex.getMessage(),
                     "sessions", ex.getActiveSessions()
                 ));
+    }
+
+    // ✅ SessionExpiredException — the acting user could not be established from the
+    // session (no session, no USER_ID on it, or it points at a user row that is gone).
+    // Body is byte-identical to what filter/SessionFilter writes, so the frontend's
+    // fetch interceptor takes the same "clear storage and go to /login" path either way.
+    // This is the ONLY outcome when identity is missing — several controllers used to
+    // fall back to user 1 / role "USER" and serve the request as a guessed user.
+    // MUST be declared before the RuntimeException handler.
+    @ExceptionHandler(SessionExpiredException.class)
+    public ResponseEntity<Map<String, String>> handleSessionExpired(SessionExpiredException ex) {
+        return ResponseEntity
+                .status(HttpStatus.UNAUTHORIZED)
+                .body(Map.of(
+                    "error", "SESSION_EXPIRED",
+                    "message", ex.getMessage()
+                ));
+    }
+
+    // ✅ NotPermittedException — the caller is logged in but may not act on this target
+    // (e.g. assigning a lead to somebody outside their reporting subtree). 403, not 401:
+    // 401 makes the fetch interceptor tear the session down, and this is not an auth
+    // failure. MUST be declared before the RuntimeException handler.
+    @ExceptionHandler(NotPermittedException.class)
+    public ResponseEntity<Map<String, Object>> handleNotPermitted(NotPermittedException ex) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("success", false);
+        body.put("error", "NOT_PERMITTED");
+        body.put("message", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(body);
+    }
+
+    // A purchase order that would breach the project BOM — either an off-BOM line or
+    // a quantity taking the project total above the BOM quantity. 409 + the full
+    // violation list, which the frontend renders as a blocking dialog offering a
+    // route to amend the BOM. MUST be declared before the RuntimeException handler.
+    //
+    // NOTE: the PO service and controller both catch Exception themselves, so in
+    // practice their own explicit branches fire first. This handler is the safety net
+    // for any future call site that does not add one.
+    @ExceptionHandler(BomEnforcementException.class)
+    public ResponseEntity<Map<String, Object>> handleBomEnforcement(BomEnforcementException ex) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("success", false);
+        body.put("error", "BOM_LIMIT_EXCEEDED");
+        body.put("message", ex.getMessage());
+        body.put("projectId", ex.getProjectUniqueId());
+        body.put("violations", ex.getViolations());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 
     // ✅ ResponseStatusException — preserves the intended HTTP status & message

@@ -21,6 +21,8 @@ import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -104,6 +106,12 @@ public class OrderBookService {
 
     @Autowired
     private ProjectRepository projectRepository;
+
+    @Autowired
+    private com.istlgroup.istl_group_crm_backend.repo.ProposalDocumentRepo proposalDocumentRepo;
+
+    @Autowired
+    private ProjectLeadSeedService projectLeadSeedService;
 
     /**
      * Walks up the user→manager chain and grants project access to each
@@ -358,13 +366,89 @@ public class OrderBookService {
             .collect(Collectors.toList());
     }
 
+    /**
+     * The order book line for a generated proposal: its <b>Financial Pricing</b>, as a
+     * single lump-sum line.
+     *
+     * <p>{@code SolarProposalDocService} writes the document to
+     * {@code proposal_documents} and leaves {@code proposals.bom_items} null, so the
+     * commercial figures only exist inside the latest version's payload. Read blob-free
+     * via {@code findPayloadsByProposal} — loading the entity would drag the ~9 MB .docx.
+     *
+     * <p>Mirrors the proposal's Financial Pricing table one-for-one:
+     * <pre>
+     *   Description of Work  ← workDescription
+     *   Price for N kWp      ← basePrice     (unit rate, qty 1)
+     *   GST%                 ← gstPercent
+     *   Total Cost           ← recomputed by calculateAndUpdateTotals, = totalCost
+     * </pre>
+     *
+     * <p>The proposal's BOM is deliberately <b>not</b> loaded here. A solar proposal is
+     * sold as one priced deliverable, and its material breakdown belongs to the project
+     * — where it arrives, with quantities and rates intact, via
+     * {@link ProjectLeadSeedService}. Putting it on the order book too would duplicate
+     * it and invent per-line costs the proposal never quoted.
+     */
+    private List<Map<String, Object>> generatedProposalItems(Long proposalId) {
+        List<String> payloads = proposalDocumentRepo.findPayloadsByProposal(
+            proposalId, PageRequest.of(0, 1));
+        if (payloads.isEmpty() || payloads.get(0) == null || payloads.get(0).isBlank()) {
+            return new ArrayList<>();
+        }
+
+        try {
+            Map<String, Object> payload = new ObjectMapper().readValue(
+                payloads.get(0), new TypeReference<Map<String, Object>>() {});
+
+            BigDecimal basePrice = parseDecimal(payload.get("basePrice"));   // ZERO, never null
+            if (basePrice.signum() <= 0) {
+                // Nothing priced yet — better an empty grid than a zero-value line.
+                log.info("Generated proposal {} has no basePrice in its payload; no item seeded", proposalId);
+                return new ArrayList<>();
+            }
+
+            String description = str(payload.get("workDescription"));
+            if (description.isEmpty()) {
+                String cap = str(payload.get("capacityLabel"));
+                description = (cap.isEmpty() ? "" : cap + " ") + "Solar PV Plant";
+            }
+
+            Map<String, Object> item = new HashMap<>();
+            item.put("lineNo",          1);
+            item.put("itemName",        description);
+            item.put("specification",   "");
+            item.put("description",     "");
+            item.put("proposalItemId",  null);
+            item.put("quantity",        BigDecimal.ONE);
+            item.put("unit",            "Lot");            // one priced deliverable, not a count
+            item.put("unitPrice",       basePrice);
+            item.put("taxPercent",      parseDecimal(payload.get("gstPercent")));
+            item.put("discountPercent", BigDecimal.ZERO);
+            item.put("itemRemarks",     "");
+
+            List<Map<String, Object>> items = new ArrayList<>();
+            items.add(item);
+            return items;
+        } catch (Exception e) {
+            log.warn("Could not read pricing from the stored payload of proposal {}: {}",
+                proposalId, e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    private String str(Object o) {
+        return o == null ? "" : String.valueOf(o).trim();
+    }
+
     public List<Map<String, Object>> getProposalBomItems(Long proposalId) throws CustomException {
         ProposalsEntity proposal = proposalsRepo.findById(proposalId)
             .orElseThrow(() -> new CustomException("Proposal not found with ID: " + proposalId));
 
         String bomItemsJson = proposal.getBomItems();
         if (bomItemsJson == null || bomItemsJson.trim().isEmpty()) {
-            return new ArrayList<>();
+            // Nothing on the proposal row: this is a generated proposal, whose BOM
+            // lives in the stored generate-request payload instead.
+            return generatedProposalItems(proposalId);
         }
 
         try {
@@ -411,7 +495,8 @@ public class OrderBookService {
         orderBook.setOrderBookNo("TEMP-" + java.util.UUID.randomUUID().toString().substring(0, 8));
         orderBook.setCustomerId(request.getCustomerId());
         orderBook.setProposalId(request.getProposalId());
-        orderBook.setLeadId(request.getLeadId());
+        // The lead comes from the proposal, never from the request body.
+        orderBook.setLeadId(resolveLeadIdFromProposal(request.getProposalId()));
         orderBook.setGroupName(request.getGroupName());
         orderBook.setSubGroupName(request.getSubGroupName());
         orderBook.setOrderTitle(request.getOrderTitle());
@@ -457,7 +542,96 @@ public class OrderBookService {
         }
 
         itemCatalogueService.upsertFromItems(request.getItems());
-        return convertToWrapper(orderBookRepo.findById(saved.getId()).get());
+        OrderBookEntity fresh = orderBookRepo.findById(saved.getId()).get();
+        OrderBookWrapper wrapper = convertToWrapper(fresh);
+        wrapper.setWarnings(priceDivergenceWarnings(fresh));
+        return wrapper;
+    }
+
+    /**
+     * Ordinary rounding between an order book and its proposal. A flat amount rather
+     * than a percentage band, so the warning behaves the same on a ₹50k order and a
+     * ₹5cr one — the spec asks for any real difference, not a proportional one.
+     */
+    private static final BigDecimal PRICE_DIVERGENCE_TOLERANCE = new BigDecimal("1.00");
+
+    /**
+     * Warns — never blocks — when the order book's item total has drifted from the
+     * linked proposal's value. Built after the save has already committed, so it can
+     * only ever be advisory.
+     */
+    private List<String> priceDivergenceWarnings(OrderBookEntity orderBook) {
+        if (orderBook.getProposalId() == null) return null;
+        ProposalsEntity proposal = proposalsRepo.findById(orderBook.getProposalId()).orElse(null);
+        if (proposal == null) return null;
+
+        BigDecimal obTotal  = orderBook.getTotalAmount();
+        BigDecimal propTotal = proposal.getTotalValue();
+        if (obTotal == null || propTotal == null) return null;
+
+        BigDecimal diff = obTotal.subtract(propTotal);
+        if (diff.abs().compareTo(PRICE_DIVERGENCE_TOLERANCE) <= 0) return null;
+
+        List<String> warnings = new ArrayList<>();
+        warnings.add(String.format(
+            "Order book total (%s) differs from proposal %s total (%s) by %s. Saved anyway — check the line items if this is unintended.",
+            obTotal.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString(),
+            proposal.getProposalNo(),
+            propTotal.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString(),
+            diff.abs().setScale(2, java.math.RoundingMode.HALF_UP).toPlainString()));
+        return warnings;
+    }
+
+    /**
+     * The lead an order book belongs to, taken from the chosen proposal's own lead
+     * reference. Null when there is no proposal, the proposal is gone, or it does not
+     * qualify (not approved / not system-generated) — all of which simply mean the
+     * project starts empty and the manual/template flow applies.
+     */
+    private Long resolveLeadIdFromProposal(Long proposalId) {
+        if (proposalId == null) return null;
+        return proposalsRepo.findById(proposalId)
+            .filter(p -> ProposalSource.qualifiesForOrderBook(
+                p, proposalDocumentRepo.countByProposal(p.getId()) > 0))
+            .map(ProposalsEntity::getLeadId)
+            .orElse(null);
+    }
+
+    /**
+     * Runs the lead → project scope/BOM import once the current transaction commits.
+     *
+     * <p>Deferred rather than called inline because the import needs its own
+     * transaction (to be isolated from the order book save) and a new transaction
+     * cannot read the order book and project rows while they are still uncommitted —
+     * calling it inline failed with "Project not found" every time.
+     *
+     * <p>Failures are logged with the order book and project identifiers and go no
+     * further: by the time this runs the order book is durable, so nothing here can
+     * undo it. A partial import is impossible — the whole seed shares one transaction,
+     * and its scope-origin marker is written last, so a failure leaves the marker unset
+     * and Suggest available.
+     */
+    private void scheduleLeadSeed(Long orderBookId, String projectUniqueId,
+                                  String orderBookNo, Long leadId, Long createdBy) {
+        Runnable seed = () -> {
+            try {
+                projectLeadSeedService.seedFromLead(orderBookId, projectUniqueId, createdBy);
+                // Stats were seeded before the scope existed, so physical progress was
+                // computed against no phases. Recompute now that they are there.
+                projectStatsService.recalculateProjectStats(projectUniqueId);
+            } catch (Exception e) {
+                log.error("Lead-to-project scope/BOM import failed | orderBook={} (id={}) | project={} | leadId={}",
+                    orderBookNo, orderBookId, projectUniqueId, leadId, e);
+            }
+        };
+
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override public void afterCommit() { seed.run(); }
+            });
+        } else {
+            seed.run();   // no surrounding transaction — nothing to wait for
+        }
     }
 
     /**
@@ -494,6 +668,14 @@ public class OrderBookService {
                 log.warn("Could not auto-grant project access for order book {}: {}",
                     saved.getOrderBookNo(), e.getMessage());
             }
+
+            // Seed the project's Technical Scope + BOM from the lead behind the
+            // proposal — but only once THIS transaction has committed. The import runs
+            // in its own transaction (so a failure can neither roll back the order book
+            // nor leave a project with BOM lines but no scope lines), and a new
+            // transaction cannot see the project row we just wrote until it is durable.
+            scheduleLeadSeed(saved.getId(), project.getProjectUniqueId(),
+                saved.getOrderBookNo(), saved.getLeadId(), createdBy);
 
             try {
                 projectStatsService.recalculateProjectStats(project.getProjectUniqueId());
@@ -556,7 +738,12 @@ public class OrderBookService {
         }
 
         itemCatalogueService.upsertFromItems(request.getItems());
-        return convertToWrapper(updated);
+        // Re-read: calculateAndUpdateTotals() wrote the recomputed totals straight to
+        // the row, so `updated` can still be holding the pre-save figures.
+        OrderBookEntity fresh = orderBookRepo.findById(id).orElse(updated);
+        OrderBookWrapper wrapper = convertToWrapper(fresh);
+        wrapper.setWarnings(priceDivergenceWarnings(fresh));
+        return wrapper;
     }
 
     // ─────────────────────────────────────────────────────────────────────────

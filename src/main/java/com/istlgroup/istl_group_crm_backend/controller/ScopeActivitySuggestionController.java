@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,8 +28,8 @@ public class ScopeActivitySuggestionController {
 
     @GetMapping
     public ResponseEntity<Map<String, Object>> list(
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         List<String> names = repo.findAll().stream()
                 .map(ScopeActivitySuggestionEntity::getName)
                 .collect(Collectors.toList());
@@ -40,8 +42,8 @@ public class ScopeActivitySuggestionController {
     @PostMapping
     public ResponseEntity<Map<String, Object>> add(
             @RequestBody Map<String, Object> body,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         Map<String, Object> resp = new HashMap<>();
         Object raw = body.get("name");
         String name = raw == null ? "" : String.valueOf(raw).trim();

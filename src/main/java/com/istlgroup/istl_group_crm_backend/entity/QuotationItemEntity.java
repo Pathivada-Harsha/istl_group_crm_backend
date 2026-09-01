@@ -63,6 +63,27 @@ public class QuotationItemEntity {
     @Column(name = "make", length = 255)
     private String make;
     
+    // ── Project BOM linkage ──────────────────────────────────────────────────
+    /**
+     * {@code project_bom.id} this quoted line refers to. Quotations only ever WARN
+     * on BOM breaches, but the link is what lets a PO raised from this quotation
+     * be matched without re-guessing.
+     */
+    @Column(name = "bom_line_id")
+    private Long bomLineId;
+
+    /** Catalogue snapshot ({@code bom_items_master.id}). */
+    @Column(name = "bom_item_id")
+    private Long bomItemId;
+
+    /** Chosen make snapshot ({@code bom_item_variants.id}). */
+    @Column(name = "variant_id")
+    private Long variantId;
+
+    /** ID | VARIANT | NAME | NONE. NULL = row written before BOM linking existed. */
+    @Column(name = "bom_match", length = 12)
+    private String bomMatch;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
     

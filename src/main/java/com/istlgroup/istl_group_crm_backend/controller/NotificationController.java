@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.dto.NotificationRequestDTO;
 import com.istlgroup.istl_group_crm_backend.dto.NotificationResponseDTO;
 import com.istlgroup.istl_group_crm_backend.service.NotificationService;
@@ -16,12 +17,12 @@ import java.util.Map;
 /**
  * Notification REST API.
  *
- * The current user is resolved from the {@code User-Id} request header — the
- * same convention every other controller in this CRM uses (set by the frontend
- * fetch wrapper from localStorage). The HTTP session (JSESSIONID) still
- * authenticates the request via the existing SessionFilter; the header simply
- * identifies which user's data to scope to. Ownership is re-verified in the
- * service layer on every read/delete.
+ * The current user is resolved from the authenticated session, NOT from the
+ * {@code User-Id} request header this controller used to trust. That header is set
+ * by the browser, and it was the only thing scoping these endpoints — so any
+ * logged-in user could read, mark read, or DELETE another user's notifications just
+ * by changing it. Ownership is still re-verified in the service layer on every
+ * read/delete; this closes the hole above it.
  */
 @RestController
 @RequestMapping("/api/notifications")
@@ -34,7 +35,7 @@ public class NotificationController {
     // GET /api/notifications?filter=all|read|unread&search=&page=1&size=15
     @GetMapping
     public ResponseEntity<Map<String, Object>> getNotifications(
-            @RequestHeader(value = "User-Id", required = false) String userIdHeader,
+            @ActingUserId String userIdHeader,
             @RequestParam(value = "filter", required = false, defaultValue = "all") String filter,
             @RequestParam(value = "search", required = false, defaultValue = "") String search,
             @RequestParam(value = "page",   required = false, defaultValue = "1")  int page,
@@ -65,7 +66,7 @@ public class NotificationController {
     // GET /api/notifications/latest  — for the navbar dropdown (top 10)
     @GetMapping("/latest")
     public ResponseEntity<Map<String, Object>> getLatest(
-            @RequestHeader(value = "User-Id", required = false) String userIdHeader) {
+            @ActingUserId String userIdHeader) {
         Long userId = parseId(userIdHeader);
         if (userId == null) return unauthorized();
         List<NotificationResponseDTO> latest = notificationService.getLatest(userId);
@@ -79,7 +80,7 @@ public class NotificationController {
     // GET /api/notifications/unread-count
     @GetMapping("/unread-count")
     public ResponseEntity<Map<String, Object>> getUnreadCount(
-            @RequestHeader(value = "User-Id", required = false) String userIdHeader) {
+            @ActingUserId String userIdHeader) {
         Long userId = parseId(userIdHeader);
         if (userId == null) return unauthorized();
         return ResponseEntity.ok(Map.of(
@@ -90,7 +91,7 @@ public class NotificationController {
     // POST /api/notifications  — create (internal/admin/testing). Recipient = body.userId.
     @PostMapping
     public ResponseEntity<Map<String, Object>> create(
-            @RequestHeader(value = "User-Id", required = false) String userIdHeader,
+            @ActingUserId String userIdHeader,
             @RequestBody NotificationRequestDTO request) {
         if (parseId(userIdHeader) == null) return unauthorized();
         NotificationResponseDTO created = notificationService.createNotification(request);
@@ -102,7 +103,7 @@ public class NotificationController {
     // PUT /api/notifications/{id}/read
     @PutMapping("/{id}/read")
     public ResponseEntity<Map<String, Object>> markRead(
-            @RequestHeader(value = "User-Id", required = false) String userIdHeader,
+            @ActingUserId String userIdHeader,
             @PathVariable Long id) {
         Long userId = parseId(userIdHeader);
         if (userId == null) return unauthorized();
@@ -113,7 +114,7 @@ public class NotificationController {
     // PUT /api/notifications/mark-all-read
     @PutMapping("/mark-all-read")
     public ResponseEntity<Map<String, Object>> markAllRead(
-            @RequestHeader(value = "User-Id", required = false) String userIdHeader) {
+            @ActingUserId String userIdHeader) {
         Long userId = parseId(userIdHeader);
         if (userId == null) return unauthorized();
         int updated = notificationService.markAllRead(userId);
@@ -123,7 +124,7 @@ public class NotificationController {
     // DELETE /api/notifications/{id}
     @DeleteMapping("/{id}")
     public ResponseEntity<Map<String, Object>> delete(
-            @RequestHeader(value = "User-Id", required = false) String userIdHeader,
+            @ActingUserId String userIdHeader,
             @PathVariable Long id) {
         Long userId = parseId(userIdHeader);
         if (userId == null) return unauthorized();

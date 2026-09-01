@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,8 +40,8 @@ public class OrderBookController {
             @RequestParam(required = false)      String groupName,
             @RequestParam(required = false)      String subGroupName,
             @RequestParam(required = false)      String projectId,
-            @RequestHeader("User-Id")   Long   userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long   userId,
+            @ActingUserRole String userRole) {
         try {
             Page<OrderBookWrapper> orderBooks =
                 orderBookService.getAllOrderBooks(page, size, groupName, subGroupName, projectId, userId, userRole);
@@ -72,8 +74,8 @@ public class OrderBookController {
             @RequestParam(defaultValue = "desc")      String sortDir,
             @RequestParam(defaultValue = "0")   int    page,
             @RequestParam(defaultValue = "10")  int    size,
-            @RequestHeader("User-Id")   Long   userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long   userId,
+            @ActingUserRole String userRole) {
         try {
             Page<OrderBookWrapper> results = orderBookService.searchOrderBooks(
                 searchTerm, status, groupName, subGroupName, fromDate, toDate, sortBy, sortDir, page, size, userId, userRole);
@@ -97,8 +99,8 @@ public class OrderBookController {
     @GetMapping("/{id}")
     public ResponseEntity<Map<String, Object>> getOrderBookById(
             @PathVariable Long id,
-            @RequestHeader("User-Id")   Long   userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long   userId,
+            @ActingUserRole String userRole) {
         try {
             OrderBookWrapper orderBook = orderBookService.getOrderBookById(id);
             Map<String, Object> response = new HashMap<>();
@@ -119,8 +121,8 @@ public class OrderBookController {
     @GetMapping("/{id}/items")
     public ResponseEntity<Map<String, Object>> getOrderBookItems(
             @PathVariable Long id,
-            @RequestHeader("User-Id")   Long   userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long   userId,
+            @ActingUserRole String userRole) {
         try {
             List<OrderBookItemWrapper> items = orderBookService.getOrderBookItems(id);
             Map<String, Object> response = new HashMap<>();
@@ -139,8 +141,8 @@ public class OrderBookController {
     @GetMapping("/{id}/items-with-tracking")
     public ResponseEntity<Map<String, Object>> getOrderBookItemsWithTracking(
             @PathVariable Long id,
-            @RequestHeader("User-Id")   Long   userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long   userId,
+            @ActingUserRole String userRole) {
         try {
             List<OrderBookItemWrapper> items =
                 orderBookService.getOrderBookItemsWithTracking(id);
@@ -160,8 +162,8 @@ public class OrderBookController {
     @GetMapping("/proposal-items/{proposalId}")
     public ResponseEntity<Map<String, Object>> getProposalItems(
             @PathVariable Long proposalId,
-            @RequestHeader("User-Id")   Long   userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long   userId,
+            @ActingUserRole String userRole) {
         try {
             List<Map<String, Object>> items = orderBookService.getProposalBomItems(proposalId);
             Map<String, Object> response = new HashMap<>();
@@ -182,8 +184,8 @@ public class OrderBookController {
     @PostMapping("/create")
     public ResponseEntity<Map<String, Object>> createOrderBook(
             @RequestBody OrderBookRequestWrapper request,
-            @RequestHeader("User-Id")   Long   userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long   userId,
+            @ActingUserRole String userRole) {
         try {
             OrderBookWrapper created = orderBookService.createOrderBook(request, userId);
             Map<String, Object> response = new HashMap<>();
@@ -207,8 +209,8 @@ public class OrderBookController {
     public ResponseEntity<Map<String, Object>> updateOrderBook(
             @PathVariable Long id,
             @RequestBody OrderBookRequestWrapper request,
-            @RequestHeader("User-Id")   Long   userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long   userId,
+            @ActingUserRole String userRole) {
         try {
             OrderBookWrapper updated = orderBookService.updateOrderBook(id, request, userId);
             Map<String, Object> response = new HashMap<>();
@@ -235,8 +237,8 @@ public class OrderBookController {
             @RequestParam("file")                          MultipartFile file,
             @RequestParam("poNumber")                      String        poNumber,
             @RequestParam(value = "poDate", required = false) String     poDate,
-            @RequestHeader("User-Id")   Long   userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long   userId,
+            @ActingUserRole String userRole) {
         try {
             OrderBookWrapper updated =
                 orderBookService.uploadPOFile(id, file, poNumber, poDate);
@@ -266,8 +268,8 @@ public class OrderBookController {
     public ResponseEntity<byte[]> downloadPoFile(
             @PathVariable Long id,
             @RequestParam(value = "forceDownload", defaultValue = "false") boolean forceDownload,
-            @RequestHeader("User-Id")   Long   userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long   userId,
+            @ActingUserRole String userRole) {
         try {
             OrderBookEntity entity =
                 orderBookService.getOrderBookEntityForDownload(id);
@@ -300,8 +302,8 @@ public class OrderBookController {
     @DeleteMapping("/delete/{id}")
     public ResponseEntity<Map<String, Object>> deleteOrderBook(
             @PathVariable Long id,
-            @RequestHeader("User-Id")   Long   userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId   Long   userId,
+            @ActingUserRole String userRole) {
         try {
             orderBookService.deleteOrderBook(id);
             Map<String, Object> response = new HashMap<>();

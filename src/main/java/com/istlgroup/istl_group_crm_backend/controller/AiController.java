@@ -3,7 +3,10 @@ package com.istlgroup.istl_group_crm_backend.controller;
 import com.istlgroup.istl_group_crm_backend.dto.AiChatRequest;
 import com.istlgroup.istl_group_crm_backend.dto.AiChatResponse;
 import com.istlgroup.istl_group_crm_backend.service.AiService;
-import jakarta.servlet.http.HttpSession;
+import com.istlgroup.istl_group_crm_backend.entity.UsersEntity;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserPermissionsService;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserService;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,16 +23,17 @@ import java.util.Map;
  *
  * Request body:
  * {
- *   "messages":        [ { "role": "user", "content": "what is my name?" } ],
- *   "menuPermissions": ["SALES_LEADS", "FOLLOW_UPS", ...],
- *   "pagePermissions": { "LEADS": ["VIEW","CREATE"], "INVOICES": ["VIEW"] },
- *   "userContext": {
- *     "name": "Super Admin", "email": "...", "phone": "...",
- *     "role": "SUPERADMIN", "designation": "...", "team": "..."
- *   },
- *   "imageBase64": "...",
+ *   "messages":      [ { "role": "user", "content": "what is my name?" } ],
+ *   "imageBase64":   "...",
  *   "imageMimeType": "image/png"
  * }
+ *
+ * The body may also carry "menuPermissions", "pagePermissions", "visibleRoles" and
+ * "userContext" — the frontend still sends them and the server IGNORES all four. They
+ * used to be taken at face value, which meant a caller could post themselves
+ * SUPERADMIN's permission set and have the assistant answer over data they cannot see.
+ * Permissions are now rebuilt from the database for the session user; see
+ * ActingUserPermissionsService.
  */
 @RestController
 @RequestMapping("/ai-assistant")
@@ -40,17 +44,29 @@ public class AiController {
     @Autowired
     private AiService aiService;
 
+    @Autowired
+    private ActingUserPermissionsService actingUserPermissions;
+
+    @Autowired
+    private ActingUserService actingUserService;
+
+    /**
+     * The permission fields on the request body ({@code menuPermissions},
+     * {@code pagePermissions}, {@code visibleRoles}, {@code userContext}) are IGNORED.
+     * They are still accepted because the frontend sends them, but the assistant is
+     * authorized against what the database says about the session user — posting
+     * yourself SUPERADMIN's permission set no longer widens what it will answer.
+     */
     @PostMapping("/chat")
     public ResponseEntity<?> chat(
             @RequestBody AiChatRequest request,
-            @RequestHeader("User-Id")   Long   userId,
-            @RequestHeader("User-Role") String userRole,
-            HttpSession session) {
+            HttpServletRequest httpRequest) {
 
-        // ── Session guard ──────────────────────────────────────────────────
-        if (session == null || session.getAttribute("USER_ID") == null) {
-            return ResponseEntity.status(401).body(Map.of("error", "SESSION_EXPIRED"));
-        }
+        // Identity from the session. requireUser 401s if it cannot be established, so
+        // there is no unauthenticated path into the assistant.
+        UsersEntity actingUser = actingUserService.requireUser(httpRequest);
+        Long   userId   = actingUser.getId();
+        String userRole = actingUserService.requireRole(httpRequest);
 
         if (request == null || request.getMessages() == null || request.getMessages().isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of("error", "messages array is required"));
@@ -69,10 +85,10 @@ public class AiController {
                     userId,
                     userRole,
                     question,
-                    request.getMenuPermissions(),
-                    request.getPagePermissions(),
-                    request.getVisibleRoles(),     // ← hierarchy team scope from role_hierarchy
-                    request.getUserContext(),
+                    actingUserPermissions.menuPermissions(userId),
+                    actingUserPermissions.pagePermissions(userId),
+                    actingUserPermissions.visibleRoles(userRole),
+                    actingUserPermissions.userContext(actingUser),
                     request.getImageBase64(),
                     request.getImageMimeType()
             );

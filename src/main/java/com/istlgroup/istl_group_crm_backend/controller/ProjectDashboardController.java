@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDashboardDTO;
 import com.istlgroup.istl_group_crm_backend.service.ProjectDashboardService;
 import com.istlgroup.istl_group_crm_backend.service.ProjectAccessService;
@@ -95,8 +97,8 @@ public class ProjectDashboardController {
     public ResponseEntity<?> getAggregatedDashboard(
             @RequestParam(required = false) String groupName,
             @RequestParam(required = false) String subGroupName,
-            @RequestHeader(value = "X-User-Id",   required = false) Long   userId,
-            @RequestHeader(value = "X-User-Role", required = false) String userRole) {
+            @ActingUserId Long   userId,
+            @ActingUserRole String userRole) {
 
         log.info("GET /api/projects/dashboard/aggregate groupName={} subGroupName={} userId={} userRole={}",
                  groupName, subGroupName, userId, userRole);
@@ -141,8 +143,8 @@ public class ProjectDashboardController {
     public ResponseEntity<?> getCapacitySummary(
             @RequestParam(required = false) String groupName,
             @RequestParam(required = false) String subGroupName,
-            @RequestHeader(value = "X-User-Id",   required = false) Long   userId,
-            @RequestHeader(value = "X-User-Role", required = false) String userRole) {
+            @ActingUserId Long   userId,
+            @ActingUserRole String userRole) {
 
         log.info("GET /api/projects/dashboard/capacity groupName={} subGroupName={} userId={} userRole={}",
                  groupName, subGroupName, userId, userRole);

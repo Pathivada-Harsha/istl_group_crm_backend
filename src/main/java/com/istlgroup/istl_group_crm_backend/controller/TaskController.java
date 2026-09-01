@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.service.TaskService;
 import com.istlgroup.istl_group_crm_backend.repo.RoleHierarchyRepo;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,8 +36,8 @@ public class TaskController {
             @RequestParam(value = "teamView", required = false, defaultValue = "false") boolean teamView,
             @RequestParam(value = "page",     required = false, defaultValue = "1")  int page,
             @RequestParam(value = "size",     required = false, defaultValue = "15") int size,
-            @RequestHeader(value = "User-Id",   required = false) String userIdHeader,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId String userIdHeader,
+            @ActingUserRole String userRole) {
 
         try {
             Long requesterId = parseId(userIdHeader);
@@ -70,8 +72,8 @@ public class TaskController {
     @GetMapping("/{id}")
     public ResponseEntity<Map<String, Object>> getTask(
             @PathVariable Long id,
-            @RequestHeader(value = "User-Id",   required = false) String userIdHeader,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId String userIdHeader,
+            @ActingUserRole String userRole) {
         try {
             if (parseId(userIdHeader) == null) return unauthorized();
             Map<String, Object> resp = new LinkedHashMap<>();
@@ -84,8 +86,8 @@ public class TaskController {
     @PostMapping
     public ResponseEntity<Map<String, Object>> createTask(
             @RequestBody Map<String, Object> body,
-            @RequestHeader(value = "User-Id",   required = false) String userIdHeader,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId String userIdHeader,
+            @ActingUserRole String userRole) {
         try {
             Long userId = parseId(userIdHeader);
             if (userId == null) return unauthorized();
@@ -102,8 +104,8 @@ public class TaskController {
     public ResponseEntity<Map<String, Object>> updateTask(
             @PathVariable Long id,
             @RequestBody Map<String, Object> body,
-            @RequestHeader(value = "User-Id",   required = false) String userIdHeader,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId String userIdHeader,
+            @ActingUserRole String userRole) {
         try {
             Long userId = parseId(userIdHeader);
             if (userId == null) return unauthorized();
@@ -122,8 +124,8 @@ public class TaskController {
     public ResponseEntity<Map<String, Object>> logUpdate(
             @PathVariable Long id,
             @RequestBody Map<String, Object> body,
-            @RequestHeader(value = "User-Id",   required = false) String userIdHeader,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId String userIdHeader,
+            @ActingUserRole String userRole) {
         try {
             Long userId = parseId(userIdHeader);
             if (userId == null) return unauthorized();
@@ -139,8 +141,8 @@ public class TaskController {
     @DeleteMapping("/{id}")
     public ResponseEntity<Map<String, Object>> deleteTask(
             @PathVariable Long id,
-            @RequestHeader(value = "User-Id",   required = false) String userIdHeader,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId String userIdHeader,
+            @ActingUserRole String userRole) {
         try {
             Long userId = parseId(userIdHeader);
             if (userId == null) return unauthorized();

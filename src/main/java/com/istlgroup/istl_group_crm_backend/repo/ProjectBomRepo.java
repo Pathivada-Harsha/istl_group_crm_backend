@@ -28,6 +28,17 @@ public interface ProjectBomRepo extends JpaRepository<ProjectBomEntity, Long> {
     @Query("UPDATE ProjectBomEntity b SET b.deletedAt = :now WHERE b.projectId = :projectId AND b.deletedAt IS NULL")
     int softDeleteByProjectId(@Param("projectId") Long projectId, @Param("now") LocalDateTime now);
 
+    /**
+     * Unlink every live line from its scope line. Used when a scope is reset: the
+     * phases go away, so the links would otherwise dangle. The materials themselves
+     * survive and reappear in the tab's "General" bucket.
+     */
+    @Modifying
+    @Transactional
+    @Query("UPDATE ProjectBomEntity b SET b.scopeItemId = NULL, b.scopeSubItemKey = NULL "
+         + "WHERE b.projectId = :projectId AND b.deletedAt IS NULL")
+    int clearScopeLinksByProjectId(@Param("projectId") Long projectId);
+
     // ── Legacy (pre-soft-delete) methods — kept so existing callers don't break ──
     List<ProjectBomEntity> findByProjectIdOrderBySeqNo(Long projectId);
 

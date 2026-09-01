@@ -29,6 +29,9 @@ public class DashboardDTO {
         private long        totalProposals;
         private long        totalOrders;
         private BigDecimal  orderBookValue;
+        /** SUM(invoices.total_amount) — what has been billed, not what was booked. */
+        private BigDecimal  totalBilledValue;
+        private long        totalInvoices;
         private long        pendingFollowups;
         private long        overdueFollowups;
         private long        todayFollowups;
@@ -39,6 +42,19 @@ public class DashboardDTO {
         private List<TeamMemberStat> teamPerformance;
         private List<RecentOrder>    recentOrders;
         private List<FollowupItem>   followups;
+        // Added for the redesigned admin view. Everything above is untouched, so
+        // an older client simply ignores these.
+        private BigDecimal           totalRevenue;      // confirmed business (excl. Draft/Cancelled)
+        private BigDecimal           pipelineValue;     // open proposals (not Approved/Rejected)
+        private List<MonthMoney>     monthlyTrend;      // last 8 months, revenue vs pipeline
+        private BusinessSnapshot     businessSnapshot;
+        private KpiDeltas            deltas;
+        // Cumulative funnel stages ("reached this stage or beyond") so the chart
+        // can only descend. contacted / inDiscussion / proposalSent above are the
+        // current-status counts and are left alone for the other dashboards.
+        private long                 reachedContacted;
+        private long                 reachedDiscussion;
+        private long                 reachedProposal;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -58,6 +74,16 @@ public class DashboardDTO {
         private long        overdueFollowups;
         private long        contacted;
         private long        inDiscussion;
+        // ── Funnel, CUMULATIVE ──
+        // "reached this stage OR beyond", counted over the same lead set as
+        // myLeads above, so each stage is a strict subset of the one before it
+        // and the funnel can only descend. contacted / inDiscussion stay
+        // current-status counts and still feed the KPI cards.
+        private long        reachedContacted;
+        private long        reachedDiscussion;
+        private long        reachedProposal;
+        /** People reporting to this manager, transitively. 0 = no reports. */
+        private int         teamSize;
         private List<LeadRow>        leads;
         private List<ProposalRow>    proposals;
         private List<TeamMemberStat> teamMembers;
@@ -81,6 +107,14 @@ public class DashboardDTO {
         private long        todayFollowups;
         private long        overdueFollowups;
         private long        inDiscussion;
+        // ── Funnel, CUMULATIVE ── see SalesManagerDashboard for the rationale.
+        // reachedWon is the same figure as closedWon whenever the BD both owns
+        // and closed the lead; it is kept separate so the funnel is guaranteed a
+        // subset of the stage above it even when a lead was closed by someone else.
+        private long        reachedContacted;
+        private long        reachedDiscussion;
+        private long        reachedProposal;
+        private long        reachedWon;
         private List<LeadRow>      leads;
         private List<ProposalRow>  proposals;
         private List<FollowupItem> followups;
@@ -127,7 +161,14 @@ public class DashboardDTO {
         private long        closedWon;
         private long        myProposals;
 
-        // Team performance — populated for L3 roles
+        // ── Funnel, CUMULATIVE ── see SalesManagerDashboard for the rationale.
+        private long        reachedContacted;
+        private long        reachedDiscussion;
+        private long        reachedProposal;
+
+        // Team performance — populated for ANYONE with reports, not just L3.
+        /** People reporting to this user, transitively. 0 = no reports. */
+        private int         teamSize;
         private List<TeamMemberStat> teamMembers;
 
         // Table data
@@ -139,6 +180,34 @@ public class DashboardDTO {
     public static class MonthStat {
         private String label;
         private long   value;
+    }
+
+    /** One point on the admin Revenue Overview chart. Same "MMM yy" label as MonthStat. */
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    public static class MonthMoney {
+        private String     label;
+        private BigDecimal revenue;
+        private BigDecimal pipeline;
+    }
+
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    public static class BusinessSnapshot {
+        private long totalProjects;
+        private long activeProjects;
+        private long completedProjects;
+        private long totalCustomers;
+        private long activeCustomers;
+        private long totalVendors;
+    }
+
+    /** Month-over-month growth per KPI, in percentage points (12.4 means +12.4%). */
+    @Data @Builder @NoArgsConstructor @AllArgsConstructor
+    public static class KpiDeltas {
+        private double revenue;
+        private double pipeline;
+        private double activeLeads;
+        private double orderBook;
+        private double confirmedOrders;
     }
 
     @Data @Builder @NoArgsConstructor @AllArgsConstructor

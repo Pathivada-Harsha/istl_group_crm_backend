@@ -1,6 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
 import com.istlgroup.istl_group_crm_backend.entity.BomItemsMasterEntity;
+import com.istlgroup.istl_group_crm_backend.service.BomCatalogueHealthService;
 import com.istlgroup.istl_group_crm_backend.service.BomItemsMasterService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -19,6 +20,26 @@ import java.util.Map;
 public class BomItemsMasterController {
 
     private final BomItemsMasterService bomItemsMasterService;
+    private final BomCatalogueHealthService bomCatalogueHealthService;
+
+    /**
+     * GET /api/bom-items-master/attribute-health
+     * Which makes are missing a numeric attribute that an active template's
+     * auto-sizing basis depends on — the catalogue side of "the quantity came
+     * out blank and nobody could say why".
+     */
+    @GetMapping("/attribute-health")
+    public ResponseEntity<Map<String, Object>> attributeHealth() {
+        try {
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("data", bomCatalogueHealthService.attributeHealth());
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Error computing catalogue attribute health", e);
+            return createErrorResponse("Failed to check catalogue attributes", e.getMessage());
+        }
+    }
 
     /**
      * GET /api/bom-items-master/all

@@ -11,6 +11,7 @@ import com.istlgroup.istl_group_crm_backend.repo.CustomersRepo;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownGroupRepository;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownProjectRepository;
 import com.istlgroup.istl_group_crm_backend.repo.DropdownSubGroupRepository;
+import com.istlgroup.istl_group_crm_backend.repo.ProjectScopeRepo;
 import com.istlgroup.istl_group_crm_backend.repo.UsersRepo;
 
 import lombok.RequiredArgsConstructor;
@@ -40,6 +41,8 @@ public class DropdownFilterService {
     private final RoleHierarchyService roleHierarchyService;
     private final ProjectFinancialsSummaryService financialsSummaryService;
     private final ProjectAccessService projectAccessService; // per-user visibility (mirrors Order Book)
+    private final ProjectScopeRepo projectScopeRepo;         // planned schedule window (see below)
+    private final UserScopeService userScopeService;         // reporting-graph scoping (assignable-users)
 
     public List<DropdownGroupWrapper> getAllGroups() {
         return groupRepository.findByIsActiveTrue().stream()
@@ -97,17 +100,39 @@ public class DropdownFilterService {
             ? new java.util.HashSet<>(accessibleList)
             : java.util.Collections.emptySet();
 
+        // Planned window from the Technical Scope's Work Breakdown & Schedule, for
+        // every project that HAS one. The project's own start/end dates are set at
+        // creation (or left blank) and nobody maintains them afterwards, whereas the
+        // schedule is the thing people actually plan against — so once the WBS is
+        // scheduled it OWNS the timeline, and the project's own dates are the
+        // fallback for projects with no scope yet. One query for the whole list.
+        Map<Long, java.time.LocalDate[]> plannedWindow = new java.util.HashMap<>();
+        for (Object[] row : projectScopeRepo.findScheduledWindows()) {
+            if (row[0] == null) continue;
+            plannedWindow.put(((Number) row[0]).longValue(),
+                new java.time.LocalDate[] { (java.time.LocalDate) row[1], (java.time.LocalDate) row[2] });
+        }
+
         return projectRepository.findAll().stream()
             .filter(p -> Boolean.TRUE.equals(p.getIsActive()))
             .filter(p -> !restrict
                 || accessible.contains(p.getProjectUniqueId())
                 || (userId != null && userId.equals(p.getCreatedBy()))
                 || (userId != null && userId.equals(p.getAssignedTo())))
-            .sorted(Comparator.comparing(p -> p.getProjectName() != null ? p.getProjectName() : ""))
+            // Newest first — the projects people are working on are the ones just
+            // created, not the ones starting with "A". Falls back to the id (also
+            // ascending by age) for rows created before created_at was populated, so
+            // they sort sensibly instead of all collapsing to the end.
+            .sorted(Comparator
+                .comparing((DropdownProjectEntity p) -> p.getCreatedAt(),
+                           Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(DropdownProjectEntity::getId,
+                           Comparator.nullsLast(Comparator.reverseOrder())))
             .map(p -> {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("projectUniqueId",     p.getProjectUniqueId());
                 m.put("projectName",         p.getProjectName());
+                m.put("createdAt",           p.getCreatedAt());   // lets the list sort by age
                 m.put("status",              p.getStatus() != null ? p.getStatus().name() : null);
                 m.put("location",            p.getLocation());
                 m.put("groupId",             p.getGroup_id());
@@ -119,8 +144,20 @@ public class DropdownFilterService {
                 m.put("progressPercentage",  p.getProgressPercentage());
                 m.put("physicalProgressPct", p.getPhysicalProgressPct());   // technical progress
                 m.put("financialProgressPct", p.getFinancialProgressPct()); // financial (40/30/20/10)
-                m.put("startDate",           p.getStartDate());
-                m.put("endDate",             p.getEndDate());
+                // Timeline: the scheduled WBS window when there is one, else the
+                // project's own dates. `timelineSource` tells the UI which it got
+                // ("SCOPE" | "PROJECT" | "NONE") so it can label the dates honestly.
+                java.time.LocalDate[] window = plannedWindow.get(p.getId());
+                java.time.LocalDate start = window != null ? window[0] : p.getStartDate();
+                java.time.LocalDate end   = window != null ? window[1] : p.getEndDate();
+                m.put("startDate",           start);
+                m.put("endDate",             end);
+                m.put("timelineSource",      window != null ? "SCOPE"
+                                           : (start != null || end != null) ? "PROJECT" : "NONE");
+                // The project's own dates stay available for anything that needs the
+                // raw value rather than the effective timeline.
+                m.put("projectStartDate",    p.getStartDate());
+                m.put("projectEndDate",      p.getEndDate());
 
                 // Live financials — keys kept identical to the dashboard's
                 // financial block so the frontend reads one vocabulary:
@@ -247,6 +284,25 @@ public class DropdownFilterService {
     // Legacy no-arg (kept for old internal callers)
     public List<LeadsUserWrapper> getLeadsUsers() {
         return getLeadsUsers(null, null);
+    }
+
+    /**
+     * GET /filters/assignable-users — the users the caller may act on, by the one
+     * canonical rule in {@link UserScopeService}: top-level (hierarchy level 1–2)
+     * sees every active user, everybody else sees their reporting subtree.
+     *
+     * <p>Deliberately NOT a rewrite of {@link #getLeadsUsers}: that endpoint is
+     * also consumed by the Tasks, Expenses and Procurement dropdowns, which this
+     * change is explicitly not meant to touch. The Leads pickers move here; the
+     * old endpoint keeps the old role-allow-list rule for its other callers.
+     *
+     * <p>No role header — the role is resolved from the database, so the caller
+     * cannot widen their own list by sending {@code User-Role: SUPERADMIN}.
+     */
+    public List<LeadsUserWrapper> getAssignableUsers(Long currentUserId) {
+        return userScopeService.getActionableUsers(currentUserId).stream()
+            .map(this::toWrapper)
+            .collect(Collectors.toList());
     }
 
     /**

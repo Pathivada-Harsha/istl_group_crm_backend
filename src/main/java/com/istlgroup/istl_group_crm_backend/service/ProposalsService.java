@@ -38,6 +38,9 @@ public class ProposalsService {
     private ProposalsRepo proposalsRepo;
 
     @Autowired
+    private com.istlgroup.istl_group_crm_backend.repo.ProposalDocumentRepo proposalDocumentRepo;
+
+    @Autowired
     private LeadsRepo leadsRepo;
 
     @Autowired
@@ -227,6 +230,20 @@ public class ProposalsService {
         proposalsRepo.save(proposal);
     }
 
+    /**
+     * Throws unless this user may delete from the proposal. Deleting a single
+     * generated version is the same call as deleting the proposal, so it answers
+     * to the same rule rather than a second one that could drift.
+     */
+    public void requireDeletable(Long proposalId, Long userId, String userRole) throws CustomException {
+        ProposalsEntity proposal = proposalsRepo.findById(proposalId)
+            .orElseThrow(() -> new CustomException("Proposal not found"));
+        if (proposal.getDeletedAt() != null)
+            throw new CustomException("Proposal already deleted");
+        if (!canDeleteProposal(proposal, userId, userRole))
+            throw new CustomException("You don't have permission to delete from this proposal");
+    }
+
     // ── Access helpers ───────────────────────────────────────────────────────
     private boolean canAccessProposal(ProposalsEntity proposal, Long userId, String userRole) {
         int level = roleHierarchyService.getLevelOrder(userRole);
@@ -266,8 +283,27 @@ public class ProposalsService {
     }
 
     // ── Dropdown helper ──────────────────────────────────────────────────────
-    public List<Map<String, Object>> getProposalsByCustomerForDropdown(Long customerId, Long userId, String userRole) {
-        List<ProposalsEntity> proposals = proposalsRepo.findByCustomerIdAndDeletedAtIsNull(customerId);
+    /**
+     * Proposals a customer's order book may cite: approved AND system-generated
+     * (see {@link ProposalSource}). An empty result is a normal state — the caller
+     * shows its "no proposals" placeholder and order book creation proceeds.
+     *
+     * @param includeId a proposal to keep regardless of the filter, so re-opening an
+     *                  order book whose linked proposal no longer qualifies does not
+     *                  silently blank the selection. Null on create.
+     */
+    public List<Map<String, Object>> getProposalsByCustomerForDropdown(
+            Long customerId, Long userId, String userRole, Long includeId) {
+        List<ProposalsEntity> all = proposalsRepo.findByCustomerIdAndDeletedAtIsNull(customerId);
+        // One scalar query for the whole list: which of these were generated in-app.
+        java.util.Set<Long> withDocs = all.isEmpty() ? java.util.Collections.emptySet()
+            : new java.util.HashSet<>(proposalDocumentRepo.findProposalIdsWithDocuments(
+                all.stream().map(ProposalsEntity::getId).collect(Collectors.toList())));
+
+        List<ProposalsEntity> proposals = all.stream()
+            .filter(p -> ProposalSource.qualifiesForOrderBook(p, withDocs.contains(p.getId()))
+                      || (includeId != null && includeId.equals(p.getId())))
+            .collect(Collectors.toList());
         int level = roleHierarchyService.getLevelOrder(userRole);
 
         if (level > 2) {

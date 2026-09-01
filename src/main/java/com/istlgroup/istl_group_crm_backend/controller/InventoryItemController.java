@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.service.InventoryItemService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.InventoryItemBulkWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.InventoryItemWrapper;
@@ -42,8 +44,8 @@ public class InventoryItemController {
             @RequestParam(required = false, defaultValue = "0")      int     page,
             @RequestParam(required = false, defaultValue = "20")     int     size,
             @RequestParam(required = false, defaultValue = "false")  boolean includeInactive,
-            @RequestHeader(value = "X-User-Id",   required = false)  Long    userId,
-            @RequestHeader(value = "X-User-Role", required = false)  String  userRole) {
+            @ActingUserId  Long    userId,
+            @ActingUserRole  String  userRole) {
         try {
             return ResponseEntity.ok(
                 itemService.listPaged(warehouseId, groupName, subGroupName,
@@ -67,7 +69,7 @@ public class InventoryItemController {
     @PostMapping
     public ResponseEntity<?> create(
             @RequestBody InventoryItemWrapper body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ResponseEntity.ok(itemService.create(body, userId));
         } catch (IllegalArgumentException e) {
@@ -88,7 +90,7 @@ public class InventoryItemController {
     @PostMapping("/bulk")
     public ResponseEntity<?> createBulk(
             @RequestBody InventoryItemBulkWrapper body,
-            @RequestHeader(value = "X-User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             return ResponseEntity.ok(itemService.bulkCreate(body, userId));
         } catch (IllegalArgumentException e) {

@@ -68,5 +68,11 @@ public class QuotationDTO {
         private BigDecimal lineTotal;
         private String deliveryLeadTime;
         private String make;          // FIX: Added make field
+        // Project BOM linkage — the picker needs these back on edit so a reloaded
+        // quotation keeps its link instead of falling back to name matching.
+        private Long bomLineId;
+        private Long bomItemId;
+        private Long variantId;
+        private String bomMatch;
     }
 }

@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.List;
 import java.util.Map;
 
@@ -27,7 +28,7 @@ public class PermissionsController {
     @PostMapping("/addNewPermission")
     public ResponseEntity<Map<String, String>> AddNewPermission(
             @RequestBody PermissionsEntity newPermission,
-            @RequestHeader("User-Id") Long creatorUserId) {
+            @ActingUserId Long creatorUserId) {
         try {
             String result = permissionsService.AddNewPermission(newPermission, creatorUserId);
             return ResponseEntity.ok(Map.of("message", result));

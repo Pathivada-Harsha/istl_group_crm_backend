@@ -1,5 +1,9 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserService;
+import com.istlgroup.istl_group_crm_backend.customException.BomEnforcementException;
 import com.istlgroup.istl_group_crm_backend.entity.PurchaseOrderEntity;
 import com.istlgroup.istl_group_crm_backend.entity.PurchaseOrderItemEntity;
 import com.istlgroup.istl_group_crm_backend.repo.PurchaseOrderItemRepository;
@@ -42,6 +46,7 @@ import java.util.stream.Collectors;
 @Slf4j
 public class PurchaseOrderController {
     
+    private final ActingUserService actingUserService;   // acting identity, from the session
     private final PurchaseOrderService purchaseOrderService;
     private final com.istlgroup.istl_group_crm_backend.service.PurchaseOrderPdfService purchaseOrderPdfService;
     private final ProjectAccessService projectAccessService;
@@ -67,8 +72,8 @@ public class PurchaseOrderController {
         @RequestParam(defaultValue = "DESC") String sortDirection,
         @RequestParam(required = false) String orderDateFrom,
         @RequestParam(required = false) String orderDateTo,
-        @RequestHeader(value = "X-User-Id", required = false) Long userId,
-        @RequestHeader(value = "X-User-Role", required = false) String userRole
+        @ActingUserId Long userId,
+        @ActingUserRole String userRole
 ) {
     try {
         if (projectId != null && !projectId.isBlank()
@@ -238,6 +243,8 @@ public ResponseEntity<?> createPOFromQuotation(
         
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
         
+    } catch (BomEnforcementException e) {
+        return bomConflict(e);
     } catch (Exception e) {
         log.error("Error creating PO from quotation", e);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -313,6 +320,8 @@ public ResponseEntity<?> createPOFromQuotation(
                             po
                     ));
             
+        } catch (BomEnforcementException e) {
+            return bomConflict(e);
         } catch (Exception e) {
             log.error("Error creating PO from quotation: {}", quotationId, e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -431,6 +440,8 @@ public ResponseEntity<?> createPurchaseOrder(
         
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
         
+    } catch (BomEnforcementException e) {
+        return bomConflict(e);
     } catch (Exception e) {
         log.error("Error creating purchase order", e);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -553,6 +564,10 @@ public ResponseEntity<?> updatePurchaseOrder(
         
         return ResponseEntity.ok(response);
         
+    } catch (BomEnforcementException e) {
+        // MUST precede the RuntimeException branch below, which would otherwise
+        // flatten this to a 400 with only the summary message.
+        return bomConflict(e);
     } catch (RuntimeException e) {
         log.error("Business logic error updating purchase order: {}", id, e);
         return ResponseEntity.badRequest()
@@ -793,41 +808,18 @@ public ResponseEntity<?> updatePurchaseOrder(
     }
     
     // Helper methods
-    
+
+    // Acting identity. These used to read X-User-Id / X-User-Role off the request and,
+    // failing that, return user 1 and role "USER" — so a request with no headers at all
+    // was served as user #1, and any caller could claim any role. Both now come from the
+    // authenticated session; a request that cannot be attributed is 401, never guessed.
+
     private Long getUserIdFromRequest(HttpServletRequest request) {
-        Object userIdAttr = request.getAttribute("userId");
-        if (userIdAttr != null) {
-            if (userIdAttr instanceof Long) return (Long) userIdAttr;
-            if (userIdAttr instanceof Integer) return ((Integer) userIdAttr).longValue();
-            if (userIdAttr instanceof String) return Long.parseLong((String) userIdAttr);
-        }
-        
-        String userIdHeader = request.getHeader("X-User-Id");
-        if (userIdHeader != null) {
-            try {
-                return Long.parseLong(userIdHeader);
-            } catch (NumberFormatException e) {
-                log.warn("Invalid userId in header: {}", userIdHeader);
-            }
-        }
-        
-        // Fallback for testing - remove in production
-        return 1L;
+        return actingUserService.requireUserId(request);
     }
-    
+
     private String getUserRoleFromRequest(HttpServletRequest request) {
-        Object userRoleAttr = request.getAttribute("userRole");
-        if (userRoleAttr != null) {
-            return userRoleAttr.toString();
-        }
-        
-        String userRoleHeader = request.getHeader("X-User-Role");
-        if (userRoleHeader != null) {
-            return userRoleHeader;
-        }
-        
-        // Fallback for testing - remove in production
-        return "USER";
+        return actingUserService.requireRole(request);
     }
     
     private Map<String, Object> createSuccessResponse(String message, Object data) {
@@ -845,6 +837,28 @@ public ResponseEntity<?> updatePurchaseOrder(
         response.put("success", false);
         response.put("message", message);
         return response;
+    }
+
+    /**
+     * 409 for a purchase order that breaches the project BOM, carrying every offending
+     * line so the frontend can highlight the rows and offer a route to amend the BOM.
+     *
+     * <p>409 rather than 400: the request is well-formed and conflicts with the current
+     * state of the BOM budget, and these endpoints already use 400 for ordinary field
+     * validation — which the frontend could not otherwise tell apart.
+     *
+     * <p>{@code success} and {@code message} are kept so any client that only reads
+     * {@code .message} still degrades to a sensible one-line error.
+     */
+    private ResponseEntity<Map<String, Object>> bomConflict(BomEnforcementException e) {
+        log.warn("BOM enforcement rejected PO for project {}: {}", e.getProjectUniqueId(), e.getMessage());
+        Map<String, Object> body = new HashMap<>();
+        body.put("success", false);
+        body.put("error", "BOM_LIMIT_EXCEEDED");
+        body.put("message", e.getMessage());
+        body.put("projectId", e.getProjectUniqueId());
+        body.put("violations", e.getViolations());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);
     }
 
     /**

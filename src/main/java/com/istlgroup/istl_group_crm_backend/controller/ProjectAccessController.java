@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.entity.ProjectAccessEntity;
 import com.istlgroup.istl_group_crm_backend.service.ProjectAccessService;
 import lombok.RequiredArgsConstructor;
@@ -34,7 +36,7 @@ public class ProjectAccessController {
     @GetMapping
     public ResponseEntity<?> listAccess(
             @PathVariable String projectId,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserRole String userRole) {
 
         if (!accessService.isAdmin(userRole)) {
             return forbidden("Only admins can list project access");
@@ -48,8 +50,8 @@ public class ProjectAccessController {
     @PostMapping
     public ResponseEntity<?> grantAccess(
             @PathVariable String projectId,
-            @RequestHeader(value = "User-Id",   required = false) Long   requesterId,
-            @RequestHeader(value = "User-Role", required = false) String requesterRole,
+            @ActingUserId Long   requesterId,
+            @ActingUserRole String requesterRole,
             @RequestBody GrantRequest body) {
 
         if (!accessService.isAdmin(requesterRole)) {
@@ -78,7 +80,7 @@ public class ProjectAccessController {
     public ResponseEntity<?> revokeAccess(
             @PathVariable String projectId,
             @PathVariable Long   userId,
-            @RequestHeader(value = "User-Role", required = false) String requesterRole) {
+            @ActingUserRole String requesterRole) {
 
         if (!accessService.isAdmin(requesterRole)) {
             return forbidden("Only admins can revoke project access");
@@ -95,8 +97,8 @@ public class ProjectAccessController {
     @GetMapping("/me")
     public ResponseEntity<?> myAccess(
             @PathVariable String projectId,
-            @RequestHeader(value = "User-Id",   required = false) Long   userId,
-            @RequestHeader(value = "User-Role", required = false) String userRole) {
+            @ActingUserId Long   userId,
+            @ActingUserRole String userRole) {
 
         boolean hasAccess = accessService.canAccessProject(projectId, userId, userRole);
         if (!hasAccess) {

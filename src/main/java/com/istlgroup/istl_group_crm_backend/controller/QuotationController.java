@@ -1,5 +1,8 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.QuotationDTO;
 import com.istlgroup.istl_group_crm_backend.entity.QuotationEntity;
 import com.istlgroup.istl_group_crm_backend.repo.QuotationRepository;
@@ -34,6 +37,7 @@ import java.util.stream.Collectors;
 @Slf4j
 public class QuotationController {
     
+    private final ActingUserService actingUserService;   // acting identity, from the session
     private final QuotationService quotationService;
     private final ProjectAccessService projectAccessService;
     private final QuotationRepository quotationRepository;
@@ -180,11 +184,13 @@ public class QuotationController {
                 quotation.setFileSize(file.getSize());
             }
             
-            QuotationEntity created = quotationService.createQuotation(quotation, userId);
-            QuotationDTO dto = QuotationMapper.toDTO(created);
-            
-            return ResponseEntity.status(HttpStatus.CREATED)
-                    .body(createSuccessResponse("Quotation created successfully", dto));
+            var result = quotationService.createQuotationChecked(quotation, userId);
+            QuotationDTO dto = QuotationMapper.toDTO(result.quotation());
+
+            Map<String, Object> response = createSuccessResponse("Quotation created successfully", dto);
+            // Off-BOM / over-quantity lines are reported but never block a quotation (§4.3).
+            response.put("bomWarnings", result.bomWarnings());
+            return ResponseEntity.status(HttpStatus.CREATED).body(response);
             
         } catch (Exception e) {
             log.error("Error creating quotation", e);
@@ -240,12 +246,14 @@ public class QuotationController {
             }
             
             // Update quotation
-            QuotationEntity updated = quotationService.updateQuotation(id, updatedQuotation);
-            QuotationDTO dto = QuotationMapper.toDTO(updated);
-            
-            log.info("✅ Quotation {} updated successfully", updated.getQuoteNo());
-            
-            return ResponseEntity.ok(createSuccessResponse("Quotation updated successfully", dto));
+            var result = quotationService.updateQuotationChecked(id, updatedQuotation);
+            QuotationDTO dto = QuotationMapper.toDTO(result.quotation());
+
+            log.info("✅ Quotation {} updated successfully", result.quotation().getQuoteNo());
+
+            Map<String, Object> response = createSuccessResponse("Quotation updated successfully", dto);
+            response.put("bomWarnings", result.bomWarnings());
+            return ResponseEntity.ok(response);
             
         } catch (Exception e) {
             log.error("❌ Error updating quotation: {}", id, e);
@@ -539,8 +547,8 @@ public class QuotationController {
     @GetMapping("/orderbook-items/{projectId}")
     public ResponseEntity<Map<String, Object>> getOrderBookItemsByProject(
             @PathVariable String projectId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             log.info("Fetching order book items for project: {}", projectId);
             
@@ -563,37 +571,16 @@ public class QuotationController {
 
     // Helper methods
     
+    // Acting identity, from the authenticated session. These used to read X-User-Id /
+    // X-User-Role off the request, so any caller could claim any id and any role. A
+    // request that cannot be attributed to a session user is now 401, never guessed.
+
     private Long getUserIdFromRequest(HttpServletRequest request) {
-        Object userIdAttr = request.getAttribute("userId");
-        if (userIdAttr != null) {
-            if (userIdAttr instanceof Long)    return (Long) userIdAttr;
-            if (userIdAttr instanceof Integer) return ((Integer) userIdAttr).longValue();
-            if (userIdAttr instanceof String)  return Long.parseLong((String) userIdAttr);
-        }
-
-        // Check both X-User-Id and User-Id header variants
-        for (String headerName : new String[]{"X-User-Id", "User-Id", "x-user-id", "user-id"}) {
-            String val = request.getHeader(headerName);
-            if (val != null && !val.isBlank()) {
-                try { return Long.parseLong(val.trim()); }
-                catch (NumberFormatException ignored) {}
-            }
-        }
-
-        return null; // Return null instead of 1L so callers can detect missing header
+        return actingUserService.requireUserId(request);
     }
 
     private String getUserRoleFromRequest(HttpServletRequest request) {
-        Object userRoleAttr = request.getAttribute("userRole");
-        if (userRoleAttr != null) return userRoleAttr.toString();
-
-        // Check both X-User-Role and User-Role header variants
-        for (String headerName : new String[]{"X-User-Role", "User-Role", "x-user-role", "user-role"}) {
-            String val = request.getHeader(headerName);
-            if (val != null && !val.isBlank()) return val;
-        }
-
-        return "USER";
+        return actingUserService.requireRole(request);
     }
     
     private Map<String, Object> createSuccessResponse(String message, Object data) {

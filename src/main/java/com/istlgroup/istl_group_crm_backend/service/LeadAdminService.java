@@ -15,15 +15,18 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.BomItemVariantEntity;
+import com.istlgroup.istl_group_crm_backend.entity.BomItemsMasterEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadBomTemplateItemEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadScopeTemplateEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadScopeTemplateItemEntity;
 import com.istlgroup.istl_group_crm_backend.entity.TemplateLineVariantEntity;
 import com.istlgroup.istl_group_crm_backend.repo.BomItemVariantRepo;
+import com.istlgroup.istl_group_crm_backend.repo.BomItemsMasterRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadBomTemplateItemRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadScopeTemplateItemRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadScopeTemplateRepo;
 import com.istlgroup.istl_group_crm_backend.repo.TemplateLineVariantRepo;
+import com.istlgroup.istl_group_crm_backend.util.VariantAttributes;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadTemplateWrapper.TemplateBomLineRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadTemplateWrapper.TemplateBomLinesRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadTemplateWrapper.TemplateHeaderRequest;
@@ -46,7 +49,9 @@ public class LeadAdminService {
     private final LeadScopeTemplateItemRepo scopeItemRepo;
     private final LeadBomTemplateItemRepo bomItemRepo;
     private final BomItemVariantRepo bomItemVariantRepo;
+    private final BomItemsMasterRepo bomItemsMasterRepo;
     private final TemplateLineVariantRepo templateLineVariantRepo;
+    private final BomCatalogueHealthService catalogueHealth;
 
     // ── Header ─────────────────────────────────────────────────────────────────
 
@@ -215,12 +220,20 @@ public class LeadAdminService {
         LeadScopeTemplateEntity t = templateRepo.findByIdAndDeletedAtIsNull(templateId)
                 .orElseThrow(() -> new CustomException("Template not found"));
         List<TemplateBomLineRequest> incoming = body.getLines() != null ? body.getLines() : List.of();
-        for (TemplateBomLineRequest r : incoming) {
+        for (int i = 0; i < incoming.size(); i++) {
+            TemplateBomLineRequest r = incoming.get(i);
             if (r.getItemName() == null || r.getItemName().isBlank()) {
                 throw new CustomException("Every BOM line needs an item name");
             }
             if (r.getBasis() != null && !isValidBasis(r.getBasis())) {
                 throw new CustomException("Invalid basis: " + r.getBasis());
+            }
+            // A line saved without the number its basis needs produces a blank
+            // quantity on every lead seeded from this template, with nothing on
+            // the lead pointing back here — so it is refused at the source.
+            String problem = incompleteBasisReason(r);
+            if (problem != null) {
+                throw new CustomException("Line " + (i + 1) + " \"" + r.getItemName().trim() + "\": " + problem);
             }
         }
 
@@ -399,6 +412,225 @@ public class LeadAdminService {
         }
     }
 
+    // ── Basis completeness ──────────────────────────────────────────────────────
+
+    /** Site-visit columns a FROM_SITE_VISIT line may read (mirrors latestSiteVisitFields). */
+    private static final List<String> SITE_VISIT_FIELDS =
+            List.of("ac_cable_length", "dc_cable_length", "sanctioned_load", "shadow_free_area");
+
+    /** Issue codes shared with the Templates screen, so a saved line explains itself the same way. */
+    static final String ISSUE_NEEDS_BASIS_VALUE = "NEEDS_BASIS_VALUE";
+    static final String ISSUE_NEEDS_STEP_VALUE = "NEEDS_STEP_VALUE";
+    static final String ISSUE_NEEDS_SITE_VISIT_FIELD = "NEEDS_SITE_VISIT_FIELD";
+    static final String ISSUE_NEEDS_CATALOGUE_ITEM = "NEEDS_CATALOGUE_ITEM";
+    static final String ISSUE_NEEDS_MAKE_ATTRIBUTE = "NEEDS_MAKE_ATTRIBUTE";
+    static final String ISSUE_DEFAULT_MAKE_MISSING_ATTRIBUTE = "DEFAULT_MAKE_MISSING_ATTRIBUTE";
+
+    /**
+     * Why this incoming line could never produce a quantity, or null when it can.
+     * Only conditions that are hopeless for EVERY lead block the save; a catalogue
+     * that is merely patchy (some makes carry the attribute, some don't) is
+     * reported by {@link #lineConfigIssue} and by the catalogue health check
+     * instead, because the estimator can still pick a make that works.
+     */
+    private String incompleteBasisReason(TemplateBomLineRequest r) {
+        String basis = r.getBasis() == null ? LeadBomTemplateItemEntity.BASIS_PER_KW : r.getBasis();
+        switch (basis) {
+            case LeadBomTemplateItemEntity.BASIS_FIXED:
+            case LeadBomTemplateItemEntity.BASIS_PER_KW:
+            case LeadBomTemplateItemEntity.BASIS_PER_MODULE:
+            case LeadBomTemplateItemEntity.BASIS_PER_INVERTER:
+                if (isPositive(r.getBasisValue())) return null;
+                // Demanding "a number above zero" and stopping there is how a module
+                // line ends up as a fixed 2: the quickest way to satisfy the message
+                // is to type something, and the basis that actually wanted no number
+                // is never mentioned. So when the catalogue can drive one, say so here.
+                return basisLabel(basis) + " needs a quantity value above zero — enter one in the Qty column."
+                        + advicePostscript(r);
+            case LeadBomTemplateItemEntity.BASIS_PER_STEP:
+                return isPositive(r.getStepValue()) ? null
+                        : "Per step needs the kW per unit above zero — enter it in the Qty column.";
+            case LeadBomTemplateItemEntity.BASIS_FROM_SITE_VISIT:
+                if (r.getSiteVisitField() == null || r.getSiteVisitField().isBlank()) {
+                    return "From site visit needs a site-visit field — pick one in the Qty column.";
+                }
+                return SITE_VISIT_FIELDS.contains(r.getSiteVisitField().trim()) ? null
+                        : "\"" + r.getSiteVisitField().trim() + "\" is not a site-visit field the suggestion can read.";
+            case LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK:
+            case LeadBomTemplateItemEntity.BASIS_PER_INVERTER_KW:
+                return driverBasisReason(basis, r.getBomItemId(), r.getAllowedVariantIds());
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * " Or switch it to …" — appended to a rejected line when the catalogue could
+     * size it off the selected make instead, so the alternative is offered at the
+     * exact moment the admin is deciding what number to type.
+     */
+    private String advicePostscript(TemplateBomLineRequest r) {
+        Map<String, Object> adv = catalogueHealth.basisAdvice(
+                r.getBomItemId(), r.getAllowedVariantIds(), r.getBasis());
+        if (adv == null) return "";
+        return " Or switch it to “" + adv.get("basisLabel") + "”, which reads the "
+                + adv.get("attrLabel") + " off the selected make and needs no value here.";
+    }
+
+    /** The make-driven half of {@link #incompleteBasisReason}, shared with the saved-line check. */
+    private String driverBasisReason(String basis, Long bomItemId, List<Long> allowedVariantIds) {
+        String key = VariantAttributes.attrKeyForBasis(basis);
+        String attr = attrLabel(bomItemId, key);
+        if (bomItemId == null) {
+            return basisLabel(basis) + " reads the " + attr + " off the selected make, so the line must be "
+                    + "linked to a catalogue item — pick one in the Component column.";
+        }
+        List<BomItemVariantEntity> selectable = selectableMakes(bomItemId, allowedVariantIds);
+        if (selectable.isEmpty()) {
+            return "the linked catalogue item has no active makes, so no " + attr
+                    + " can be read — add makes to it in Master Items.";
+        }
+        boolean any = selectable.stream()
+                .anyMatch(v -> VariantAttributes.hasUsableNumeric(v.getAttributeValues(), key));
+        return any ? null
+                : "no make of the linked catalogue item records a " + attr
+                        + " — add it to at least one make in Master Items.";
+    }
+
+    /** The makes a lead may choose for this line: the curated subset when set, else every active make. */
+    private List<BomItemVariantEntity> selectableMakes(Long bomItemId, List<Long> allowedVariantIds) {
+        List<BomItemVariantEntity> active =
+                bomItemVariantRepo.findByBomItemIdAndIsActiveTrueOrderByMakeAsc(bomItemId);
+        if (allowedVariantIds == null || allowedVariantIds.isEmpty()) return active;
+        List<BomItemVariantEntity> curated = new ArrayList<>();
+        for (BomItemVariantEntity v : active) if (allowedVariantIds.contains(v.getId())) curated.add(v);
+        // A curated set that no longer matches any active make is stale, not empty
+        // intent — fall back to the item's makes so the check reflects reality.
+        return curated.isEmpty() ? active : curated;
+    }
+
+    /**
+     * Whether this template line can produce a quantity today — the same verdict
+     * the Templates screen shows, exposed so the lead BOM tab can ask "would
+     * re-running the suggestion actually fix my blank line?" without a second,
+     * drifting copy of these rules.
+     */
+    public boolean canProduceQuantity(LeadBomTemplateItemEntity b) {
+        List<Long> allowed = new ArrayList<>();
+        Long def = null;
+        if (b.getId() != null) {
+            for (TemplateLineVariantEntity x : templateLineVariantRepo.findByTemplateItemId(b.getId())) {
+                allowed.add(x.getVariantId());
+                if (Boolean.TRUE.equals(x.getIsDefault())) def = x.getVariantId();
+            }
+        }
+        Map<String, Object> issue = lineConfigIssue(b, allowed, def);
+        // A WARNING line still sizes (the estimator can pick another make); only a
+        // BLOCKING one is guaranteed to come out blank.
+        return issue == null || !"BLOCKING".equals(issue.get("severity"));
+    }
+
+    /**
+     * Why a SAVED line cannot produce a quantity, as {@code {code, message, severity}},
+     * or null when it is sound. This is what lets the Templates screen list the
+     * broken lines without the admin opening every row.
+     */
+    private Map<String, Object> lineConfigIssue(LeadBomTemplateItemEntity b, List<Long> allowed, Long defaultId) {
+        String basis = b.getBasis() == null ? LeadBomTemplateItemEntity.BASIS_PER_KW : b.getBasis();
+        switch (basis) {
+            case LeadBomTemplateItemEntity.BASIS_FIXED:
+            case LeadBomTemplateItemEntity.BASIS_PER_KW:
+            case LeadBomTemplateItemEntity.BASIS_PER_MODULE:
+            case LeadBomTemplateItemEntity.BASIS_PER_INVERTER:
+                if (!isPositive(b.getBasisValue())) {
+                    return issue(ISSUE_NEEDS_BASIS_VALUE, "BLOCKING",
+                            basisLabel(basis) + " has no quantity value — every lead gets a blank quantity for this line.");
+                }
+                return null;
+            case LeadBomTemplateItemEntity.BASIS_PER_STEP:
+                if (!isPositive(b.getStepValue())) {
+                    return issue(ISSUE_NEEDS_STEP_VALUE, "BLOCKING",
+                            "Per step has no kW per unit — every lead gets a blank quantity for this line.");
+                }
+                return null;
+            case LeadBomTemplateItemEntity.BASIS_FROM_SITE_VISIT:
+                if (b.getSiteVisitField() == null || b.getSiteVisitField().isBlank()
+                        || !SITE_VISIT_FIELDS.contains(b.getSiteVisitField().trim())) {
+                    return issue(ISSUE_NEEDS_SITE_VISIT_FIELD, "BLOCKING",
+                            "From site visit names no readable site-visit field.");
+                }
+                return null;
+            case LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK:
+            case LeadBomTemplateItemEntity.BASIS_PER_INVERTER_KW:
+                return driverLineIssue(basis, b.getBomItemId(), allowed, defaultId);
+            default:
+                return null;
+        }
+    }
+
+    private Map<String, Object> driverLineIssue(String basis, Long bomItemId, List<Long> allowed, Long defaultId) {
+        String key = VariantAttributes.attrKeyForBasis(basis);
+        String attr = attrLabel(bomItemId, key);
+        if (bomItemId == null) {
+            return issue(ISSUE_NEEDS_CATALOGUE_ITEM, "BLOCKING",
+                    basisLabel(basis) + " is not linked to a catalogue item, so no " + attr + " can be read.");
+        }
+        List<BomItemVariantEntity> selectable = selectableMakes(bomItemId, allowed);
+        boolean any = selectable.stream()
+                .anyMatch(v -> VariantAttributes.hasUsableNumeric(v.getAttributeValues(), key));
+        if (!any) {
+            return issue(ISSUE_NEEDS_MAKE_ATTRIBUTE, "BLOCKING",
+                    "No make of this item records a " + attr + ", so the count cannot be computed.");
+        }
+        // The default is what a fresh suggestion picks, so a default without the
+        // attribute means every new lead starts blank even though a fix exists.
+        BomItemVariantEntity def = null;
+        for (BomItemVariantEntity v : selectable) {
+            if (defaultId != null && defaultId.equals(v.getId())) { def = v; break; }
+        }
+        if (def == null && !selectable.isEmpty()) def = selectable.get(0);
+        if (def != null && !VariantAttributes.hasUsableNumeric(def.getAttributeValues(), key)) {
+            return issue(ISSUE_DEFAULT_MAKE_MISSING_ATTRIBUTE, "WARNING",
+                    "The default make (" + variantMakeLabel(def.getMake(), def.getModel()) + ") records no "
+                            + attr + " — new leads start blank until another make is chosen.");
+        }
+        return null;
+    }
+
+    private static Map<String, Object> issue(String code, String severity, String message) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("code", code);
+        m.put("severity", severity);
+        m.put("message", message);
+        return m;
+    }
+
+    /** How the catalogue names this attribute, so messages match what the admin sees. */
+    private String attrLabel(Long bomItemId, String key) {
+        if (key == null) return "value";
+        String schema = bomItemId == null ? null : bomItemsMasterRepo.findById(bomItemId)
+                .map(BomItemsMasterEntity::getVariantAttributes).orElse(null);
+        return VariantAttributes.labelForKey(schema, key);
+    }
+
+    private static boolean isPositive(BigDecimal v) {
+        return v != null && v.signum() > 0;
+    }
+
+    private static String basisLabel(String basis) {
+        switch (basis) {
+            case LeadBomTemplateItemEntity.BASIS_FIXED:          return "Fixed quantity";
+            case LeadBomTemplateItemEntity.BASIS_PER_KW:         return "Per kW";
+            case LeadBomTemplateItemEntity.BASIS_PER_STEP:       return "Per step";
+            case LeadBomTemplateItemEntity.BASIS_FROM_SITE_VISIT: return "From site visit";
+            case LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK:  return "Module count (from Wp)";
+            case LeadBomTemplateItemEntity.BASIS_PER_INVERTER_KW: return "Inverter count (from kW)";
+            case LeadBomTemplateItemEntity.BASIS_PER_MODULE:     return "Per module count";
+            case LeadBomTemplateItemEntity.BASIS_PER_INVERTER:   return "Per inverter count";
+            default: return basis;
+        }
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────────────
 
     private boolean isValidBasis(String basis) {
@@ -444,6 +676,9 @@ public class LeadAdminService {
         m.put("name", t.getName());
         m.put("description", t.getDescription());
         m.put("isActive", t.getIsActive());
+        // Bumped on every line-list save; leads snapshot it so a BOM built from an
+        // older version can say so.
+        m.put("version", t.getVersion() == null ? 1 : t.getVersion());
         return m;
     }
 
@@ -490,6 +725,13 @@ public class LeadAdminService {
         }
         m.put("allowedVariantIds", allowed);
         m.put("defaultVariantId", def);
+        // Why this line can't (or might not) produce a quantity — so the Templates
+        // screen can list the broken lines without opening every row.
+        m.put("configIssue", lineConfigIssue(b, allowed, def));
+        // A better basis the catalogue could already drive. Kept SEPARATE from
+        // configIssue: a fixed-quantity line is not at fault, so advice must not
+        // colour the row or join the "lines need attention" count.
+        m.put("basisAdvice", catalogueHealth.basisAdvice(b.getBomItemId(), allowed, b.getBasis()));
         return m;
     }
 }

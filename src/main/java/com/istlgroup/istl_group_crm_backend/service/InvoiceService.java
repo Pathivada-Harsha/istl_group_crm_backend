@@ -278,6 +278,10 @@ public class InvoiceService {
                 // Privileged roles keep their chosen status, default to DRAFT
                 if (invoice.getStatus() == null || invoice.getStatus().isEmpty()) {
                     invoice.setStatus(InvoiceEntity.Status.DRAFT);
+                } else {
+                    // The client sends screaming-snake tokens (SENT, PENDING_APPROVAL, ...);
+                    // store the canonical label so status guards and filters match.
+                    invoice.setStatus(InvoiceEntity.Status.normalize(invoice.getStatus()));
                 }
             }
 
@@ -344,7 +348,7 @@ public class InvoiceService {
             }
 
             // ── Send notification email to accounts team if PENDING_APPROVAL ──
-            if (InvoiceEntity.Status.PENDING_APPROVAL.equals(savedInvoice.getStatus())) {
+            if (InvoiceEntity.Status.is(savedInvoice.getStatus(), InvoiceEntity.Status.PENDING_APPROVAL)) {
                 sendPendingApprovalEmail(savedInvoice, userId);
             }
 
@@ -354,7 +358,7 @@ public class InvoiceService {
             //    The creator is intentionally NOT notified at creation — they are
             //    only notified after the invoice is approved or rejected.
             try {
-                if (InvoiceEntity.Status.PENDING_APPROVAL.equals(savedInvoice.getStatus())) {
+                if (InvoiceEntity.Status.is(savedInvoice.getStatus(), InvoiceEntity.Status.PENDING_APPROVAL)) {
                     notifyApproversOfPendingInvoice(savedInvoice);
                 }
             } catch (Exception e) {
@@ -494,7 +498,7 @@ public class InvoiceService {
         existing.setSubGroupId(updatedInvoice.getSubGroupId());
         existing.setInvoiceDate(updatedInvoice.getInvoiceDate());
         existing.setDueDate(updatedInvoice.getDueDate());
-        existing.setStatus(updatedInvoice.getStatus());
+        existing.setStatus(InvoiceEntity.Status.normalize(updatedInvoice.getStatus()));
         existing.setCompany(updatedInvoice.getCompany());
         existing.setInvoiceNumber(updatedInvoice.getInvoiceNumber()); // Fix: persist Tally Invoice Number
         
@@ -550,7 +554,7 @@ public class InvoiceService {
     @Transactional
     public InvoiceEntity updateStatus(Long id, String newStatus) {
         InvoiceEntity invoice = getInvoiceById(id);
-        invoice.setStatus(newStatus);
+        invoice.setStatus(InvoiceEntity.Status.normalize(newStatus));
         invoice.setUpdatedAt(LocalDateTime.now());
         
         log.info("Updated invoice {} status to: {}", invoice.getInvoiceNo(), newStatus);
@@ -558,7 +562,7 @@ public class InvoiceService {
 
         // ── NOTIFICATION: invoice rejected → notify the creator ──
         try {
-            if ("Rejected".equalsIgnoreCase(newStatus) && saved.getCreatedBy() != null) {
+            if (InvoiceEntity.Status.is(newStatus, InvoiceEntity.Status.REJECTED) && saved.getCreatedBy() != null) {
                 notificationService.createNotification(
                     saved.getCreatedBy(),
                     "Invoice rejected",
@@ -635,15 +639,25 @@ public class InvoiceService {
         // ✅ NEW: Populate customer details before returning
         populateCustomerDetails(saved);
 
-        // ── Direct incremental update on projects table ─────────────────────
+        // ── Re-derive the project's invoice stats from source ────────────────
+        //
+        // This used to call incrementProjectPaidInvoiceValue, which did
+        // "paid_invoice_value = paid_invoice_value + :paymentAmount". That made it
+        // a SECOND writer for a column whose authoritative value is SUM(receipts) —
+        // ProjectStatsService.calculateInvoiceStats assigns it outright from
+        // receiptRepository.sumReceiptAmountByProjectId. The two disagree the moment
+        // a payment is recorded without a matching receipt row, or a save is retried:
+        // the increment inflates the column and it stays wrong until the next recalc
+        // happens to overwrite it.
+        //
+        // Recomputing gives the column exactly one definition, and makes it correct
+        // immediately rather than eventually. Same call ReceiptService already makes
+        // after every receipt write.
         if (saved.getProjectId() != null && !saved.getProjectId().isBlank()) {
             try {
-                projectRepository.incrementProjectPaidInvoiceValue(
-                    saved.getProjectId(), paymentAmount);
-                log.info("Incremented paid_invoice_value by {} for project [{}]",
-                         paymentAmount, saved.getProjectId());
+                syncProjectInvoiceStats(saved.getProjectId());
             } catch (Exception e) {
-                log.error("Failed to update project invoice stats for [{}]: {}",
+                log.error("Failed to sync project invoice stats for [{}]: {}",
                           saved.getProjectId(), e.getMessage(), e);
             }
         }
@@ -971,7 +985,7 @@ public class InvoiceService {
                                          String notes, String tallyNumber) {
         InvoiceEntity invoice = getInvoiceById(invoiceId);
 
-        if (!InvoiceEntity.Status.PENDING_APPROVAL.equals(invoice.getStatus())) {
+        if (!InvoiceEntity.Status.is(invoice.getStatus(), InvoiceEntity.Status.PENDING_APPROVAL)) {
             throw new RuntimeException("Invoice is not in PENDING_APPROVAL status. Current status: " + invoice.getStatus());
         }
 
@@ -1156,7 +1170,7 @@ public class InvoiceService {
     public InvoiceEntity rejectInvoice(Long invoiceId, Long approverUserId, String approverName, String reason) {
         InvoiceEntity invoice = getInvoiceById(invoiceId);
 
-        if (!InvoiceEntity.Status.PENDING_APPROVAL.equals(invoice.getStatus())) {
+        if (!InvoiceEntity.Status.is(invoice.getStatus(), InvoiceEntity.Status.PENDING_APPROVAL)) {
             throw new RuntimeException("Invoice is not in PENDING_APPROVAL status. Current status: " + invoice.getStatus());
         }
 

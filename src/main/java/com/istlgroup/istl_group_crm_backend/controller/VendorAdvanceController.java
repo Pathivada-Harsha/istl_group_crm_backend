@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.entity.BillEntity;
 import com.istlgroup.istl_group_crm_backend.entity.VendorAdvanceEntity;
 import com.istlgroup.istl_group_crm_backend.repo.ProjectRepository;
@@ -99,7 +100,7 @@ public class VendorAdvanceController {
     @PostMapping
     public ResponseEntity<?> createAdvance(
             @RequestBody Map<String, Object> body,
-            @RequestHeader("X-User-Id") Long userId) {
+            @ActingUserId Long userId) {
         try {
             VendorAdvanceEntity advance = mapToEntity(body);
             VendorAdvanceEntity saved = advanceService.createAdvance(advance, userId);
@@ -119,7 +120,7 @@ public class VendorAdvanceController {
     public ResponseEntity<?> updateAdvance(
             @PathVariable Long id,
             @RequestBody Map<String, Object> body,
-            @RequestHeader("X-User-Id") Long userId) {
+            @ActingUserId Long userId) {
         try {
             VendorAdvanceEntity updated = mapToEntity(body);
             VendorAdvanceEntity saved = advanceService.updateAdvance(id, updated, userId);
@@ -135,7 +136,7 @@ public class VendorAdvanceController {
     @DeleteMapping("/{id}")
     public ResponseEntity<?> deleteAdvance(
             @PathVariable Long id,
-            @RequestHeader("X-User-Id") Long userId) {
+            @ActingUserId Long userId) {
         try {
             advanceService.deleteAdvance(id, userId);
             return ResponseEntity.ok(Map.of("message", "Deleted successfully"));
@@ -163,7 +164,7 @@ public class VendorAdvanceController {
     public ResponseEntity<?> allocate(
             @PathVariable Long id,
             @RequestBody Map<String, Object> payload,
-            @RequestHeader("X-User-Id") Long userId) {
+            @ActingUserId Long userId) {
         try {
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> allocations = (List<Map<String, Object>>) payload.get("allocations");
@@ -195,7 +196,7 @@ public class VendorAdvanceController {
     public ResponseEntity<?> removeAllocation(
             @PathVariable Long advanceId,
             @PathVariable Long billId,
-            @RequestHeader("X-User-Id") Long userId) {
+            @ActingUserId Long userId) {
         try {
             VendorAdvanceEntity updated = advanceService.removeAllocation(advanceId, billId, userId);
             return ResponseEntity.ok(Map.of("message", "Allocation removed", "data", entityToMap(updated)));

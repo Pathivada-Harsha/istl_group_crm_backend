@@ -159,6 +159,16 @@ public interface UsersRepo extends JpaRepository<UsersEntity, Long> {
     @Query(value = "SELECT COUNT(*) FROM users WHERE manager_id = :managerId", nativeQuery = true)
     long countByManagerId(@Param("managerId") Long managerId);
 
+    /**
+     * Every edge of the reporting graph, active users only: [id, manager_id].
+     * One flat read is enough for {@link com.istlgroup.istl_group_crm_backend.service.UserScopeService}
+     * to walk a whole subtree in memory — cheap at this org size, and immune to the
+     * cycles a hand-maintained manager_id column can pick up (a recursive CTE is not).
+     * manager_id may be NULL (top of a chain) or point at an inactive user.
+     */
+    @Query(value = "SELECT id, manager_id FROM users WHERE is_active = 1", nativeQuery = true)
+    List<Object[]> findActiveReportingEdges();
+
     // ── Legacy created_by ─────────────────────────────────────────────────────
 
     @Query(value = "SELECT * FROM users WHERE created_by = :userId ORDER BY id LIMIT :size OFFSET :offset", nativeQuery = true)
@@ -216,6 +226,21 @@ public interface UsersRepo extends JpaRepository<UsersEntity, Long> {
     List<UsersEntity>     findByNameIgnoreCase(String name);
     Optional<UsersEntity> findByPhone(String phone);
     Optional<UsersEntity> findByRole(String role);
+
+    /**
+     * Email lookup for the lead import's "Assigned To (Email)" column.
+     *
+     * <p>Returns a List rather than an Optional for the same reason
+     * {@link #findByNameIgnoreCase(String)} does — see the duplicate-rows note at the top
+     * of this interface. An Optional finder throws NonUniqueResultException the moment two
+     * users share an address, and on the import path that would abort a whole spreadsheet
+     * over one bad users row instead of reporting the one lead it affects. A List cannot
+     * throw, so the caller can turn the ambiguity into an ordinary per-row error.
+     *
+     * <p>IgnoreCase makes the case-insensitivity a property of this query rather than of
+     * the column's current utf8mb4_unicode_ci collation.
+     */
+    List<UsersEntity>     findByEmailIgnoreCase(String email);
 
     @Query(value = """
         SELECT m.name FROM menu_items m

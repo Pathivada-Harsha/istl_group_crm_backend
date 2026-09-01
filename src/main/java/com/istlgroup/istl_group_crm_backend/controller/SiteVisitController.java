@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,8 +56,8 @@ public class SiteVisitController {
     /** Create a site visit report (lead-access holders, admins, or the assigned visitor). */
     @PostMapping
     public ResponseEntity<Map<String, Object>> create(
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestBody SiteVisitRequestWrapper request) {
         try {
             SiteVisitWrapper created = siteVisitService.create(request, userId, userRole);
@@ -75,8 +77,8 @@ public class SiteVisitController {
     @PutMapping("/{id}")
     public ResponseEntity<Map<String, Object>> update(
             @PathVariable Long id,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestBody SiteVisitRequestWrapper request) {
         try {
             SiteVisitWrapper updated = siteVisitService.update(id, request, userId, userRole);

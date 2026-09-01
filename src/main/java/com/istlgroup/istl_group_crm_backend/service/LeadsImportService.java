@@ -199,9 +199,16 @@ public class LeadsImportService {
                     if (saved.getAssignedTo() != null) {
                         String assignedName = usersRepo.findById(saved.getAssignedTo())
                             .map(u -> u.getName()).orElse("Unknown");
+                        // Deliberately does NOT claim round-robin. Since resolveAssignment
+                        // now rejects an unresolvable email instead of silently rotating,
+                        // an assignment here came either from the sheet's "Assigned To
+                        // (Email)" cell or from round-robin on an empty cell — and this
+                        // dead-endpoint path does not thread that distinction through to
+                        // here. Saying "via round-robin" was wrong whenever the sheet
+                        // named someone, which is the case this whole change is about.
                         leadHistoryService.addHistory(saved.getId(), "ASSIGNED",
                             "assignedTo", "Unassigned", assignedName,
-                            "Assigned via round-robin on import", importedBy);
+                            "Assigned on import", importedBy);
                     }
                 } catch (Exception ex) {
                     log.warn("History write failed for imported lead {}: {}", saved.getId(), ex.getMessage());
@@ -269,7 +276,14 @@ public class LeadsImportService {
         if (source.isBlank())   source   = "Others";
         if (priority.isBlank()) priority = "Medium";
 
-        Long assignedTo = resolveAssignment(assignedEmail, group, subGroup, emailToUserId, result, displayRow);
+        Long assignedTo;
+        try {
+            assignedTo = resolveAssignment(assignedEmail, group, subGroup, emailToUserId, result, displayRow);
+        } catch (UnresolvableAssigneeException e) {
+            result.addError(displayRow, e.getMessage());
+            result.incrementSkipped();
+            return null;
+        }
 
         LeadsEntity lead = new LeadsEntity();
         // leadCode is intentionally NOT set here — it's assigned after save using the DB id
@@ -339,7 +353,14 @@ public class LeadsImportService {
         if (source.isBlank())   source   = "Others";
         if (priority.isBlank()) priority = "Medium";
 
-        Long assignedTo = resolveAssignment(assignedEmail, group, PM_CATEGORY, emailToUserId, result, displayRow);
+        Long assignedTo;
+        try {
+            assignedTo = resolveAssignment(assignedEmail, group, PM_CATEGORY, emailToUserId, result, displayRow);
+        } catch (UnresolvableAssigneeException e) {
+            result.addError(displayRow, e.getMessage());
+            result.incrementSkipped();
+            return null;
+        }
 
         String fullEnquiry = enquiry.isBlank()
             ? (notes.isBlank() ? "" : notes)
@@ -395,22 +416,47 @@ public class LeadsImportService {
         return String.format("LEAD-%s-%06d", year, id);
     }
 
+    /**
+     * Signals that a row named an assignee that cannot be honoured. The caller turns this
+     * into a skipped row, matching how validation failures are already reported.
+     */
+    private static class UnresolvableAssigneeException extends RuntimeException {
+        UnresolvableAssigneeException(String message) { super(message); }
+    }
+
+    /**
+     * Resolves the sheet's "Assigned To (Email)" cell, falling back to the telecaller
+     * round-robin only when the cell is EMPTY.
+     *
+     * <p>An email that does not resolve rejects the row. It used to log a warning and
+     * round-robin the lead anyway, which defeats the point of the column: the importer
+     * deliberately named an owner and the lead went to somebody else, with the warning
+     * buried in a list the uploader had no reason to read. Rejecting makes the typo
+     * visible and keeps the round-robin rotation out of it.
+     *
+     * <p>Kept in step with {@code LeadsService.resolveAssignedToEmail}, which does the same
+     * job for the live {@code /leads/bulk-create} path. Two importers, one rule.
+     */
     private Long resolveAssignment(String assignedEmail, String group, String subGroup,
                                    Map<String, Long> emailToUserId,
                                    ImportResult result, int displayRow) {
-        Long assignedTo = null;
-        if (!assignedEmail.isBlank()) {
-            assignedTo = emailToUserId.computeIfAbsent(
-                assignedEmail.toLowerCase(),
-                e -> usersRepo.findByEmail(e).map(u -> u.getId()).orElse(null));
-            if (assignedTo == null) {
-                result.addError(displayRow,
-                    "Warning: user email '" + assignedEmail +
-                    "' not found — applying round-robin assignment instead");
-            }
+        if (assignedEmail.isBlank()) {
+            // No owner named — this is the case round-robin exists for.
+            return roundRobin.getNextTelecaller(group, subGroup);
         }
+
+        String email = assignedEmail.replace(' ', ' ').trim();
+        Long assignedTo = emailToUserId.computeIfAbsent(
+            email.toLowerCase(),
+            e -> usersRepo.findByEmailIgnoreCase(e).stream()
+                    .filter(u -> u.getIs_active() != null && u.getIs_active() == 1L)
+                    .map(u -> u.getId())
+                    .findFirst()
+                    .orElse(null));
+
         if (assignedTo == null) {
-            assignedTo = roundRobin.getNextTelecaller(group, subGroup);
+            throw new UnresolvableAssigneeException(
+                "Assigned To email '" + email + "' does not match any active CRM user");
         }
         return assignedTo;
     }

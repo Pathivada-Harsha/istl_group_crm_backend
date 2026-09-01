@@ -264,16 +264,18 @@ public class ProjectStatsService {
         // ── Overall project progress = TECHNICAL (physical) only ─────────────
         //  Financial is a SEPARATE metric (shown beside the dashboard donut + in the
         //  Progress-breakdown modal), never blended into "progress" — a blended number
-        //  hid where a project was actually delayed. A manual override wins; when there
-        //  is no scope (physical == null) fall back to the financial score so the
-        //  headline isn't blank. A genuine 0% is not "manually set" — the override
-        //  lives in its own column (NULL = auto). (Defect §5.3a.)
+        //  hid where a project was actually delayed. A manual override wins; with no
+        //  override and no scope this stays NULL, meaning "not tracked".
+        //  It used to fall back to the financial score here so the headline wouldn't
+        //  be blank, but that made every scope-less project display the financial
+        //  number under a "Technical" label — the breakdown modal showed the same
+        //  figure twice while saying no scope was defined. The UI now renders "—".
+        //  A genuine 0% is not "manually set" — the override lives in its own column
+        //  (NULL = auto). (Defect §5.3a.)
         if (project.getProgressOverride() != null) {
             project.setProgressPercentage(project.getProgressOverride());
-        } else if (physical != null) {
-            project.setProgressPercentage(physical);
         } else {
-            project.setProgressPercentage(weightedProgress);
+            project.setProgressPercentage(physical);   // null when no scope
         }
 
         // ── Smart status update (skip if locked) ─────────────────────────
@@ -386,7 +388,15 @@ public class ProjectStatsService {
     public void recomputePhysicalProgress(String projectUniqueId) {
         ProjectEntity project = projectRepository.findByProjectUniqueId(projectUniqueId).orElse(null);
         if (project == null) return;
-        project.setPhysicalProgressPct(computePhysicalProgress(project.getId()));
+        BigDecimal physical = computePhysicalProgress(project.getId());
+        project.setPhysicalProgressPct(physical);
+        // Keep the headline in step with the roll-up right away (same rule as the full
+        // recalc: override wins, otherwise physical, otherwise NULL = not tracked) —
+        // otherwise adding the first phase leaves progress_percentage stale until the
+        // scheduler next runs.
+        if (project.getProgressOverride() == null) {
+            project.setProgressPercentage(physical);
+        }
         projectRepository.save(project);
     }
 

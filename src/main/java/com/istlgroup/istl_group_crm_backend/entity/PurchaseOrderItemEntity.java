@@ -68,7 +68,37 @@ public class PurchaseOrderItemEntity {
     
     @Column(name = "delivery_schedule")
     private String deliverySchedule;
-    
+
+    /** Make/brand carried over from the project BOM line. */
+    @Column(name = "make", length = 255)
+    private String make;
+
+    // ── Project BOM linkage ──────────────────────────────────────────────────
+    /**
+     * {@code project_bom.id} this line consumes — the key every quantity cap is
+     * computed against. Stable across BOM edits because
+     * {@code ProjectDetailService.saveBom} merges by id. Null = unresolved.
+     */
+    @Column(name = "bom_line_id")
+    private Long bomLineId;
+
+    /** Catalogue snapshot ({@code bom_items_master.id}) — repair key if bomLineId dangles. */
+    @Column(name = "bom_item_id")
+    private Long bomItemId;
+
+    /** Chosen make snapshot ({@code bom_item_variants.id}). */
+    @Column(name = "variant_id")
+    private Long variantId;
+
+    /**
+     * How this line was tied to the BOM: ID | VARIANT | NAME | NONE.
+     * <p>NULL is a persisted fact, not a missing value: it means the row was written
+     * BEFORE BOM enforcement existed, which is what grandfathers old purchase orders
+     * so they stay editable. Every write path stamps this non-null from now on.
+     */
+    @Column(name = "bom_match", length = 12)
+    private String bomMatch;
+
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
     

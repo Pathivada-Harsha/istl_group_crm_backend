@@ -20,6 +20,23 @@ public class RoleHierarchyEntity {
     @Column(name = "level_order", nullable = false)
     private Integer levelOrder;
 
+    /**
+     * Which lead-ownership slot this role claims for the leads its members CREATE.
+     *   NULL      → no self-ownership; the normal routing rules apply
+     *   'BD'      → the creator goes in leads.bd_assigned_to, no lead handler
+     *   'HANDLER' → the creator goes in leads.assigned_to, no BD
+     *
+     * Data-driven on purpose: switching a role on or off is a one-line UPDATE, no code
+     * change and no redeploy. See LeadsService.createLead.
+     *
+     * Set by SQL only. The role-hierarchy CRUD (saveHierarchy / updateHierarchy) copies
+     * only its own named fields onto the managed entity and deliberately leaves this one
+     * alone, so an edit from the Roles screen — which does not send this field — cannot
+     * wipe it.
+     */
+    @Column(name = "lead_self_assign_slot", length = 20)
+    private String leadSelfAssignSlot;
+
     @Column(name = "can_assign_roles", columnDefinition = "JSON", nullable = false)
     private String canAssignRoles;   // stored as JSON string e.g. ["ADMIN","TELECALLER"]
 

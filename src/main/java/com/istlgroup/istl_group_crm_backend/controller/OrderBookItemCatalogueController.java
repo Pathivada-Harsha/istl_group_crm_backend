@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.service.OrderBookItemCatalogueService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.OrderBookItemCatalogueWrapper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,8 +28,8 @@ public class OrderBookItemCatalogueController {
     @GetMapping("/search")
     public ResponseEntity<Map<String, Object>> search(
             @RequestParam String q,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
 
         Map<String, Object> response = new HashMap<>();
         try {

@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -61,7 +62,7 @@ public class TenderController {
     @PostMapping("/create")
     public ResponseEntity<Map<String, Object>> create(
             @RequestBody TenderWrapper request,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             TenderWrapper created = tenderService.create(request, userId);
             Map<String, Object> res = new HashMap<>();
@@ -80,7 +81,7 @@ public class TenderController {
     public ResponseEntity<Map<String, Object>> update(
             @PathVariable Long id,
             @RequestBody TenderWrapper request,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @ActingUserId Long userId) {
         try {
             TenderWrapper updated = tenderService.update(id, request, userId);
             Map<String, Object> res = new HashMap<>();
@@ -112,15 +113,23 @@ public class TenderController {
 
     // ── source PDF: parse (stateless) / upload (store BLOB) / download (stream) ──
 
-    /** Stateless parse — no tender id, so it works for a brand-new unsaved tender.
-     *  Returns the extracted partial field-map for the frontend to auto-fill. */
+    /**
+     * Stateless parse — no tender id, so it works for a brand-new unsaved
+     * tender. Returns proposed values with the page and line each came from,
+     * for the import review modal; nothing is written until the user applies.
+     *
+     * <p>{@code ai=true} re-reads the document with the LLM. It is always the
+     * user's choice, and it is offered whether the parse came back incomplete
+     * or came back looking plausible but wrong.
+     */
     @PostMapping(value = "/parse-pdf", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<Map<String, Object>> parsePdf(@RequestParam("file") MultipartFile file) {
+    public ResponseEntity<Map<String, Object>> parsePdf(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "ai", defaultValue = "false") boolean ai) {
         try {
-            Map<String, Object> data = tenderService.parsePdf(file);
             Map<String, Object> res = new HashMap<>();
             res.put("success", true);
-            res.put("data", data);
+            res.put("data", tenderService.parsePdf(file, ai));
             return ResponseEntity.ok(res);
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);

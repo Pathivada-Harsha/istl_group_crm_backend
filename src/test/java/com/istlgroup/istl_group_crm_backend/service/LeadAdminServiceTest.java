@@ -2,6 +2,7 @@ package com.istlgroup.istl_group_crm_backend.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -94,6 +95,104 @@ class LeadAdminServiceTest {
         b.setItemName("X"); b.setBasis("NONSENSE");
         TemplateBomLinesRequest req = new TemplateBomLinesRequest(); req.setLines(List.of(b));
         assertThrows(CustomException.class, () -> service.saveBomLines(id, req, USER));
+    }
+
+    // ── An incomplete basis is blocked at the source ───────────────────────────
+    // A line saved with a rule but no number for it shows a blank quantity on
+    // every lead built from this template, and nothing on the lead points back
+    // here — so it cannot be saved in that state.
+
+    private static TemplateBomLinesRequest bomLines(TemplateBomLineRequest... lines) {
+        TemplateBomLinesRequest req = new TemplateBomLinesRequest();
+        req.setLines(List.of(lines));
+        return req;
+    }
+
+    private static TemplateBomLineRequest bomLine(String itemName, String basis) {
+        TemplateBomLineRequest b = new TemplateBomLineRequest();
+        b.setItemName(itemName);
+        b.setBasis(basis);
+        return b;
+    }
+
+    @Test
+    void aBasisWithoutItsValueIsRejectedAndNamesTheLine() throws Exception {
+        Long id = createTemplate();
+        TemplateBomLinesRequest req = bomLines(
+                bomLine("PV Modules", LeadBomTemplateItemEntity.BASIS_PER_KW)); // no basisValue
+
+        CustomException e = assertThrows(CustomException.class, () -> service.saveBomLines(id, req, USER));
+        assertTrue(e.getMessage().contains("PV Modules"), e.getMessage());
+        assertTrue(e.getMessage().contains("Line 1"), e.getMessage());
+    }
+
+    /** A zero would size every lead's line to zero, which is the bug, not an answer. */
+    @Test
+    void aZeroBasisValueIsRejectedTheSameWay() throws Exception {
+        Long id = createTemplate();
+        TemplateBomLineRequest b = bomLine("Arrestor", LeadBomTemplateItemEntity.BASIS_FIXED);
+        b.setBasisValue(BigDecimal.ZERO);
+
+        assertThrows(CustomException.class, () -> service.saveBomLines(id, bomLines(b), USER));
+    }
+
+    @Test
+    void perStepWithoutAStepValueIsRejected() throws Exception {
+        Long id = createTemplate();
+        assertThrows(CustomException.class,
+                () -> service.saveBomLines(id, bomLines(bomLine("Inverter", LeadBomTemplateItemEntity.BASIS_PER_STEP)), USER));
+    }
+
+    @Test
+    void fromSiteVisitWithoutAFieldIsRejected() throws Exception {
+        Long id = createTemplate();
+        assertThrows(CustomException.class,
+                () -> service.saveBomLines(id, bomLines(bomLine("DC Cable", LeadBomTemplateItemEntity.BASIS_FROM_SITE_VISIT)), USER));
+    }
+
+    /** An unreadable site-visit column is as unusable as none at all. */
+    @Test
+    void anUnknownSiteVisitFieldIsRejected() throws Exception {
+        Long id = createTemplate();
+        TemplateBomLineRequest b = bomLine("DC Cable", LeadBomTemplateItemEntity.BASIS_FROM_SITE_VISIT);
+        b.setSiteVisitField("roof_colour");
+
+        assertThrows(CustomException.class, () -> service.saveBomLines(id, bomLines(b), USER));
+    }
+
+    /** A make-driven line reads its number off a catalogue make, so it needs one. */
+    @Test
+    void aDriverBasisWithoutACatalogueItemIsRejected() throws Exception {
+        Long id = createTemplate();
+        CustomException e = assertThrows(CustomException.class,
+                () -> service.saveBomLines(id, bomLines(bomLine("PV Modules", LeadBomTemplateItemEntity.BASIS_PER_WATT_PEAK)), USER));
+        assertTrue(e.getMessage().contains("wattage"), e.getMessage());
+    }
+
+    /** A complete line saves and reports nothing wrong when read back. */
+    @Test
+    void aCompleteLineSavesAndCarriesNoConfigIssue() throws Exception {
+        Long id = createTemplate();
+        TemplateBomLineRequest b = bomLine("PV Modules", LeadBomTemplateItemEntity.BASIS_PER_KW);
+        b.setBasisValue(new BigDecimal("1.7"));
+        service.saveBomLines(id, bomLines(b), USER);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> saved = ((List<Map<String, Object>>) service.getTemplate(id).get("bomItems")).get(0);
+        assertNull(saved.get("configIssue"));
+    }
+
+    /** Every line-list save bumps the version leads snapshot, so staleness is detectable. */
+    @Test
+    void savingBomLinesBumpsTheTemplateVersion() throws Exception {
+        Long id = createTemplate();
+        int before = (Integer) service.getTemplate(id).get("version");
+
+        TemplateBomLineRequest b = bomLine("PV Modules", LeadBomTemplateItemEntity.BASIS_PER_KW);
+        b.setBasisValue(new BigDecimal("1.7"));
+        service.saveBomLines(id, bomLines(b), USER);
+
+        assertEquals(before + 1, (int) (Integer) service.getTemplate(id).get("version"));
     }
 
     @Test

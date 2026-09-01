@@ -1,5 +1,8 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 // Resource/UrlResource no longer needed — files served from BLOB bytes directly
@@ -45,6 +48,7 @@ import java.util.stream.Collectors;
 @Slf4j
 public class BillController {
 
+    private final ActingUserService actingUserService;   // acting identity, from the session
     private final BillService billService;
     private final ProjectAccessService projectAccessService;
     private final VendorRepository vendorRepository;
@@ -74,12 +78,11 @@ public class BillController {
             @RequestParam(defaultValue = "20")   int size,
             @RequestParam(defaultValue = "billDate") String sortBy,
             @RequestParam(defaultValue = "DESC") String sortDirection,
-            @RequestHeader(value = "User-Role", required = false, defaultValue = "USER") String userRole,
-            @RequestHeader(value = "User-Id",   required = false) Long userId,
+            @ActingUserRole String userRole,
+            @ActingUserId Long userId,
             HttpServletRequest request
     ) {
         try {
-            if (userId == null) userId = getUserIdFromRequest(request);
             if (userId != null && userId > 0
                     && projectId != null && !projectId.isBlank()
                     && !projectAccessService.canAccessProject(projectId, userId, userRole)) {
@@ -133,13 +136,11 @@ public class BillController {
             @RequestParam(required = false) String projectId,
             @RequestParam(required = false) String groupId,
             @RequestParam(required = false) String subGroupId,
-            @RequestHeader(value = "User-Role", required = false, defaultValue = "USER") String userRole,
-            @RequestHeader(value = "User-Id",   required = false) Long userId,
+            @ActingUserRole String userRole,
+            @ActingUserId Long userId,
             HttpServletRequest request
     ) {
         try {
-            if (userId == null) userId = getUserIdFromRequest(request);
-            if (userRole == null || userRole.isBlank()) userRole = getUserRoleFromRequest(request);
 
             if (userId != null && userId > 0
                     && projectId != null && !projectId.isBlank()
@@ -189,7 +190,7 @@ public class BillController {
     @PostMapping
     public ResponseEntity<?> createBill(
             @RequestBody Map<String, Object> billRequest,
-            @RequestHeader("X-User-Id") Long userId
+            @ActingUserId Long userId
     ) {
         try {
             log.info("Creating bill - User: {}, Request keys: {}", userId, billRequest.keySet());
@@ -354,7 +355,7 @@ public class BillController {
     public ResponseEntity<?> updateBill(
             @PathVariable Long id,
             @RequestBody BillDTO billDTO,
-            @RequestHeader("X-User-Id") Long userId
+            @ActingUserId Long userId
     ) {
         try {
             BillDTO updatedBill = billService.updateBill(id, billDTO, userId);
@@ -375,7 +376,7 @@ public class BillController {
     @DeleteMapping("/{id}")
     public ResponseEntity<?> deleteBill(
             @PathVariable Long id,
-            @RequestHeader("X-User-Id") Long userId
+            @ActingUserId Long userId
     ) {
         try {
             billService.deleteBill(id, userId);
@@ -397,7 +398,7 @@ public class BillController {
     public ResponseEntity<?> uploadBillFile(
             @PathVariable Long id,
             @RequestParam("file") MultipartFile file,
-            @RequestHeader("X-User-Id") Long userId
+            @ActingUserId Long userId
     ) {
         try {
             String filePath = billService.uploadBillFile(id, file, userId);
@@ -459,7 +460,7 @@ public class BillController {
     public ResponseEntity<?> addPayment(
             @PathVariable Long id,
             @RequestBody PaymentDTO paymentDTO,
-            @RequestHeader("X-User-Id") Long userId
+            @ActingUserId Long userId
     ) {
         try {
             BillDTO updatedBill = billService.addPayment(id, paymentDTO, userId);
@@ -476,7 +477,7 @@ public class BillController {
     @PostMapping("/{id}/mark-paid")
     public ResponseEntity<?> markAsPaid(
             @PathVariable Long id,
-            @RequestHeader("X-User-Id") Long userId
+            @ActingUserId Long userId
     ) {
         try {
             BillDTO updatedBill = billService.markAsPaid(id, userId);
@@ -596,28 +597,16 @@ public class BillController {
     // HELPERS
     // =========================================================================
 
-    private Long getUserIdFromRequest(HttpServletRequest request) {
-        Object attr = request.getAttribute("userId");
-        if (attr instanceof Long)    return (Long) attr;
-        if (attr instanceof Integer) return ((Integer) attr).longValue();
-        if (attr instanceof String)  return Long.parseLong((String) attr);
+    // Acting identity, from the authenticated session. These used to read X-User-Id /
+    // X-User-Role off the request, so any caller could claim any id and any role. A
+    // request that cannot be attributed to a session user is now 401, never guessed.
 
-        String header = request.getHeader("X-User-Id");
-        if (header != null) {
-            try { return Long.parseLong(header); }
-            catch (NumberFormatException e) { log.warn("Invalid userId in header: {}", header); }
-        }
-        return 1L;
+    private Long getUserIdFromRequest(HttpServletRequest request) {
+        return actingUserService.requireUserId(request);
     }
 
     private String getUserRoleFromRequest(HttpServletRequest request) {
-        Object attr = request.getAttribute("userRole");
-        if (attr != null) return attr.toString();
-
-        String header = request.getHeader("X-User-Role");
-        if (header != null) return header;
-
-        return "USER";
+        return actingUserService.requireRole(request);
     }
 
     /**

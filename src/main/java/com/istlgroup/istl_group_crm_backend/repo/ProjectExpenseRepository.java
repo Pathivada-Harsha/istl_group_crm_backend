@@ -155,6 +155,17 @@ public interface ProjectExpenseRepository extends JpaRepository<ProjectExpense, 
     @Query("SELECT SUM(e.totalAmount) FROM ProjectExpense e WHERE e.projectId=:pid AND e.status='Approved' AND e.isDeleted=false")
     BigDecimal sumApprovedByProject(@Param("pid") String pid);
 
+    // ─── Batched twin of sumApprovedByProject, for the Client Financials tab ──
+    // One (project_id, SUM) row per project across the whole id list, so rolling
+    // a client's internal spend up costs one query instead of one per project.
+    // Identical filter to sumApprovedByProject so the two can never disagree.
+    @Query("""
+        SELECT e.projectId, COALESCE(SUM(e.totalAmount), 0) FROM ProjectExpense e
+        WHERE e.projectId IN :projectIds AND e.status='Approved' AND e.isDeleted=false
+        GROUP BY e.projectId
+    """)
+    List<Object[]> sumApprovedGroupedByProject(@Param("projectIds") List<String> projectIds);
+
     @Query("SELECT SUM(e.totalAmount) FROM ProjectExpense e WHERE e.projectId=:pid AND e.status='Pending' AND e.isDeleted=false")
     BigDecimal sumPendingByProject(@Param("pid") String pid);
 

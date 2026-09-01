@@ -16,6 +16,7 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -81,7 +82,7 @@ public class NotificationServiceImpl implements NotificationService {
     @Override
     @Transactional(readOnly = true)
     public List<NotificationResponseDTO> getLatest(Long userId) {
-        return repository.findTop10ByUserIdOrderByCreatedAtDesc(userId)
+        return repository.findTop10ByUserIdAndDeletedAtIsNullOrderByCreatedAtDesc(userId)
                 .stream().map(mapper::toResponse).collect(Collectors.toList());
     }
 
@@ -101,7 +102,7 @@ public class NotificationServiceImpl implements NotificationService {
     @Override
     @Transactional(readOnly = true)
     public long getUnreadCount(Long userId) {
-        return repository.countByUserIdAndIsReadFalse(userId);
+        return repository.countByUserIdAndIsReadFalseAndDeletedAtIsNull(userId);
     }
 
     // ── MUTATIONS (ownership-checked) ────────────────────────────────
@@ -126,11 +127,18 @@ public class NotificationServiceImpl implements NotificationService {
         return updated;
     }
 
+    /**
+     * Dismisses one notification. Soft — the row is stamped with deleted_at and
+     * disappears from every read path, but stays as the scheduler's record that
+     * this event was already raised today. Removing it outright let the
+     * 5-minute job re-create the notification the user had just deleted.
+     */
     @Override
     @Transactional
     public void delete(Long notificationId, Long userId) {
         NotificationEntity n = loadOwned(notificationId, userId);
-        repository.delete(n);
+        n.setDeletedAt(LocalDateTime.now());
+        repository.save(n);
         pushUnreadCount(userId);
     }
 
@@ -153,6 +161,11 @@ public class NotificationServiceImpl implements NotificationService {
                 .orElseThrow(NotificationException::notFound);
         if (userId == null || !userId.equals(n.getUserId())) {
             throw NotificationException.forbidden();
+        }
+        // Already dismissed — invisible to its owner, so treat it as gone
+        // rather than let a stale tab mark it read or delete it twice.
+        if (n.getDeletedAt() != null) {
+            throw NotificationException.notFound();
         }
         return n;
     }

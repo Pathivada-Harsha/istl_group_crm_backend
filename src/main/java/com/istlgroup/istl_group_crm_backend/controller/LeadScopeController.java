@@ -1,19 +1,24 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.service.BomPurchaseHistoryService;
 import com.istlgroup.istl_group_crm_backend.service.LeadScopeService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.BomSaveRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.BudgetCategoryRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.BudgetItemRequest;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.CapacityRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.ExtrasSaveRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.MarginRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadScopeWrapper.ScopeHeaderRequest;
@@ -32,6 +37,13 @@ public class LeadScopeController {
     @Autowired
     private LeadScopeService leadScopeService;
 
+    @Autowired
+    private BomPurchaseHistoryService bomPurchaseHistoryService;
+
+    /** Ceiling on how many (item, make) pairs one hint request may ask about. */
+    @Value("${bom.purchase-hint.max-pairs:200}")
+    private int maxHintPairs = 200;
+
     // ── Scope ────────────────────────────────────────────────────────────────
 
     @GetMapping("/{leadId}/scope")
@@ -46,8 +58,8 @@ public class LeadScopeController {
     @PostMapping("/{leadId}/scope")
     public ResponseEntity<Map<String, Object>> saveScopeHeader(
             @PathVariable Long leadId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestBody ScopeHeaderRequest body) {
         try {
             return ok(leadScopeService.saveScopeHeader(leadId, body, userId, userRole));
@@ -61,8 +73,8 @@ public class LeadScopeController {
     @PostMapping("/{leadId}/scope/items")
     public ResponseEntity<Map<String, Object>> saveScopeItem(
             @PathVariable Long leadId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestBody ScopeItemRequest body) {
         try {
             Map<String, Object> item = leadScopeService.saveScopeItem(leadId, body, userId, userRole);
@@ -81,8 +93,8 @@ public class LeadScopeController {
     @PutMapping("/{leadId}/scope/items")
     public ResponseEntity<Map<String, Object>> saveScopeItems(
             @PathVariable Long leadId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestBody ScopeItemsBulkRequest body) {
         try {
             return ok(leadScopeService.saveScopeItems(leadId, body, userId, userRole));
@@ -97,8 +109,8 @@ public class LeadScopeController {
     public ResponseEntity<Map<String, Object>> deleteScopeItem(
             @PathVariable Long leadId,
             @PathVariable Long itemId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             leadScopeService.deleteScopeItem(leadId, itemId, userId, userRole);
             Map<String, Object> resp = new HashMap<>();
@@ -126,8 +138,8 @@ public class LeadScopeController {
     @PostMapping("/{leadId}/budget/category")
     public ResponseEntity<Map<String, Object>> saveBudgetCategory(
             @PathVariable Long leadId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestBody BudgetCategoryRequest body) {
         try {
             Map<String, Object> cat = leadScopeService.saveBudgetCategory(leadId, body, userId, userRole);
@@ -143,8 +155,8 @@ public class LeadScopeController {
     public ResponseEntity<Map<String, Object>> deleteBudgetCategory(
             @PathVariable Long leadId,
             @PathVariable Long catId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             leadScopeService.deleteBudgetCategory(leadId, catId, userId, userRole);
             Map<String, Object> resp = new HashMap<>();
@@ -160,8 +172,8 @@ public class LeadScopeController {
     @PostMapping("/{leadId}/budget/item")
     public ResponseEntity<Map<String, Object>> saveBudgetItem(
             @PathVariable Long leadId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestBody BudgetItemRequest body) {
         try {
             Map<String, Object> data = leadScopeService.saveBudgetItem(leadId, body, userId, userRole);
@@ -177,8 +189,8 @@ public class LeadScopeController {
     public ResponseEntity<Map<String, Object>> deleteBudgetItem(
             @PathVariable Long leadId,
             @PathVariable Long itemId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole) {
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
             Map<String, Object> data = leadScopeService.deleteBudgetItem(leadId, itemId, userId, userRole);
             return ok(data);
@@ -203,8 +215,8 @@ public class LeadScopeController {
     @PutMapping("/{leadId}/bom")
     public ResponseEntity<Map<String, Object>> saveBom(
             @PathVariable Long leadId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestBody BomSaveRequest body) {
         try {
             return ok(leadScopeService.saveBom(leadId, body, userId, userRole));
@@ -212,6 +224,59 @@ public class LeadScopeController {
             return error(HttpStatus.BAD_REQUEST, e.getMessage());
         } catch (Exception e) {
             return error(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to save BOM: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Last procured cost per (catalog item, catalog make), for the price hint beside
+     * each BOM line's unit-rate field. Read-only and purely advisory — nothing here
+     * writes a rate; the estimator clicks to apply.
+     *
+     * <p>{@code pairs} is {@code itemId:variantId} comma-separated. The lookup is
+     * GLOBAL — history comes from every lead and project, not this one — so {@code leadId}
+     * is unused by the query and present only to keep the BOM tab's endpoints on one
+     * route, and to leave somewhere for per-lead authz to hang later.
+     *
+     * <p>The role is the caller's real one, from the session. It used to be an optional
+     * header, and a missing one meant "unrestricted" — so a role barred from seeing rates
+     * could see them simply by dropping the header. A role that may not see rates still
+     * gets an empty map rather than a 403: the tab renders, just without hints.
+     */
+    @GetMapping("/{leadId}/bom/purchase-hints")
+    public ResponseEntity<Map<String, Object>> bomPurchaseHints(
+            @PathVariable Long leadId,
+            @ActingUserRole String userRole,
+            @RequestParam(value = "pairs", required = false) String pairs) {
+        try {
+            List<BomPurchaseHistoryService.ItemVariantPair> parsed =
+                    BomPurchaseHistoryService.parsePairs(pairs);
+            if (parsed.size() > maxHintPairs) {
+                return error(HttpStatus.BAD_REQUEST,
+                        "Too many items requested (" + parsed.size() + " > " + maxHintPairs + ")");
+            }
+            return ok(bomPurchaseHistoryService.hints(parsed, userRole));
+        } catch (Exception e) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to load price hints: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Set the plant capacity from the BOM tab, where its absence is what makes
+     * auto-sizing fail. Its own endpoint so the estimator doesn't have to leave
+     * for the lead form to fix it.
+     */
+    @PutMapping("/{leadId}/capacity")
+    public ResponseEntity<Map<String, Object>> updateCapacity(
+            @PathVariable Long leadId,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
+            @RequestBody CapacityRequest body) {
+        try {
+            return ok(leadScopeService.updateCapacity(leadId, body, userId, userRole));
+        } catch (CustomException e) {
+            return error(HttpStatus.BAD_REQUEST, e.getMessage());
+        } catch (Exception e) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to update capacity: " + e.getMessage());
         }
     }
 
@@ -229,8 +294,8 @@ public class LeadScopeController {
     @PutMapping("/{leadId}/budget/extras")
     public ResponseEntity<Map<String, Object>> saveExtras(
             @PathVariable Long leadId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestBody ExtrasSaveRequest body) {
         try {
             return ok(leadScopeService.saveExtras(leadId, body, userId, userRole));
@@ -246,8 +311,8 @@ public class LeadScopeController {
     @GetMapping("/{leadId}/scope/suggest")
     public ResponseEntity<Map<String, Object>> suggest(
             @PathVariable Long leadId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestParam(value = "target", required = false, defaultValue = "both") String target) {
         try {
             return ok(leadScopeService.suggestScopeAndBom(leadId, target, userId, userRole));
@@ -285,8 +350,8 @@ public class LeadScopeController {
     @PutMapping("/{leadId}/margin")
     public ResponseEntity<Map<String, Object>> updateMargin(
             @PathVariable Long leadId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestBody MarginRequest body) {
         try {
             return ok(leadScopeService.updateMargin(leadId, body.getMarginPercent(), userId, userRole));
@@ -301,8 +366,8 @@ public class LeadScopeController {
     @PutMapping("/{leadId}/selling-price")
     public ResponseEntity<Map<String, Object>> updateSellingPrice(
             @PathVariable Long leadId,
-            @RequestHeader("User-Id") Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @RequestBody SellingPriceRequest body) {
         try {
             Map<String, Object> data =

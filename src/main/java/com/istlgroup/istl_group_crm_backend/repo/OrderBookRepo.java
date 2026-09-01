@@ -132,4 +132,16 @@ public interface OrderBookRepo extends JpaRepository<OrderBookEntity, Long> {
         @Param("fromDate")     LocalDate fromDate,
         @Param("toDate")       LocalDate toDate,
         Pageable pageable);
+
+    // ── Client Financials roll-up ────────────────────────────────────────────
+    // (project_id, SUM(total_amount)) for ONE customer's live, non-cancelled
+    // order books. Scalar projection on purpose: OrderBookEntity carries the
+    // uploaded PO as a LONGBLOB, so loading the entities just to add up a
+    // column would drag every one of that client's PO files through the heap.
+    @Query("SELECT o.projectId, COALESCE(SUM(o.totalAmount), 0) FROM OrderBookEntity o "
+         + "WHERE o.deletedAt IS NULL AND o.customerId = :customerId "
+         + "AND o.projectId IS NOT NULL "
+         + "AND (o.status IS NULL OR o.status <> 'Cancelled') "
+         + "GROUP BY o.projectId")
+    List<Object[]> sumAwardedValueByProjectForCustomer(@Param("customerId") Long customerId);
 }

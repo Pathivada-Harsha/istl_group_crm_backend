@@ -60,7 +60,16 @@ public class ProposalsPDFService {
         if (!isAccessible(proposal, userId, userRole)) {
             throw new CustomException("You don't have permission to download this proposal");
         }
-        
+
+        // Solar proposals are rendered from the approved Word skeleton by
+        // SolarProposalDocService, sourced from the lead's tabs. This generic
+        // renderer must not produce a second, divergent solar document.
+        if (SolarProposalDocService.isSolar(proposal.getGroupName(), proposal.getSubGroupName())) {
+            throw new CustomException(
+                "Solar proposals are generated from the lead's tabs. Open the lead and use "
+              + "\"Generate Proposal\", then download the generated document.");
+        }
+
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             PdfWriter writer = new PdfWriter(baos);

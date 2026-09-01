@@ -4,6 +4,7 @@ import com.istlgroup.istl_group_crm_backend.entity.*;
 import com.istlgroup.istl_group_crm_backend.repo.*;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.PurchaseOrderDropdownWrapper;
 import com.istlgroup.istl_group_crm_backend.util.RoleNormalizer;
+import com.istlgroup.istl_group_crm_backend.customException.BomEnforcementException;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -46,6 +47,21 @@ public class PurchaseOrderService {
     private final QuotationItemRepository quotationItemRepository;
     private final VendorRepository vendorRepository;
     private final VendorService vendorService;
+    private final BomProcurementGuard bomGuard;
+
+    /**
+     * Enforcement mode for the project-BOM checks on purchase orders.
+     *
+     * <p>BLOCK is the specified behaviour: the project BOM is the boundary of what may
+     * be purchased, and a PO is where money is committed. The guard already no-ops when
+     * a project is unknown or its BOM is empty, so projects that have not filled in a
+     * BOM are unaffected rather than frozen.
+     *
+     * <p>Set to WARN for a soak period if you would rather log violations and measure
+     * how much live data is already off-BOM before a 409 starts rejecting real work.
+     * Quotations always warn regardless — see {@code QuotationService.stampBomMatch}.
+     */
+    private static final BomProcurementGuard.Mode BOM_MODE = BomProcurementGuard.Mode.BLOCK;
 
 /**
  * ✅ UPDATED: Get purchase orders with PAYMENT STATUS filter support
@@ -537,6 +553,18 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                 remainingByName.put(name, rem.subtract(req)); // cap duplicate lines within this PO too
             }
 
+            // Project BOM check (§6.3). A quotation may have been raised from the order
+            // book or typed by hand, so its lines may carry no BOM link at all — the PO's
+            // lines are matched against the project's CURRENT BOM here, at creation time,
+            // rather than trusting anything the quotation carries. Approval of the
+            // quotation exempts nothing: vendors routinely round up to a supply lot.
+            String bomProjectId = projectId != null ? projectId : quotation.getProjectId();
+            BomProcurementGuard.CheckResult bomCheck = bomGuard.check(
+                    bomProjectId, BomProcurementGuard.fromPoItemMaps(itemsData), null, BOM_MODE);
+            if (!bomCheck.ok() && BOM_MODE == BomProcurementGuard.Mode.BLOCK) {
+                throw new BomEnforcementException(bomProjectId, bomCheck.violations());
+            }
+
             // ✅ CREATE VENDOR IMMEDIATELY if new vendor
             Long finalVendorId = vendorId;
             if (vendorId == null && vendorName != null && !vendorName.trim().isEmpty()) {
@@ -624,8 +652,17 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                         .deliveredQty(BigDecimal.ZERO)
                         .unitPrice(unitPrice)
                         .taxPercent(gst)
+                        .make(itemData.get("make") != null ? itemData.get("make").toString() : null)
+                        // Project BOM linkage. bomMatch is stamped non-null on every row a
+                        // create path writes — a NULL bom_match is what marks a row as
+                        // predating enforcement, and a brand-new row never qualifies.
+                        .bomLineId(bomCheck.bomLineIdByLine().get(i + 1))
+                        .bomItemId(toLongOrNull(itemData.get("bomItemId")))
+                        .variantId(toLongOrNull(itemData.get("variantId")))
+                        .bomMatch(bomCheck.matchByLine()
+                                .getOrDefault(i + 1, BomProcurementGuard.Match.NONE).name())
                         .build();
-                
+
                 poItems.add(poItem);
                 totalValue = totalValue.add(lineTotal);
                 totalItemsOrdered += quantity.intValue();
@@ -659,6 +696,8 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
 
             return savedPO;
             
+        } catch (BomEnforcementException e) {
+            throw e;   // structured — must not be flattened into a plain message string
         } catch (Exception e) {
             log.error("Error creating PO from quotation: {}", e.getMessage(), e);
             throw new RuntimeException("Failed to create PO: " + e.getMessage());
@@ -692,6 +731,14 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
     ) {
         try {
             log.info("Creating PO from order books for project {}", projectId);
+
+            // Project BOM check (§6.1/§6.2). Runs BEFORE the vendor is created so a
+            // rejection writes nothing at all.
+            BomProcurementGuard.CheckResult bomCheck = bomGuard.check(
+                    projectId, BomProcurementGuard.fromPoItemMaps(itemsData), null, BOM_MODE);
+            if (!bomCheck.ok() && BOM_MODE == BomProcurementGuard.Mode.BLOCK) {
+                throw new BomEnforcementException(projectId, bomCheck.violations());
+            }
 
             // ✅ CREATE VENDOR IMMEDIATELY if new vendor
             Long finalVendorId = vendorId;
@@ -778,8 +825,17 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                         .deliveredQty(BigDecimal.ZERO)
                         .unitPrice(unitPrice)
                         .taxPercent(gst)
+                        .make(itemData.get("make") != null ? itemData.get("make").toString() : null)
+                        // Project BOM linkage. bomMatch is stamped non-null on every row a
+                        // create path writes — a NULL bom_match is what marks a row as
+                        // predating enforcement, and a brand-new row never qualifies.
+                        .bomLineId(bomCheck.bomLineIdByLine().get(i + 1))
+                        .bomItemId(toLongOrNull(itemData.get("bomItemId")))
+                        .variantId(toLongOrNull(itemData.get("variantId")))
+                        .bomMatch(bomCheck.matchByLine()
+                                .getOrDefault(i + 1, BomProcurementGuard.Match.NONE).name())
                         .build();
-                
+
                 poItems.add(poItem);
                 totalValue = totalValue.add(lineTotal);
                 totalItemsOrdered += quantity.intValue();
@@ -808,6 +864,8 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
             
             return savedPO;
             
+        } catch (BomEnforcementException e) {
+            throw e;   // structured — must not be flattened into a plain message string
         } catch (Exception e) {
             log.error("Error creating PO from order books: {}", e.getMessage(), e);
             throw new RuntimeException("Failed to create PO: " + e.getMessage());
@@ -1121,6 +1179,19 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
             if ("Cancelled".equals(po.getStatus())) {
                 throw new RuntimeException("Cannot edit cancelled purchase orders");
             }
+
+            // Project BOM check (§6.4). Two things matter here:
+            //  • the PO under edit is excluded from "already ordered" by its own id, so
+            //    its previous quantities never count against itself;
+            //  • the check runs against the NEW projectId, because an edit is allowed to
+            //    move a PO between projects.
+            // Lines untouched since they were saved may be grandfathered (§7); lines that
+            // were added or increased are checked strictly.
+            BomProcurementGuard.CheckResult bomCheck = bomGuard.check(
+                    projectId, BomProcurementGuard.fromPoItemMaps(itemsData), poId, BOM_MODE);
+            if (!bomCheck.ok() && BOM_MODE == BomProcurementGuard.Mode.BLOCK) {
+                throw new BomEnforcementException(projectId, bomCheck.violations());
+            }
             // Delivered POs can be edited (e.g. to attach a PO soft-copy document),
             // but the status must remain "Delivered" — it cannot be rolled back.
             
@@ -1273,6 +1344,21 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                 poItem.setDeliveredQty(preservedDelivered);
                 poItem.setUnitPrice(unitPrice);
                 poItem.setTaxPercent(gst);
+                if (itemData.get("make") != null) poItem.setMake(itemData.get("make").toString());
+
+                // Re-resolve the BOM link from the incoming payload rather than trusting the
+                // row that happened to sit at this position — line_no identity is positional,
+                // so the stored link shifts when a line is inserted or removed.
+                //
+                // A grandfathered line is the one exception: leave its NULL bom_match alone
+                // so it stays lenient on every future edit too.
+                String stamp = bomCheck.matchToPersist(lineNo);
+                if (stamp != null) {
+                    poItem.setBomLineId(bomCheck.bomLineIdByLine().get(lineNo));
+                    poItem.setBomItemId(toLongOrNull(itemData.get("bomItemId")));
+                    poItem.setVariantId(toLongOrNull(itemData.get("variantId")));
+                    poItem.setBomMatch(stamp);
+                }
 
                 poItems.add(poItem);
                 totalValue = totalValue.add(lineTotal);
@@ -1322,6 +1408,8 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
 
             return updated;
             
+        } catch (BomEnforcementException e) {
+            throw e;   // structured — must not be flattened into a plain message string
         } catch (Exception e) {
             log.error("Error updating PO {}: {}", poId, e.getMessage(), e);
             throw new RuntimeException("Failed to update PO: " + e.getMessage());
@@ -1390,7 +1478,18 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
         }
         
         List<QuotationItemEntity> quotationItems = quotationItemRepository.findByQuotationId(quotationId);
-        
+
+        // Project BOM check (§6.3). This one-shot path inherits the quotation's lines
+        // verbatim, so it needs the same check as the custom-data path — approval of the
+        // quotation exempts nothing, and its lines may carry no BOM link at all.
+        BomProcurementGuard.CheckResult bomCheck = bomGuard.check(
+                quotation.getProjectId(),
+                BomProcurementGuard.fromQuotationItems(quotationItems),
+                null, BOM_MODE);
+        if (!bomCheck.ok() && BOM_MODE == BomProcurementGuard.Mode.BLOCK) {
+            throw new BomEnforcementException(quotation.getProjectId(), bomCheck.violations());
+        }
+
         // Ensure vendor exists
         Long vendorId = quotation.getVendorId();
         if (vendorId == null) {
@@ -1451,8 +1550,14 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                     .unitPrice(qItem.getUnitPrice())
                     .taxPercent(qItem.getTaxPercent())
                     .deliverySchedule(qItem.getDeliveryLeadTime())
+                    .make(qItem.getMake())
+                    .bomLineId(bomCheck.bomLineIdByLine().get(i + 1))
+                    .bomItemId(qItem.getBomItemId())
+                    .variantId(qItem.getVariantId())
+                    .bomMatch(bomCheck.matchByLine()
+                            .getOrDefault(i + 1, BomProcurementGuard.Match.NONE).name())
                     .build();
-            
+
             purchaseOrderItemRepository.save(poItem);
         }
         
@@ -1712,6 +1817,15 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
     }
     private BigDecimal safeToBigDecimal(Object value) {
         return safeToBigDecimal(value, BigDecimal.ZERO);
+    }
+
+    /** Coerce a raw payload value to a Long id, tolerating numbers, numeric strings and blanks. */
+    private static Long toLongOrNull(Object value) {
+        if (value == null) return null;
+        if (value instanceof Number n) return n.longValue();
+        String s = value.toString().trim();
+        if (s.isEmpty()) return null;
+        try { return Long.valueOf(s); } catch (NumberFormatException e) { return null; }
     }
     private BigDecimal safeToBigDecimal(Object value, BigDecimal defaultValue) {
         if (value == null) {

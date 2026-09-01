@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.service.LeadsImportService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
@@ -23,8 +25,8 @@ public class LeadsImportController {
 
     @PostMapping("/import")
     public ResponseEntity<Map<String, Object>> importLeads(
-            @RequestHeader("User-Id")   Long userId,
-            @RequestHeader("User-Role") String userRole,
+            @ActingUserId   Long userId,
+            @ActingUserRole String userRole,
             @RequestParam("file")       MultipartFile file) {
 
         Map<String, Object> response = new HashMap<>();

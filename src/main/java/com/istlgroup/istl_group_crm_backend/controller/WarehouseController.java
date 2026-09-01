@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
 import com.istlgroup.istl_group_crm_backend.service.WarehouseService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.WarehouseWrapper;
 import lombok.RequiredArgsConstructor;
@@ -32,8 +34,8 @@ public class WarehouseController {
             @RequestParam(required = false) String  groupName,
             @RequestParam(required = false) String  subGroupName,
             @RequestParam(required = false, defaultValue = "false") boolean includeInactive,
-            @RequestHeader(value = "X-User-Id",   required = false) Long   userId,
-            @RequestHeader(value = "X-User-Role", required = false) String userRole) {
+            @ActingUserId Long   userId,
+            @ActingUserRole String userRole) {
         try {
             List<WarehouseWrapper> list = warehouseService.list(groupName, subGroupName, includeInactive);
             return ResponseEntity.ok(list);
