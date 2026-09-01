@@ -4,9 +4,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -19,6 +23,7 @@ import com.istlgroup.istl_group_crm_backend.entity.BorrowerSanctionEntity;
 import com.istlgroup.istl_group_crm_backend.service.BorrowerService;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.BorrowerSanctionWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.BorrowerWrapper;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.CompanyGroupWrapper;
 
 /**
  * Borrower Registry REST API. Follows the TenderController conventions: a
@@ -39,10 +44,12 @@ public class BorrowerController {
 
     @GetMapping("/getAll")
     public ResponseEntity<Map<String, Object>> getAll(
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
             @RequestParam(value = "search", required = false) String search,
             @RequestParam(value = "category", required = false) String category) {
         try {
-            List<BorrowerWrapper> data = borrowerService.getAll(search, category);
+            List<BorrowerWrapper> data = borrowerService.getAll(userId, userRole, search, category);
             return ok(data, null);
         } catch (Exception e) {
             log.error("Failed to load borrowers", e);
@@ -67,9 +74,12 @@ public class BorrowerController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<Map<String, Object>> getById(@PathVariable Long id) {
+    public ResponseEntity<Map<String, Object>> getById(
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @PathVariable Long id) {
         try {
-            return ok(borrowerService.getById(id), null);
+            return ok(borrowerService.getById(userId, userRole, id), null);
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.NOT_FOUND);
         } catch (Exception e) {
@@ -86,6 +96,8 @@ public class BorrowerController {
             return ok(borrowerService.createBorrower(body, userId), "Borrower created");
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (DataIntegrityViolationException e) {
+            return error(friendlyDataError(e), HttpStatus.BAD_REQUEST);
         } catch (Exception e) {
             return error("Failed to create borrower: " + e.getMessage(),
                          HttpStatus.INTERNAL_SERVER_ERROR);
@@ -96,11 +108,14 @@ public class BorrowerController {
     public ResponseEntity<Map<String, Object>> update(
             @PathVariable Long id,
             @RequestBody BorrowerWrapper body,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole) {
         try {
-            return ok(borrowerService.updateBorrower(id, body, userId), "Borrower updated");
+            return ok(borrowerService.updateBorrower(id, body, userId, userRole), "Borrower updated");
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (DataIntegrityViolationException e) {
+            return error(friendlyDataError(e), HttpStatus.BAD_REQUEST);
         } catch (Exception e) {
             return error("Failed to update borrower: " + e.getMessage(),
                          HttpStatus.INTERNAL_SERVER_ERROR);
@@ -110,9 +125,10 @@ public class BorrowerController {
     @DeleteMapping("/delete/{id}")
     public ResponseEntity<Map<String, Object>> delete(
             @PathVariable Long id,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole) {
         try {
-            borrowerService.deleteBorrower(id, userId);
+            borrowerService.deleteBorrower(id, userId, userRole);
             return ok(null, "Borrower deleted");
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
@@ -138,9 +154,196 @@ public class BorrowerController {
             return ok(borrowerService.resolveBorrower(body, userId), null);
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (DataIntegrityViolationException e) {
+            return error(friendlyDataError(e), HttpStatus.BAD_REQUEST);
         } catch (Exception e) {
             return error("Failed to resolve borrower: " + e.getMessage(),
                          HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /** Move a company between groups, or in/out of standalone. Never touches its sanctions. */
+    @PutMapping("/{id}/hierarchy")
+    public ResponseEntity<Map<String, Object>> updateHierarchy(
+            @PathVariable Long id,
+            @RequestBody Map<String, Object> body,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole) {
+        try {
+            Long groupId = body.get("groupId") == null ? null
+                    : Long.valueOf(String.valueOf(body.get("groupId")));
+            Boolean isSubsidiary = body.get("isSubsidiary") == null ? null
+                    : Boolean.valueOf(String.valueOf(body.get("isSubsidiary")));
+            Boolean isSpv = body.get("isSpv") == null ? null
+                    : Boolean.valueOf(String.valueOf(body.get("isSpv")));
+            return ok(borrowerService.updateBorrowerHierarchy(id, groupId, isSubsidiary, isSpv, userId, userRole),
+                    "Organization updated");
+        } catch (CustomException e) {
+            return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return error("Failed to update the organization: " + e.getMessage(),
+                         HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * Rank candidate borrowers for a parsed sanction letter's identity —
+     * CIN, then normalized name, then alias, then a surfaced-only fuzzy
+     * match. Called by the review screen before {@code /borrower/resolve} or
+     * {@code /borrower/create}, so the lender confirms which company (or
+     * that it's a new one) before anything is written.
+     */
+    @PostMapping("/match")
+    public ResponseEntity<Map<String, Object>> match(@RequestBody BorrowerWrapper body) {
+        try {
+            return ok(borrowerService.matchBorrower(body), null);
+        } catch (Exception e) {
+            return error("Failed to match borrower: " + e.getMessage(),
+                         HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    // ── company hierarchy — Parent Groups / Sub Groups ─────────────────────
+
+    /** Top-level Parent Groups when parentId is absent, else the Sub Groups under it. */
+    @GetMapping("/groups")
+    public ResponseEntity<Map<String, Object>> listGroups(
+            @RequestParam(value = "parentId", required = false) Long parentId) {
+        try {
+            return ok(borrowerService.listGroups(parentId), null);
+        } catch (Exception e) {
+            return error("Failed to load groups: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    @GetMapping("/groups/search")
+    public ResponseEntity<Map<String, Object>> searchGroups(
+            @RequestParam(value = "q", required = false) String q) {
+        try {
+            return ok(borrowerService.searchGroups(q), null);
+        } catch (Exception e) {
+            return error("Failed to search groups: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    @PostMapping("/groups")
+    public ResponseEntity<Map<String, Object>> createGroup(
+            @RequestBody CompanyGroupWrapper body,
+            @RequestHeader(value = "User-Id", required = false) Long userId) {
+        try {
+            return ok(borrowerService.createGroup(body, userId), "Group created");
+        } catch (CustomException e) {
+            return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (DataIntegrityViolationException e) {
+            return error(friendlyDataError(e), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return error("Failed to create group: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    @PutMapping("/groups/{id}")
+    public ResponseEntity<Map<String, Object>> updateGroup(
+            @PathVariable Long id,
+            @RequestBody CompanyGroupWrapper body,
+            @RequestHeader(value = "User-Id", required = false) Long userId) {
+        try {
+            return ok(borrowerService.updateGroup(id, body, userId), "Group updated");
+        } catch (CustomException e) {
+            return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (DataIntegrityViolationException e) {
+            return error(friendlyDataError(e), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return error("Failed to update group: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * Deletes a Parent Group or Sub Group and everything under it — every
+     * company in it (with its sanctions and documents) and, for a Parent
+     * Group, every Sub Group beneath it too. Irreversible; the caller is
+     * expected to have already confirmed with the user.
+     */
+    @DeleteMapping("/groups/{id}")
+    public ResponseEntity<Map<String, Object>> deleteGroup(
+            @PathVariable Long id,
+            @RequestHeader(value = "User-Id", required = false) Long userId) {
+        try {
+            borrowerService.deleteGroup(id, userId);
+            return ok(null, "Group deleted");
+        } catch (CustomException e) {
+            return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return error("Failed to delete group: " + e.getMessage(),
+                         HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * The registry's Level‑1 list — top-level Parent Groups and standalone
+     * companies. With no {@code page}/{@code size}, returns the full
+     * Group -> Sub Group -> Company tree exactly as before (kept for
+     * backward compatibility); with them, returns just that page's rows
+     * plus registry-wide stats that don't shrink to match the page.
+     */
+    @GetMapping("/hierarchy")
+    public ResponseEntity<Map<String, Object>> hierarchy(
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @RequestParam(value = "page", required = false) Integer page,
+            @RequestParam(value = "size", required = false) Integer size,
+            @RequestParam(value = "search", required = false) String search) {
+        try {
+            if (page == null || size == null) {
+                return ok(borrowerService.getHierarchyTree(userId, userRole), null);
+            }
+            return ok(borrowerService.getHierarchyPage(userId, userRole, page, size, search), null);
+        } catch (Exception e) {
+            return error("Failed to load the hierarchy: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /** One Parent Group or Sub Group's own summary — breadcrumb and stat-card figures, no nested rows. */
+    @GetMapping("/groups/{id}")
+    public ResponseEntity<Map<String, Object>> groupDetail(
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @PathVariable Long id) {
+        try {
+            return ok(borrowerService.getGroupDetail(userId, userRole, id), null);
+        } catch (CustomException e) {
+            return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return error("Failed to load the group: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /** One page of the companies sitting directly under a group — Direct Companies, or one Sub Group's own table. */
+    @GetMapping("/groups/{id}/companies")
+    public ResponseEntity<Map<String, Object>> groupCompanies(
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @PathVariable Long id,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "5") int size) {
+        try {
+            return ok(borrowerService.getGroupCompanies(userId, userRole, id, page, size), null);
+        } catch (Exception e) {
+            return error("Failed to load companies: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /** One page of the Sub Groups sitting directly under a Parent Group. */
+    @GetMapping("/groups/{id}/subgroups")
+    public ResponseEntity<Map<String, Object>> subGroups(
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @PathVariable Long id,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "5") int size) {
+        try {
+            return ok(borrowerService.getSubGroups(userId, userRole, id, page, size), null);
+        } catch (Exception e) {
+            return error("Failed to load Sub Groups: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
 
@@ -168,7 +371,8 @@ public class BorrowerController {
     @PostMapping("/sanction/save")
     public ResponseEntity<Map<String, Object>> saveSanction(
             @RequestBody Map<String, Object> body,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole) {
         try {
             com.fasterxml.jackson.databind.ObjectMapper mapper =
                     new com.fasterxml.jackson.databind.ObjectMapper();
@@ -178,11 +382,32 @@ public class BorrowerController {
             String rawJson = body.get("rawExtracted") == null
                     ? null : mapper.writeValueAsString(body.get("rawExtracted"));
 
-            return ok(borrowerService.saveSanction(sanction, userId, rawJson), "Sanction saved");
+            return ok(borrowerService.saveSanction(sanction, userId, userRole, rawJson), "Sanction saved");
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (DataIntegrityViolationException e) {
+            return error(friendlyDataError(e), HttpStatus.BAD_REQUEST);
         } catch (Exception e) {
             return error("Failed to save sanction: " + e.getMessage(),
+                         HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * Soft duplicate check ahead of save — same lender and sanction date on
+     * the same company. Always advisory; the hard block on a reused ref. no.
+     * already happens inside {@code /borrower/parse-sanction} and again in
+     * {@code /borrower/sanction/save}.
+     */
+    @GetMapping("/sanction/check-duplicate")
+    public ResponseEntity<Map<String, Object>> checkDuplicateSanction(
+            @RequestParam("borrowerId") Long borrowerId,
+            @RequestParam("lenderName") String lenderName,
+            @RequestParam("sanctionDate") String sanctionDate) {
+        try {
+            return ok(borrowerService.checkDuplicateSanction(borrowerId, lenderName, sanctionDate), null);
+        } catch (Exception e) {
+            return error("Failed to check for duplicates: " + e.getMessage(),
                          HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
@@ -190,9 +415,10 @@ public class BorrowerController {
     @DeleteMapping("/sanction/delete/{id}")
     public ResponseEntity<Map<String, Object>> deleteSanction(
             @PathVariable Long id,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole) {
         try {
-            borrowerService.deleteSanction(id, userId);
+            borrowerService.deleteSanction(id, userId, userRole);
             return ok(null, "Sanction deleted");
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
@@ -208,9 +434,10 @@ public class BorrowerController {
     public ResponseEntity<Map<String, Object>> uploadDoc(
             @PathVariable Long id,
             @RequestParam("file") MultipartFile file,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole) {
         try {
-            return ok(borrowerService.uploadDocument(id, file, userId), "Document stored");
+            return ok(borrowerService.uploadDocument(id, file, userId, userRole), "Document stored");
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
         } catch (Exception e) {
@@ -226,9 +453,12 @@ public class BorrowerController {
      * a file just to read it.
      */
     @GetMapping("/sanction/{id}/preview-doc")
-    public ResponseEntity<Map<String, Object>> previewDoc(@PathVariable Long id) {
+    public ResponseEntity<Map<String, Object>> previewDoc(
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @PathVariable Long id) {
         try {
-            Map<String, Object> payload = borrowerService.buildPreview(id);
+            Map<String, Object> payload = borrowerService.buildPreview(userId, userRole, id);
             return ok(payload, null);
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.NOT_FOUND);
@@ -252,10 +482,12 @@ public class BorrowerController {
      */
     @GetMapping("/sanction/{id}/download-doc")
     public ResponseEntity<byte[]> downloadDoc(
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
             @PathVariable Long id,
             @RequestParam(value = "forceDownload", defaultValue = "false") boolean forceDownload) {
         try {
-            BorrowerSanctionEntity s = borrowerService.getDocumentEntity(id);
+            BorrowerSanctionEntity s = borrowerService.getDocumentEntity(userId, userRole, id);
             String mime = s.getSanctionDocMime() != null
                     ? s.getSanctionDocMime() : "application/octet-stream";
             String fileName = s.getSanctionDocName() != null
@@ -273,6 +505,43 @@ public class BorrowerController {
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
+    }
+
+    // ── error translation ───────────────────────────────────────────────────
+
+    private static final Pattern TOO_LONG_COLUMN = Pattern.compile("column '([a-zA-Z_]+)'");
+
+    /**
+     * Hibernate/JDBC exceptions carry the failed SQL statement in their
+     * message — useful in a log, but meaningless (and a little alarming) shown
+     * to a lender. This turns the common cases (a value too long for its
+     * column, a unique-constraint hit) into something a user can act on;
+     * anything unrecognised still gets a plain "couldn't save" rather than the
+     * raw statement.
+     */
+    private String friendlyDataError(DataIntegrityViolationException e) {
+        Throwable root = e.getMostSpecificCause();
+        String msg = root == null ? e.getMessage() : root.getMessage();
+        String lower = msg == null ? "" : msg.toLowerCase();
+
+        if (lower.contains("data too long") || lower.contains("data truncation")) {
+            Matcher m = TOO_LONG_COLUMN.matcher(msg);
+            String field = m.find() ? humanizeColumn(m.group(1)) : "one of the fields";
+            return "The value entered for \"" + field + "\" is too long. Please shorten it and try again.";
+        }
+        if (lower.contains("duplicate entry") || lower.contains("unique constraint")) {
+            return "That value is already used by another record and must be unique.";
+        }
+        if (lower.contains("cannot be null") || lower.contains("null not allowed")) {
+            return "A required value is missing. Please fill in every required field and try again.";
+        }
+        log.error("Unrecognised data error while saving", e);
+        return "Could not save — one of the values entered doesn't fit. Please check what you entered and try again.";
+    }
+
+    private String humanizeColumn(String column) {
+        String spaced = column.replace('_', ' ');
+        return spaced.isEmpty() ? spaced : Character.toUpperCase(spaced.charAt(0)) + spaced.substring(1);
     }
 
     // ── envelope helpers ────────────────────────────────────────────────────
