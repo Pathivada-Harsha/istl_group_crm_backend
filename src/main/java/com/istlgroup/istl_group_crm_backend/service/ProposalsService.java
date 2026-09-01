@@ -155,6 +155,32 @@ public class ProposalsService {
         return convertToWrapper(proposal);
     }
 
+    // ── GET BY LEAD ──────────────────────────────────────────────────────────
+    /**
+     * Every live proposal on one lead that this user may see.
+     *
+     * Callers previously had to pull a page of /getAll and filter by leadId in the
+     * browser, which both fetched far more than the lead in question and silently
+     * lost proposals past the page size. Scoping the query to the lead fixes both.
+     */
+    public List<ProposalWrapper> getProposalsByLead(Long leadId, Long userId, String userRole)
+            throws CustomException {
+        LeadsEntity lead = leadsRepo.findById(leadId)
+            .orElseThrow(() -> new CustomException("Lead not found"));
+        boolean canSeeLead = roleHierarchyService.getLevelOrder(userRole) <= 2
+                || (lead.getAssignedTo() != null && lead.getAssignedTo().equals(userId))
+                || (lead.getBdAssignedTo() != null && lead.getBdAssignedTo().equals(userId))
+                || (lead.getCreatedBy() != null && lead.getCreatedBy().equals(userId))
+                || leadAccessRepo.existsByLeadIdAndUserId(leadId, userId);
+        if (!canSeeLead)
+            throw new CustomException("You don't have permission to view this lead");
+
+        return proposalsRepo.findByLeadIdAndDeletedAtIsNull(leadId).stream()
+            .filter(p -> canAccessProposal(p, userId, userRole))
+            .map(this::convertToWrapper)
+            .collect(Collectors.toList());
+    }
+
     // ── CREATE ───────────────────────────────────────────────────────────────
     public ProposalWrapper createProposal(ProposalRequestWrapper requestWrapper, Long userId) throws CustomException {
         ProposalsEntity proposal = new ProposalsEntity();
@@ -266,9 +292,42 @@ public class ProposalsService {
         return false;
     }
 
+    /**
+     * Whether this user may write to this proposal.
+     *
+     * This used to ignore its {@code proposal} argument entirely and answer purely
+     * from the global edit permission, which meant anyone holding that permission
+     * could write to any proposal id — including overwriting the offline PDF of a
+     * lead they have nothing to do with. The permission is now the gate on *may
+     * you edit proposals at all*; the clauses below are the gate on *which one*.
+     */
     private boolean canEditProposal(ProposalsEntity proposal, Long userId, String userRole) {
         if ("SUPERADMIN".equalsIgnoreCase(userRole)) return true;
-        return proposalsRepo.hasProposalEditPermission(userId);
+        if (roleHierarchyService.getLevelOrder(userRole) <= 2) return true;
+        // The person who prepared it.
+        if (userId != null && userId.equals(proposal.getPreparedBy())) return true;
+        // Anyone who owns, or was granted access to, the lead it belongs to.
+        if (proposal.getLeadId() != null) {
+            if (leadAccessRepo.existsByLeadIdAndUserId(proposal.getLeadId(), userId)) return true;
+            if (leadsRepo.findById(proposal.getLeadId())
+                    .map(l -> userId != null && userId.equals(l.getAssignedTo()))
+                    .orElse(false)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Throws unless this user may write to the proposal. Companion to
+     * {@link #requireDeletable} for write paths that take a proposal id straight
+     * off the URL.
+     */
+    public void requireEditable(Long proposalId, Long userId, String userRole) throws CustomException {
+        ProposalsEntity proposal = proposalsRepo.findById(proposalId)
+            .orElseThrow(() -> new CustomException("Proposal not found"));
+        if (proposal.getDeletedAt() != null)
+            throw new CustomException("Proposal already deleted");
+        if (!canEditProposal(proposal, userId, userRole))
+            throw new CustomException("You don't have permission to edit this proposal");
     }
 
     private boolean canDeleteProposal(ProposalsEntity proposal, Long userId, String userRole) {

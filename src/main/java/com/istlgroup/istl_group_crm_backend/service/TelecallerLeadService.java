@@ -5,8 +5,10 @@ import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.LeadAccessEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
 import com.istlgroup.istl_group_crm_backend.repo.LeadAccessRepo;
+import com.istlgroup.istl_group_crm_backend.repo.FollowupsRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadsRepo;
 import com.istlgroup.istl_group_crm_backend.repo.UsersRepo;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadsUserWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.TelecallerDashboardStats;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.TelecallerLeadView;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.TelecallerStatusUpdateRequest;
@@ -65,6 +67,7 @@ public class TelecallerLeadService {
     @Autowired private LeadsRepo                   leadsRepo;
     @Autowired private UsersRepo                   usersRepo;
     @Autowired private LeadAccessRepo              leadAccessRepo;
+    @Autowired private FollowupsRepo               followupsRepo;
     @Autowired private LeadHistoryService          leadHistoryService;
     @Autowired private RoundRobinAssignmentService roundRobinService;
     @Autowired private MailService                 mailService;
@@ -72,6 +75,72 @@ public class TelecallerLeadService {
     // leads must never be auto-assigned to a BD. Field injection, and LeadsService
     // does not depend on this service, so there is no circular-dependency risk.
     @Autowired private LeadsService                leadsService;
+
+    /**
+     * The roles a telecaller may hand a follow-up to, besides themselves.
+     * Deliberately a fixed whitelist rather than the generic
+     * {@code /filters/followup-assignees} rule: that one widens to every
+     * teammate or to whatever sits in role_hierarchy.can_assign_roles, which is
+     * more reach than a telecaller should have from a restricted screen.
+     */
+    private static final List<String> FOLLOWUP_ASSIGNABLE_ROLES =
+            Arrays.asList("MARKETING_EXECUTIVE", "BD_EXECUTIVE");
+
+    /**
+     * Loads a lead the caller owns, or throws. The same rule the rest of this
+     * service applies inline — assigned to you, or granted access to you.
+     */
+    public LeadsEntity requireOwnedLead(Long leadId, Long userId) throws CustomException {
+        LeadsEntity lead = leadsRepo.findById(leadId)
+                .orElseThrow(() -> new CustomException("Lead not found"));
+        if (lead.getDeletedAt() != null)
+            throw new CustomException("Lead not found");
+        boolean hasAccess = userId.equals(lead.getAssignedTo())
+                || leadAccessRepo.existsByLeadIdAndUserId(leadId, userId);
+        if (!hasAccess)
+            throw new CustomException("Access denied: this lead is not assigned to you");
+        return lead;
+    }
+
+    /**
+     * Confirms a follow-up really hangs off the given lead, so a telecaller
+     * cannot reach an unrelated follow-up by pairing its id with a lead they own.
+     */
+    public void requireFollowupOnLead(Long followupId, Long leadId) throws CustomException {
+        var followup = followupsRepo.findById(followupId)
+                .orElseThrow(() -> new CustomException("Follow-up not found"));
+        if (followup.getLeadId() == null || !followup.getLeadId().equals(leadId))
+            throw new CustomException("This follow-up does not belong to that lead");
+    }
+
+    /** Self first, then every active marketing / BD executive. */
+    public List<LeadsUserWrapper> getFollowupAssignees(Long userId) {
+        List<LeadsUserWrapper> out = new java.util.ArrayList<>();
+        usersRepo.findById(userId).ifPresent(me ->
+                out.add(new LeadsUserWrapper(me.getId(), me.getName() + " (Me)", null, me.getPhone())));
+        usersRepo.findActiveUsersByNormalisedRoles(FOLLOWUP_ASSIGNABLE_ROLES).stream()
+                .filter(u -> !u.getId().equals(userId))
+                .forEach(u -> out.add(new LeadsUserWrapper(u.getId(), u.getName(), null, u.getPhone())));
+        return out;
+    }
+
+    /**
+     * Resolves who a telecaller-created follow-up may be assigned to.
+     * Null or self means self. Anyone else must be an active user in
+     * {@link #FOLLOWUP_ASSIGNABLE_ROLES} — a telecaller cannot push work onto an
+     * arbitrary user id supplied by the client.
+     */
+    public Long resolveFollowupAssignee(Long requested, Long selfId) throws CustomException {
+        if (requested == null || requested.equals(selfId)) return selfId;
+        var target = usersRepo.findById(requested)
+                .orElseThrow(() -> new CustomException("Assignee not found"));
+        boolean active = target.getIs_active() != null && target.getIs_active() == 1L;
+        String role = com.istlgroup.istl_group_crm_backend.util.RoleNormalizer.normalize(target.getRole());
+        if (!active || role == null || !FOLLOWUP_ASSIGNABLE_ROLES.contains(role))
+            throw new CustomException("You can only assign a follow-up to yourself, "
+                    + "a marketing executive or a BD executive");
+        return requested;
+    }
 
     // ── Get paginated leads for telecaller ────────────────────────────────────
     /**
@@ -377,8 +446,16 @@ public class TelecallerLeadService {
             //       are never auto-routed to a BD (defensive: they also never
             //       reach a telecaller, so this branch is a safety net).
             boolean affiliateLead = leadsService.isAffiliateTeamCreator(lead.getCreatedBy());
+            //   (d) this telecaller created the lead themselves and still owns it.
+            //       Their own cold-call leads stay theirs — no BD hand-off, no email.
+            //       The signal is already on the row; there is no flag column for it.
+            //       Once someone reassigns the lead, assignedTo moves and (b)/(a)
+            //       take over, so normal hand-off rules resume automatically.
+            boolean selfCreatedByOwner = lead.getCreatedBy() != null
+                    && lead.getCreatedBy().equals(userId)
+                    && userId.equals(lead.getAssignedTo());
 
-            Long bdUserId = (bdAlreadyAssigned || seniorOwner || affiliateLead)
+            Long bdUserId = (bdAlreadyAssigned || seniorOwner || affiliateLead || selfCreatedByOwner)
                     ? null
                     : roundRobinService.getNextBD(lead.getGroupName(), lead.getSubGroupName());
             if (bdUserId != null) {
