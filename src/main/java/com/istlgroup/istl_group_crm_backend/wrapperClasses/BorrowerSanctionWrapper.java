@@ -58,8 +58,6 @@ public class BorrowerSanctionWrapper {
 
     // ── project details ──
     private String technology;
-    private String village;
-    private String district;
     private String instrument;
 
     // ── security ──
@@ -68,13 +66,31 @@ public class BorrowerSanctionWrapper {
 
     // ── financial covenants ──
     private String minDscr;
+    private String avgDscr;
     private String dsra;
     private String isra;
+    /**
+     * Reviewer-confirmed reserve amount, editable on the sanction form.
+     * Blank means "not manually confirmed" — the response gap-fills this
+     * with the calculated figure (see {@code derivedDsraAmount}/
+     * {@code derivedIsraAmount} below) every read, so the box always starts
+     * from a sensible suggestion but a typed-over value sticks.
+     */
+    private String dsraAmount;
+    private String israAmount;
     private String cashSweep;
 
     private String tenorText;
     private String tenorMonths;
     private String moratoriumMonths;
+    /** SERVICED | CAPITALIZED, as confirmed by the reviewer. */
+    private String interestDuringMoratorium;
+    /** MONTHLY | BI_MONTHLY | QUARTERLY | HALF_YEARLY | YEARLY | OTHER. */
+    private String repaymentFrequency;
+    /** Custom interval in months; only meaningful when repaymentFrequency is OTHER. */
+    private String repaymentFrequencyOtherMonths;
+    /** JSON array of per-period repayment percentages; null = auto equal-split. */
+    private String repaymentProfileJson;
 
     // ── timeline ──
     private String disbursementDate;
@@ -82,6 +98,7 @@ public class BorrowerSanctionWrapper {
     private String repaymentStartDate;
     private String repaymentEndDate;
     private String scheduledCod;
+    private String actualCod;
 
     // ── base case assumptions ──
     private String plfPct;
@@ -108,6 +125,25 @@ public class BorrowerSanctionWrapper {
     private String derivedFirstYearInterest;
     private String derivedSanctionValidTill;
     private String derivedCodStatus;
+    /** actualCod if set, else scheduledCod — what the UI shows as "Actual COD Date" until a real one is entered. */
+    private String derivedActualCod;
+    /**
+     * Set only when the DSRA/ISRA phrase states a recognisable reserve
+     * period. "Not Calculated" (as opposed to null) means the phrase is
+     * there but didn't parse — never confused with "nothing entered".
+     */
+    private String derivedDsraAmount;
+    private String derivedIsraAmount;
+    /**
+     * true  = the letter's own ISRA clause priced a genuine contractual figure.
+     * false = no ISRA clause exists; derivedIsraAmount is the interest
+     *         component of the DSRA calculation instead, shown for reference
+     *         only.
+     * null  = no ISRA figure at all — either nothing to show, or the letter's
+     *         own ISRA text didn't parse into a recognisable period (see
+     *         "Not Calculated" above).
+     */
+    private Boolean derivedIsraIsContractual;
     /** Set when a printed ROI disagrees with base rate + spread. */
     private String derivedRoiCheck;
 

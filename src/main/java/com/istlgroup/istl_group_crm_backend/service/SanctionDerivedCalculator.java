@@ -4,9 +4,12 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import com.istlgroup.istl_group_crm_backend.entity.BorrowerSanctionEntity;
@@ -39,6 +42,12 @@ public class SanctionDerivedCalculator {
      */
     private static final BigDecimal ROI_TOLERANCE = new BigDecimal("0.001");
 
+    // Package-private (not private) so tests built with a bare `new
+    // SanctionDerivedCalculator()` — this class's existing convention,
+    // matching SanctionRegistryValueTest — can wire it directly.
+    @Autowired
+    LoanReserveCalculator reserveCalc = new LoanReserveCalculator();
+
     public void apply(BorrowerSanctionEntity e, BorrowerSanctionWrapper w) {
         if (e == null || w == null) return;
 
@@ -47,6 +56,13 @@ public class SanctionDerivedCalculator {
         LocalDate  signed = e.getSanctionDate();
         Integer    tenor  = e.getTenorMonths();
         Integer    mora   = e.getMoratoriumMonths();
+        // Until a real Actual COD Date is recorded, the planned date stands in
+        // for it — a deliberate policy choice, not a fallback for missing
+        // data (see the COD block below for the full rationale). Repayment
+        // timing is modelled off this date, not the sanction date: the
+        // moratorium is a holiday measured from the project's revenue start,
+        // not from the day the letter was signed.
+        LocalDate effectiveActual = e.getActualCod() != null ? e.getActualCod() : e.getScheduledCod();
 
         // ── equity contribution and the ratio it implies ──
         if (cost != null && loan != null) {
@@ -55,20 +71,27 @@ public class SanctionDerivedCalculator {
             w.setDerivedRatioCheck(ratioCheck(cost, loan, e.getDebtEquityRatio()));
         }
 
-        // ── the repayment window ──
+        // ── sanction validity — still the signing date's business, not COD's ──
         if (signed != null) {
-            LocalDate moratoriumEnd = mora != null ? signed.plusMonths(mora) : signed;
+            w.setDerivedSanctionValidTill(SanctionValueParser.formatDate(sanctionValidTill(signed)));
+        }
+
+        // ── the repayment window, anchored on COD (planned until confirmed) ──
+        if (effectiveActual != null) {
+            LocalDate moratoriumEnd = mora != null ? effectiveActual.plusMonths(mora) : effectiveActual;
             w.setDerivedMoratoriumEnd(SanctionValueParser.formatDate(moratoriumEnd));
 
-            // First instalment falls one quarter after the moratorium ends,
-            // matching the quarterly servicing these facilities assume.
-            w.setDerivedRepaymentStart(SanctionValueParser.formatDate(moratoriumEnd.plusMonths(3)));
+            LocalDate repayStart = moratoriumEnd;
+            w.setDerivedRepaymentStart(SanctionValueParser.formatDate(repayStart));
 
             if (tenor != null) {
-                w.setDerivedRepaymentEnd(SanctionValueParser.formatDate(signed.plusMonths(tenor)));
+                int amortizingMonths = mora != null ? tenor - mora : tenor;
+                LocalDate repayEnd = repayStart.plusMonths(amortizingMonths);
+                w.setDerivedRepaymentEnd(SanctionValueParser.formatDate(repayEnd));
+                // Interest still accrues from signing/disbursement, even though
+                // principal repayment now starts relative to COD instead.
+                if (signed != null) applyReserves(e, w, signed, repayStart, repayEnd);
             }
-            w.setDerivedSanctionValidTill(
-                    SanctionValueParser.formatDate(signed.plusMonths(DEFAULT_VALIDITY_MONTHS)));
         }
 
         if (tenor != null) {
@@ -76,25 +99,116 @@ public class SanctionDerivedCalculator {
         }
 
         // ── indicative first-year interest ──
-        if (loan != null && e.getInterestRatePct() != null) {
+        // Not e.getInterestRatePct() — nothing populates that column (no
+        // extractor, no form field), so it is always null. The rate actually
+        // in force is resolveRoi(), the same precedence fillGaps() applies
+        // when backfilling roiPct.
+        BigDecimal roiForInterest = resolveRoi(e);
+        if (loan != null && roiForInterest != null) {
             BigDecimal interest = loan
-                    .multiply(e.getInterestRatePct())
+                    .multiply(roiForInterest)
                     .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-            w.setDerivedFirstYearInterest(SanctionValueParser.formatCrore(interest) + " approx.");
+            w.setDerivedFirstYearInterest(SanctionValueParser.formatCrore(interest));
         }
 
         // ── COD, the one derived value that moves on its own ──
-        if (e.getScheduledCod() != null) {
-            LocalDate today = LocalDate.now();
-            long days = ChronoUnit.DAYS.between(e.getScheduledCod(), today);
-            if (days > 0) {
-                w.setDerivedCodStatus("Overdue by " + days + " day" + (days == 1 ? "" : "s"));
-            } else if (days == 0) {
-                w.setDerivedCodStatus("Due today");
-            } else {
-                w.setDerivedCodStatus("In " + (-days) + " days");
+        // effectiveActual (computed above) means status never reports
+        // "Overdue" while a planned date exists — that reads as "on
+        // schedule" until someone enters a real Actual COD Date.
+        if (effectiveActual != null) {
+            w.setDerivedActualCod(SanctionValueParser.formatDate(effectiveActual));
+            String status = "Achieved on " + SanctionValueParser.formatDate(effectiveActual);
+            if (e.getScheduledCod() != null) {
+                long variance = ChronoUnit.DAYS.between(e.getScheduledCod(), effectiveActual);
+                if (variance == 0) {
+                    status += " (on schedule)";
+                } else if (variance > 0) {
+                    status += " (" + variance + " day" + (variance == 1 ? "" : "s") + " late)";
+                } else {
+                    status += " (" + (-variance) + " day" + (variance == -1 ? "" : "s") + " early)";
+                }
             }
+            w.setDerivedCodStatus(status);
         }
+    }
+
+    /**
+     * DSRA/ISRA, priced off the reserve engine rather than left as the
+     * printed phrase alone. {@code repayStart}/{@code repayEnd} are the same
+     * modelled dates {@link #apply} already computes for the repayment
+     * window, so the schedule this prices off never disagrees with what the
+     * panel shows for "Repayment starts"/"Repayment ends".
+     *
+     * <p>DSRA: a recognisable reserve period ({@code parseReservePeriods})
+     * prices the figure as usual; text that's present but doesn't parse gets
+     * "Not Calculated" rather than a blank indistinguishable from "nothing
+     * entered"; blank text stays {@code null} (a dash).
+     *
+     * <p>ISRA has three distinct outcomes, not two: (1) the letter's own ISRA
+     * clause parses — a genuine contractual figure, {@code
+     * derivedIsraIsContractual = true}; (2) an ISRA clause is present but
+     * doesn't parse — "Not Calculated", contractual left unset, and it never
+     * falls back to DSRA under a real (if unparseable) clause; (3) no ISRA
+     * clause at all — if DSRA parses, show DSRA's own interest component as
+     * a reference figure, clearly marked {@code derivedIsraIsContractual =
+     * false} so the UI never implies a separate contractual requirement that
+     * was never stated.
+     */
+    private void applyReserves(BorrowerSanctionEntity e, BorrowerSanctionWrapper w,
+            LocalDate signed, LocalDate repayStart, LocalDate repayEnd) {
+        BigDecimal debt = e.getDebtAmount() != null ? e.getDebtAmount() : e.getSanctionedAmount();
+        BigDecimal roi = resolveRoi(e);
+        if (debt == null || roi == null) return;
+
+        // Repayment frequency drives both the schedule's period length and
+        // how many periods a covenant phrase like "next two quarters"
+        // resolves to — never hardcoded quarterly, so a Monthly sanction
+        // reserves against monthly periods, not 3-month ones. OTHER with no
+        // valid custom interval yet has nothing to price against.
+        Integer monthsPerPeriod = resolveMonthsPerPeriod(e);
+        if (monthsPerPeriod == null) return;
+
+        // Capitalized: the moratorium's own accrued interest is folded into
+        // the balance DSRA/ISRA are priced off, same as it's folded into the
+        // balance the amortizing phase actually repays — a lender reserving
+        // against debt service must reserve against what will really be
+        // owed, not the pre-capitalization principal.
+        boolean capitalized = "CAPITALIZED".equals(e.getInterestDuringMoratorium());
+        // buildQuarterEndSchedule, not buildSchedule — the same engine the
+        // Repayment Schedule tab uses (EOMONTH dates, percentage-driven
+        // principal), so DSRA/ISRA here can never silently disagree with
+        // what that tab shows for the identical sanction.
+        List<LoanReserveCalculator.Period> schedule = reserveCalc.buildQuarterEndSchedule(
+                debt, roi, signed, repayStart, repayEnd, monthsPerPeriod, capitalized,
+                parseRepaymentProfile(e.getRepaymentProfileJson()));
+
+        String dsraText = e.getDsra();
+        Integer dsraPeriods = SanctionValueParser.parseReservePeriods(dsraText, monthsPerPeriod);
+        if (dsraPeriods != null) {
+            w.setDerivedDsraAmount(dsraPeriods == 0 ? "Nil"
+                    : SanctionValueParser.formatCrore(reserveCalc.sumDebtService(schedule, dsraPeriods)));
+        } else if (!SanctionValueParser.isBlank(dsraText)) {
+            w.setDerivedDsraAmount("Not Calculated");
+        }
+
+        String israText = e.getIsra();
+        Integer israPeriods = SanctionValueParser.parseReservePeriods(israText, monthsPerPeriod);
+        if (israPeriods != null) {
+            w.setDerivedIsraAmount(israPeriods == 0 ? "Nil"
+                    : SanctionValueParser.formatCrore(reserveCalc.sumInterest(schedule, israPeriods)));
+            w.setDerivedIsraIsContractual(true);
+        } else if (!SanctionValueParser.isBlank(israText)) {
+            w.setDerivedIsraAmount("Not Calculated");
+        } else if (dsraPeriods != null) {
+            w.setDerivedIsraAmount(dsraPeriods == 0 ? "Nil"
+                    : SanctionValueParser.formatCrore(reserveCalc.sumInterest(schedule, dsraPeriods)));
+            w.setDerivedIsraIsContractual(false);
+        }
+    }
+
+    /** The date after which an unrenewed sanction lapses. */
+    public LocalDate sanctionValidTill(LocalDate signed) {
+        return signed == null ? null : signed.plusMonths(DEFAULT_VALIDITY_MONTHS);
     }
 
     /**
@@ -168,6 +282,15 @@ public class SanctionDerivedCalculator {
                 w.setDerivedRoiCheck("Reconciles");
             }
         }
+
+        // ── DSRA / ISRA amounts — editable, but start from the calculated figure ──
+        // Same "printed wins, else computed" precedence as every gap-fill
+        // above, except the "printed" side here is a reviewer's own typed
+        // override (dsraAmount/israAmount) rather than something the letter
+        // stated. Runs after apply() has already priced derivedDsraAmount/
+        // derivedIsraAmount off the (corrected) reserve engine.
+        fill(w, "dsraAmount", w.getDerivedDsraAmount());
+        fill(w, "israAmount", w.getDerivedIsraAmount());
     }
 
     /** First "9.75%"-shaped figure in free text, or null if there isn't one. */
@@ -184,6 +307,74 @@ public class SanctionDerivedCalculator {
         }
     }
 
+    /**
+     * The interest rate actually in force: a directly stated roiPct wins,
+     * else the first percentage printed in the free-text description, else
+     * the base + spread build-up. Mirrors the precedence {@link #fillGaps}
+     * applies when backfilling roiPct, so this figure and the persisted
+     * roiPct are never inconsistent with each other.
+     */
+    private static BigDecimal resolveRoi(BorrowerSanctionEntity e) {
+        BigDecimal roi = e.getRoiPct();
+        if (roi == null) roi = firstPercent(e.getInterestRateText());
+        if (roi == null && e.getBaseRatePct() != null && e.getSpreadPct() != null) {
+            roi = e.getBaseRatePct().add(e.getSpreadPct());
+        }
+        return roi;
+    }
+
+    /**
+     * Months in one repayment period for the sanction's repaymentFrequency —
+     * the single place "3" (a quarter) used to be hardcoded at every DSRA/
+     * ISRA/schedule call site. Mirrors the frontend's
+     * repaymentFrequencyMonths() in sanctionDerive.js 1:1.
+     *
+     * <p>Returns null for OTHER with no valid custom interval set — callers
+     * must skip pricing rather than silently falling back to quarterly, so
+     * an incomplete "Other" selection never masks itself as a real answer.
+     * Returns 3 (the interval every schedule used before this field existed)
+     * for a null/unrecognised frequency, so old rows without the column
+     * populated keep behaving exactly as they always did.
+     */
+    static Integer resolveMonthsPerPeriod(BorrowerSanctionEntity e) {
+        String freq = e.getRepaymentFrequency();
+        if (freq == null) return 3;
+        return switch (freq) {
+            case "MONTHLY" -> 1;
+            case "BI_MONTHLY" -> 2;
+            case "QUARTERLY" -> 3;
+            case "HALF_YEARLY" -> 6;
+            case "YEARLY" -> 12;
+            case "OTHER" -> e.getRepaymentFrequencyOtherMonths() != null
+                    && e.getRepaymentFrequencyOtherMonths() > 0 ? e.getRepaymentFrequencyOtherMonths() : null;
+            default -> 3;
+        };
+    }
+
+    /**
+     * "[2.5,1.4,2.5,...]" → the same list, or null for blank/malformed JSON —
+     * LoanReserveCalculator.buildQuarterEndSchedule already falls back to an
+     * equal split whenever this is null (or its length no longer matches the
+     * schedule), so a bad value here behaves exactly like no value at all.
+     */
+    private static List<BigDecimal> parseRepaymentProfile(String json) {
+        if (SanctionValueParser.isBlank(json)) return null;
+        String trimmed = json.trim();
+        if (trimmed.startsWith("[")) trimmed = trimmed.substring(1);
+        if (trimmed.endsWith("]")) trimmed = trimmed.substring(0, trimmed.length() - 1);
+        trimmed = trimmed.trim();
+        if (trimmed.isEmpty()) return null;
+        List<BigDecimal> out = new ArrayList<>();
+        for (String part : trimmed.split(",")) {
+            try {
+                out.add(new BigDecimal(part.trim()));
+            } catch (NumberFormatException ex) {
+                return null;
+            }
+        }
+        return out;
+    }
+
     /** Write a wrapper field only if it is still empty, and note that we did. */
     private void fill(BorrowerSanctionWrapper w, String key, String value) {
         if (value == null) return;
@@ -193,6 +384,8 @@ public class SanctionDerivedCalculator {
             case "debtPct"      -> { if (!SanctionValueParser.isBlank(w.getDebtPct()))      return; w.setDebtPct(value); }
             case "equityPct"    -> { if (!SanctionValueParser.isBlank(w.getEquityPct()))    return; w.setEquityPct(value); }
             case "roiPct"       -> { if (!SanctionValueParser.isBlank(w.getRoiPct()))       return; w.setRoiPct(value); }
+            case "dsraAmount"   -> { if (!SanctionValueParser.isBlank(w.getDsraAmount()))   return; w.setDsraAmount(value); }
+            case "israAmount"   -> { if (!SanctionValueParser.isBlank(w.getIsraAmount()))   return; w.setIsraAmount(value); }
             default -> { return; }
         }
         w.getComputedFields().add(key);

@@ -6,6 +6,7 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -27,6 +28,26 @@ public final class SanctionValueParser {
 
     private static final Pattern NUM =
             Pattern.compile("(-?[0-9][0-9,]*(?:\\.[0-9]+)?)");
+
+    /**
+     * A unit word only qualifies the number it immediately follows — a little
+     * punctuation ("/-", ",", ".") and whitespace is tolerated between them,
+     * but nothing else. Indian sanction letters routinely restate a rupee
+     * figure in words a few characters later — "5,22,24,00,000/- (Rupees Five
+     * Hundred Twenty Two Crore Twenty Four Lakh only)" — and that restatement
+     * always contains "Crore"/"Lakh" too. Scanning the whole remainder of the
+     * string for those words (rather than just the text touching the number)
+     * would read that restatement as the number's own unit and double-scale
+     * an already-correct rupee figure.
+     */
+    private static final Pattern UNIT_TAIL =
+            Pattern.compile("^[\\s/,.\\-]*(crore|crs?|lakhs?|lacs?|lk|l)\\b", Pattern.CASE_INSENSITIVE);
+
+    /** The unit word immediately qualifying a number, or null if none is adjacent. */
+    private static String adjacentUnit(String tail) {
+        Matcher m = UNIT_TAIL.matcher(tail);
+        return m.find() ? m.group(1) : null;
+    }
 
     /** Date formats seen across the sample letters plus common typed forms. */
     private static final List<DateTimeFormatter> DATE_FORMATS = List.of(
@@ -80,14 +101,15 @@ public final class SanctionValueParser {
             return null;
         }
 
-        // Look at the text after the number for the unit, so "Rs. 205.00 Crore"
-        // and "205 Cr" both scale, while a bare "2050000000" does not.
+        // Look at the text immediately after the number for its unit, so
+        // "Rs. 205.00 Crore" and "205 Cr" both scale, a bare "2050000000"
+        // does not, and a spelled-out check-amount sitting later in the same
+        // string ("5,22,24,00,000/- (Rupees ... Crore ... Lakh only)") is
+        // never mistaken for this number's own unit.
         String tail = lower.substring(m.end());
-        if (tail.contains("crore") || tail.matches("^\\s*(cr|crs)\\b.*")) {
-            value = value.multiply(CRORE);
-        } else if (tail.contains("lakh") || tail.contains("lac")
-                || tail.matches("^\\s*(l|lk)\\b.*")) {
-            value = value.multiply(LAKH);
+        String unit = adjacentUnit(tail);
+        if (unit != null) {
+            value = unit.startsWith("cr") ? value.multiply(CRORE) : value.multiply(LAKH);
         }
         return value.setScale(2, RoundingMode.HALF_UP);
     }
@@ -116,8 +138,7 @@ public final class SanctionValueParser {
         if (!m.find()) return null;
 
         String tail = lower.substring(m.end());
-        boolean unitStated = tail.contains("crore") || tail.contains("lakh") || tail.contains("lac")
-                || tail.matches("^\\s*(cr|crs|l|lk)\\b.*");
+        boolean unitStated = adjacentUnit(tail) != null;
         if (unitStated) return parseMoney(raw);
 
         BigDecimal value;
@@ -130,10 +151,18 @@ public final class SanctionValueParser {
         return value.multiply(CRORE).setScale(2, RoundingMode.HALF_UP);
     }
 
-    /** Render plain rupees back as "₹153.75 Cr" for display. */
+    /**
+     * Render plain rupees back as "₹153.75 Cr" for display — exactly, never
+     * rounded. movePointLeft(7) only shifts the decimal point (CRORE is a
+     * power of ten), so it can never lose a paisa the way divide(CRORE, 2,
+     * HALF_UP) used to; stripTrailingZeros only removes zeros that were
+     * never significant, then setScale(2) puts a round figure back to the
+     * familiar "232.00" look instead of "232".
+     */
     public static String formatCrore(BigDecimal rupees) {
         if (rupees == null) return null;
-        BigDecimal cr = rupees.divide(CRORE, 2, RoundingMode.HALF_UP);
+        BigDecimal cr = rupees.movePointLeft(7).stripTrailingZeros();
+        if (cr.scale() < 2) cr = cr.setScale(2);
         return "₹" + cr.toPlainString() + " Cr";
     }
 
@@ -255,6 +284,45 @@ public final class SanctionValueParser {
             return m.group(2).startsWith("y") ? (int) Math.round(n * 12) : (int) Math.round(n);
         }
         return null;
+    }
+
+    private static final Map<String, Integer> NUMBER_WORDS = Map.ofEntries(
+            Map.entry("one", 1), Map.entry("two", 2), Map.entry("three", 3), Map.entry("four", 4),
+            Map.entry("five", 5), Map.entry("six", 6), Map.entry("seven", 7), Map.entry("eight", 8),
+            Map.entry("nine", 9), Map.entry("ten", 10), Map.entry("eleven", 11), Map.entry("twelve", 12));
+
+    private static final Pattern RESERVE_NIL = Pattern.compile(
+            "(?i)\\b(nil|none|not\\s+required|waived|not\\s+applicable|n/?a)\\b");
+
+    private static final Pattern RESERVE_PERIOD = Pattern.compile(
+            "(?i)\\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|[0-9]+(?:\\.[0-9]+)?)"
+            + "\\s*(quarters?|months?|years?)\\b");
+
+    /**
+     * Reads a reserve-covenant phrase — e.g. "equivalent to the next two
+     * quarters' Scheduled Debt Service" — and returns how many servicing
+     * periods it names, at the given frequency. Returns 0 for a clause that
+     * explicitly states no reserve is required ("Nil"), or null if the field
+     * is blank or the phrase states no recognisable count — this never
+     * guesses a number the letter didn't state.
+     */
+    public static Integer parseReservePeriods(String raw, int monthsPerPeriod) {
+        String s = clean(raw);
+        if (s == null) return null;
+        if (RESERVE_NIL.matcher(s).find()) return 0;
+
+        Matcher m = RESERVE_PERIOD.matcher(s);
+        if (!m.find()) return null;
+
+        String numToken = m.group(1).toLowerCase(Locale.ENGLISH);
+        Double n = NUMBER_WORDS.containsKey(numToken)
+                ? NUMBER_WORDS.get(numToken).doubleValue()
+                : Double.valueOf(numToken);
+
+        String unit = m.group(2).toLowerCase(Locale.ENGLISH);
+        double months = unit.startsWith("quarter") ? n * 3 : unit.startsWith("year") ? n * 12 : n;
+
+        return (int) Math.max(1, Math.round(months / monthsPerPeriod));
     }
 
     // ── misc ────────────────────────────────────────────────────────────────

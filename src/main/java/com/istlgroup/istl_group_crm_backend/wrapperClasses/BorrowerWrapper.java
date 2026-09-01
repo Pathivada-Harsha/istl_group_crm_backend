@@ -28,10 +28,39 @@ public class BorrowerWrapper {
     // ── parties (registry sheet: Borrower Details) ──
     private String promoterName;
     private String guarantorName;
+    /** Legacy free-text group name, still populated by the extractor as a signal. */
     private String groupName;
     /** Registry sheet "Cat" / "Sub Cat" — not the sanction's project category. */
     private String borrowerCategory;
     private String borrowerSubCategory;
+
+    /**
+     * Whether the caller may rename/move/delete this borrower record itself
+     * (strict owner-or-teammate Role Hierarchy scope), as opposed to merely
+     * being able to see it — which can also happen via a sanction the
+     * caller personally attached to a borrower someone else owns. Only set
+     * on the response from GET /borrower/{id}; null on write-completion
+     * responses, which the caller always follows with a fresh GET anyway.
+     */
+    private Boolean canEditBorrower;
+
+    // ── company hierarchy ──
+    /** FK to company_groups — the Parent Group or Sub Group this company sits directly under. NULL = standalone. */
+    private Long groupId;
+    private Boolean isSubsidiary = false;
+    private Boolean isSpv = false;
+    /** Derived read-only label: Standalone / Subsidiary / SPV / Subsidiary + SPV. */
+    private String companyType;
+    /** Top-level Parent Group, resolved even when groupId points at a Sub Group. */
+    private Long parentGroupId;
+    private String parentGroupName;
+    /** Set only when the company sits under a Sub Group (i.e. groupId's own row has a parent). */
+    private Long subGroupId;
+    private String subGroupName;
+    private java.util.List<String> aliases = new ArrayList<>();
+    /** Rollups for the hierarchy tree — all live sanctions, not just the latest. */
+    private Integer sanctionsCount;
+    private String totalSanctionedAmount;
 
     // ── registered office ──
     private String registeredAddress;
