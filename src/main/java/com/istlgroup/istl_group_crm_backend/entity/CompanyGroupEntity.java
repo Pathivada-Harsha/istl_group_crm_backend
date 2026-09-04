@@ -28,6 +28,18 @@ public class CompanyGroupEntity {
     @Column(name = "parent_group_id")
     private Long parentGroupId;
 
+    /**
+     * Optional master CIN for this Parent/Sub Group itself — wholly
+     * independent of any company's own {@code borrowers.cin}. Never copied
+     * to or from a company created under this group.
+     */
+    @Column(name = "cin", length = 21)
+    private String cin;
+
+    /** Optional master registered address for this Group itself, independent of any company's own. */
+    @Column(name = "registered_address", columnDefinition = "TEXT")
+    private String registeredAddress;
+
     @Column(name = "status", length = 20)
     private String status = "ACTIVE";
 

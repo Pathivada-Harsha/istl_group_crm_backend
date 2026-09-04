@@ -24,6 +24,18 @@ public class BorrowerSanctionWrapper {
 
     private Long id;
     private Long borrowerId;
+    /** Set only for a sanction associated directly with a Parent Group or Sub Group, instead of a borrowerId. */
+    private Long groupId;
+
+    /**
+     * Read-only, computed on the way out — "COMPANY" | "GROUP" | "SUB_GROUP",
+     * telling the UI which kind of record {@link #associatedWithName} names.
+     * Never inferred from hierarchy: a company under a group is always
+     * "COMPANY", never rolled up into its group's own association.
+     */
+    private String associatedWithType;
+    /** Read-only, computed on the way out — the borrower or group name this sanction is directly attached to. */
+    private String associatedWithName;
 
     // ── as printed in the letter ──
     private String refNo;
@@ -32,6 +44,28 @@ public class BorrowerSanctionWrapper {
     private String projectName;
     private String category;
     private String location;
+
+    /**
+     * The borrower's own CIN, mirrored in from {@code BorrowerEntity.cin} for
+     * display only — read-only context on the sanction screen, never a
+     * column on {@code borrower_sanctions}. {@code BorrowerEntity.cin}
+     * remains the sole authoritative source: this field is only ever set on
+     * the way out (see {@code BorrowerService.toWrapper(BorrowerSanctionEntity,
+     * BorrowerEntity)}); the sanction save path never reads it back off an
+     * incoming request.
+     */
+    private String cin;
+
+    /**
+     * The borrower's own registered address, mirrored in from {@code
+     * BorrowerEntity.registeredAddress} for display only — same treatment as
+     * {@code cin} above, and for the same reason: {@code location} (above)
+     * is a genuinely separate, independently-editable per-sanction/project
+     * value and is deliberately left untouched by this — this field is
+     * never copied into it, and is itself never read back off an incoming
+     * request.
+     */
+    private String registeredAddress;
 
     /** Accepts "205.00 Cr", "Rs. 205 Crore", "2050000000" — all the same value. */
     private String projectCost;
@@ -106,6 +140,8 @@ public class BorrowerSanctionWrapper {
 
     // ── lifecycle ──
     private String status;
+    /** ACTIVE / INACTIVE — this letter's own business status; see BorrowerSanctionEntity.activeStatus. */
+    private String activeStatus;
     private String source;
     private String extractionEngine;
 
