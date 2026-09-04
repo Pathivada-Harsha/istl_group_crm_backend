@@ -4,10 +4,11 @@ import lombok.Data;
 
 /**
  * One candidate returned by {@code POST /borrower/match}. {@code confidence}
- * is one of CIN / NAME / ALIAS / FUZZY, in descending trust order — CIN and
- * NAME are shown as "this is probably it", ALIAS and FUZZY as "possibly the
- * same company, please confirm". The caller decides what to do with it; the
- * server never attaches a sanction to a candidate on its own.
+ * is one of CIN / NAME — the only two identity signals the sanction-import
+ * matching decision uses (see {@code BorrowerService#matchBorrower}; no
+ * alias or fuzzy-similarity tier feeds this list). The caller decides what
+ * to do with it; the server never attaches a sanction to a candidate on its
+ * own.
  */
 @Data
 public class CompanyMatchWrapper {
@@ -16,7 +17,7 @@ public class CompanyMatchWrapper {
     private String borrowerName;
     private String cin;
     private String confidence;
-    /** 0..1, only meaningful for FUZZY candidates. */
+    /** Always 1.0 — both CIN and NAME are exact matches, never a fuzzy score. */
     private Double score;
 
     private String companyType;

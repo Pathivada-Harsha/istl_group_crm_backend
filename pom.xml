@@ -128,6 +128,17 @@
 		    <artifactId>pdfbox</artifactId>
 		    <version>3.0.3</version>
 		</dependency>
+
+		<!-- Tess4J (Tesseract OCR) — local, zero-cost fallback for scanned sanction
+		     letters with no PDF text layer, tried before any Groq call. Apache-2.0,
+		     bundles the native Tesseract engine for common 64-bit platforms via JNA;
+		     language training data (tessdata/eng.traineddata) must still be supplied
+		     separately on each environment. -->
+		<dependency>
+		    <groupId>net.sourceforge.tess4j</groupId>
+		    <artifactId>tess4j</artifactId>
+		    <version>5.11.0</version>
+		</dependency>
 		    </dependencies>
 
     <!-- Build Configuration -->

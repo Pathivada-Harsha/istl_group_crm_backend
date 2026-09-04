@@ -75,11 +75,35 @@ public class SanctionDocAiExtractor {
         // completion, and a reply truncated mid-JSON parses to null — losing
         // the entire AI tier silently rather than loudly.
         String raw = groqClient.complete(SYSTEM_PROMPT, USER_PREFIX + clipped, 2500, 0.0);
+        return mapFromRawReply(raw, "text");
+    }
+
+    /**
+     * Vision last-resort for a scanned sanction letter page that local OCR
+     * (see {@code SanctionDocOcrService}) plus the text tiers above still
+     * couldn't extract enough from — e.g. a low-quality scan Tesseract
+     * garbled. Same prompt, same allow-list, same sanity checks as
+     * {@link #extractFromText}; only the Groq call itself (and model) differ,
+     * via the vision path {@code ProformaImportService} already uses.
+     *
+     * <p>Callers are expected to send only the specific page(s) still needed,
+     * not the whole document — this method itself has no page-budget logic,
+     * that policy belongs to the caller ({@code BorrowerService}).
+     */
+    public Map<String, Object> extractFromImage(String imageBase64, String mimeType) {
+        if (imageBase64 == null || imageBase64.isBlank()) return Map.of();
+        String raw = groqClient.completeWithVision(SYSTEM_PROMPT, VISION_USER_PROMPT,
+                imageBase64, mimeType, 2500, 0.0);
+        return mapFromRawReply(raw, "image");
+    }
+
+    /** Shared JSON-parse → allow-list filter → sanity-check → logging, for both tiers above. */
+    private Map<String, Object> mapFromRawReply(String raw, String source) {
         JsonNode root = parseJson(raw);
         if (root == null || !root.isObject()) {
             String preview = raw == null ? "null"
                     : raw.substring(0, Math.min(240, raw.length())).replaceAll("\\s+", " ");
-            log.warn("AI sanction parse: non-JSON reply (first 240 chars): {}", preview);
+            log.warn("AI sanction parse ({}): non-JSON reply (first 240 chars): {}", source, preview);
             throw new IllegalStateException("the AI did not return usable JSON for this document");
         }
 
@@ -91,7 +115,7 @@ public class SanctionDocAiExtractor {
             if (v != null && !"null".equalsIgnoreCase(v)) out.put(key, v);
         }
         sanityCheckMeansOfFinance(out);
-        log.info("AI sanction parse extracted {} field(s)", out.size());
+        log.info("AI sanction parse ({}) extracted {} field(s)", source, out.size());
         return out;
     }
 
@@ -173,9 +197,30 @@ public class SanctionDocAiExtractor {
           scheduledCod      scheduled commercial operation date, as printed
 
         Borrower and parties:
-          cin                 the borrower's Corporate Identification Number, e.g.
-                               "U40106RJ2021PTC074829" — only if printed on the
-                               letter itself; do not guess or construct one
+          cin                 the BORROWER's Corporate Identification Number
+                               ONLY, e.g. "U40106RJ2021PTC074829" — only if
+                               printed on the letter itself; do not guess or
+                               construct one.
+
+                               A sanction letter routinely prints TWO CINs: the
+                               lender/bank's own (in its letterhead, alongside
+                               lenderName) and the borrower's (in the
+                               "To, The Board of Directors, <company>..."
+                               addressee block, or wherever the borrower/
+                               applicant/obligor company is named). These are
+                               NEVER the same number. Never pick whichever CIN
+                               appears first, last, or nearest some other
+                               field — identify which company each CIN belongs
+                               to first, then only return the one belonging to
+                               the borrower/applicant/obligor/addressee — the
+                               same company named in borrowerName. If a CIN
+                               sits next to the bank/lender's name or a
+                               "Banking Group"/registered-office block for the
+                               lender, that is the lender's CIN — do NOT
+                               return it here, even if it is the only CIN you
+                               are unsure about. If you cannot tell which
+                               company a CIN belongs to, omit the key rather
+                               than guess.
           promoterName        the promoter behind the SPV
           sponsorName         the sponsor or parent, if named separately
           guarantorName       corporate or personal guarantor
@@ -276,4 +321,8 @@ public class SanctionDocAiExtractor {
 
     private static final String USER_PREFIX =
             "Extract the sanction letter below into the JSON object described.\n\n";
+
+    private static final String VISION_USER_PROMPT =
+            "This image is a page of a scanned sanction letter. Read it and extract "
+          + "the sanction letter into the JSON object described.";
 }

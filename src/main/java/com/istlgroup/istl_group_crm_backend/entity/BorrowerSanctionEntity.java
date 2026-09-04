@@ -30,8 +30,21 @@ public class BorrowerSanctionEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "borrower_id", nullable = false)
+    /**
+     * Exactly one of {@code borrowerId} / {@code groupId} is set on every row
+     * (enforced in {@code BorrowerService.saveSanction}/{@code
+     * saveGroupSanction}, mirroring a DB-level CHECK constraint) — a sanction
+     * belongs either to one Company/Borrower or directly to one Parent/Sub
+     * Group, never both, never neither. Nullable since 2026-09-02 (see
+     * barrower_registry.sql) to allow the group_id form; every pre-existing
+     * row keeps its original borrower_id.
+     */
+    @Column(name = "borrower_id")
     private Long borrowerId;
+
+    /** Set only for a sanction associated directly with a Parent Group or Sub Group — see {@link #borrowerId}. */
+    @Column(name = "group_id")
+    private Long groupId;
 
     // ── read from the letter ──
     @Column(name = "ref_no", nullable = false, length = 120)
@@ -240,9 +253,20 @@ public class BorrowerSanctionEntity {
     private BigDecimal tariffPerUnit;
 
     // ── lifecycle ──
-    /** DRAFT | IMPORTED | REVIEW | ONBOARDED */
+    /** DRAFT | IMPORTED | REVIEW | ONBOARDED — the import/review workflow stage, never a business Active/Inactive state. */
     @Column(name = "status", nullable = false, length = 30)
     private String status = "DRAFT";
+
+    /**
+     * ACTIVE | INACTIVE — the sanction letter's own business status, set only
+     * via the dedicated status-change action (with its own confirmation
+     * step), never inferred from {@code status} above, from import/matching,
+     * or from repayment. A Company/Parent/Sub Group's own "Active"/"Inactive"
+     * display is always derived FROM this field at read time — see
+     * {@link com.istlgroup.istl_group_crm_backend.service.BorrowerService#deriveStatusLabel}.
+     */
+    @Column(name = "active_status", nullable = false, length = 10)
+    private String activeStatus = "ACTIVE";
 
     /** MANUAL | IMPORTED | IMPORTED_EDITED */
     @Column(name = "source", nullable = false, length = 30)

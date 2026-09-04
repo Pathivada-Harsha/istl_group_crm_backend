@@ -13,7 +13,19 @@ public interface BorrowerSanctionRepo extends JpaRepository<BorrowerSanctionEnti
 
     List<BorrowerSanctionEntity> findByBorrowerIdAndDeletedAtIsNullOrderBySanctionDateDesc(Long borrowerId);
 
+    /**
+     * Batched form of the single-borrower lookup above — loads every live
+     * sanction for a whole set of borrowers in one query, so a caller that
+     * needs this for many borrowers (a registry list, a hierarchy tree/stats
+     * walk, a group's rollup) can group the results in memory afterwards
+     * instead of querying once per borrower.
+     */
+    List<BorrowerSanctionEntity> findByBorrowerIdInAndDeletedAtIsNullOrderBySanctionDateDesc(List<Long> borrowerIds);
+
     Optional<BorrowerSanctionEntity> findByIdAndDeletedAtIsNull(Long id);
+
+    /** Sanctions associated directly with one Parent Group or Sub Group — never a child company's own sanctions. */
+    List<BorrowerSanctionEntity> findByGroupIdAndDeletedAtIsNullOrderBySanctionDateDesc(Long groupId);
 
     /** Duplicate guard — the ref no. is what makes a letter unique. */
     Optional<BorrowerSanctionEntity> findByRefNoIgnoreCaseAndDeletedAtIsNull(String refNo);
