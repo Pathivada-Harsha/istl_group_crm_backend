@@ -33,6 +33,12 @@ public class LeadScopeWrapper {
         private BigDecimal quantity;
         private String unit;
         private String notes;
+        /**
+         * Second-level breakdown under this activity. Reuses the template's sub-item
+         * DTO deliberately — the shape is identical, and one class keeps the template,
+         * the lead and the project phase from drifting apart. Null/empty = no breakdown.
+         */
+        private List<LeadTemplateWrapper.TemplateScopeSubItemRequest> subItems;
     }
 
     /** POST /leads/{leadId}/budget/category */

@@ -25,6 +25,7 @@ import com.istlgroup.istl_group_crm_backend.repo.LeadBomTemplateItemRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadScopeTemplateItemRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadScopeTemplateRepo;
 import com.istlgroup.istl_group_crm_backend.repo.TemplateLineVariantRepo;
+import com.istlgroup.istl_group_crm_backend.service.scope.ScopeSubItems;
 import com.istlgroup.istl_group_crm_backend.util.CapacityUtil.CapacityInfo;
 
 /**
@@ -51,6 +52,7 @@ public class ScopeTemplateExpander {
     @Autowired private TemplateLineVariantRepo templateLineVariantRepo;
     @Autowired private BomItemsMasterRepo bomItemsMasterRepo;
     @Autowired private ObjectMapper objectMapper;
+    @Autowired private ScopeSubItems scopeSubItems;
 
     /** Result of a template expansion — scope lines + BOM lines + provenance. */
     public static class TemplateExpansion {
@@ -149,7 +151,16 @@ public class ScopeTemplateExpander {
             List<LeadScopeTemplateItemEntity> templateScope,
             List<LeadBomTemplateItemEntity> templateBom) {
         List<Map<String, Object>> scope = suggestionEngine.expandTemplateScope(templateScope);
-        if (!scope.isEmpty()) { ensureWeights(scope); return scope; }
+        if (!scope.isEmpty()) {
+            ensureWeights(scope);
+            // Each line's second-level breakdown, correlated by index (expandTemplateScope
+            // is 1:1 and order-preserving) — the same seam attachVariantChoices uses, so
+            // the sizing engine keeps no knowledge of sub-items.
+            List<String> subJson = new ArrayList<>(templateScope.size());
+            for (LeadScopeTemplateItemEntity s : templateScope) subJson.add(s.getSubItems());
+            scopeSubItems.attachTo(scope, subJson);
+            return scope;
+        }
 
         List<Map<String, Object>> derived = new ArrayList<>();
         Set<String> seen = new HashSet<>();
@@ -167,6 +178,8 @@ public class ScopeTemplateExpander {
             // Derived lines have no template record, so no weight to inherit —
             // ensureWeights gives the whole set an even split below.
             m.put("weightPct", null);
+            // …and no breakdown either. Set explicitly so the key is always present.
+            m.put("subItems", List.of());
             derived.add(m);
         }
         ensureWeights(derived);

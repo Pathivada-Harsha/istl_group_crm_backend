@@ -48,6 +48,7 @@ import com.istlgroup.istl_group_crm_backend.repo.LeadScopeTemplateRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadsRepo;
 import com.istlgroup.istl_group_crm_backend.repo.ScopeActivitySuggestionRepo;
 import com.istlgroup.istl_group_crm_backend.repo.SiteVisitRepo;
+import com.istlgroup.istl_group_crm_backend.service.scope.ScopeSubItems;
 import com.istlgroup.istl_group_crm_backend.util.CapacityUtil;
 import com.istlgroup.istl_group_crm_backend.util.CapacityUtil.CapacityInfo;
 import com.istlgroup.istl_group_crm_backend.util.VariantAttributes;
@@ -141,6 +142,9 @@ public class LeadScopeService {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private ScopeSubItems scopeSubItems;
 
     // ─────────────────────────────────────────────────────────────────────────
     // AUTH
@@ -287,6 +291,9 @@ public class LeadScopeService {
             if (r.getActivity() == null || r.getActivity().isBlank()) {
                 throw new CustomException("Every scope line needs an activity");
             }
+            // Each parent's breakdown is its own weight group, validated per line so the
+            // message can name the activity to go and fix. Same rules as the template.
+            scopeSubItems.normaliseWeights(r.getActivity().trim(), r.getSubItems());
         }
 
         List<LeadScopeItemEntity> existing =
@@ -316,6 +323,7 @@ public class LeadScopeService {
             item.setQuantity(r.getQuantity());
             item.setUnit(r.getUnit());
             item.setNotes(r.getNotes());
+            item.setSubItems(scopeSubItems.serialise(r.getSubItems()));
 
             LeadScopeItemEntity saved = leadScopeItemRepo.save(item);
             keptIds.add(saved.getId());
@@ -1162,7 +1170,16 @@ public class LeadScopeService {
             List<LeadScopeTemplateItemEntity> templateScope,
             List<LeadBomTemplateItemEntity> templateBom) {
         List<Map<String, Object>> scope = suggestionEngine.expandTemplateScope(templateScope);
-        if (!scope.isEmpty()) return scope;
+        if (!scope.isEmpty()) {
+            // Each line's second-level breakdown, correlated by index (expandTemplateScope
+            // is 1:1 and order-preserving). Mirrors ScopeTemplateExpander, which does the
+            // same for the project flow — the two resolveTemplateScope copies have to stay
+            // in step, so change both or neither.
+            List<String> subJson = new ArrayList<>(templateScope.size());
+            for (LeadScopeTemplateItemEntity s : templateScope) subJson.add(s.getSubItems());
+            scopeSubItems.attachTo(scope, subJson);
+            return scope;
+        }
 
         // Derive from BOM lines, preserving first-seen order, skipping blanks/General.
         List<Map<String, Object>> derived = new ArrayList<>();
@@ -1178,6 +1195,9 @@ public class LeadScopeService {
             m.put("unit", null);
             m.put("quantity", null);
             m.put("category", b.getCategory());
+            // No template record, so no breakdown. Set explicitly so the key is always
+            // present and a caller never has to tell "none" from "response predates it".
+            m.put("subItems", List.of());
             derived.add(m);
         }
         return derived;
@@ -1291,6 +1311,7 @@ public class LeadScopeService {
         m.put("quantity", it.getQuantity());
         m.put("unit", it.getUnit());
         m.put("notes", it.getNotes());
+        m.put("subItems", scopeSubItems.parse(it.getSubItems()));
         return m;
     }
 

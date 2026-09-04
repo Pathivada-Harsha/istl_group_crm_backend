@@ -26,12 +26,14 @@ import com.istlgroup.istl_group_crm_backend.repo.LeadBomTemplateItemRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadScopeTemplateItemRepo;
 import com.istlgroup.istl_group_crm_backend.repo.LeadScopeTemplateRepo;
 import com.istlgroup.istl_group_crm_backend.repo.TemplateLineVariantRepo;
+import com.istlgroup.istl_group_crm_backend.service.scope.ScopeSubItems;
 import com.istlgroup.istl_group_crm_backend.util.VariantAttributes;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadTemplateWrapper.TemplateBomLineRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadTemplateWrapper.TemplateBomLinesRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadTemplateWrapper.TemplateHeaderRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadTemplateWrapper.TemplateScopeLineRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadTemplateWrapper.TemplateScopeLinesRequest;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.LeadTemplateWrapper.TemplateScopeSubItemRequest;
 
 import lombok.RequiredArgsConstructor;
 
@@ -52,6 +54,7 @@ public class LeadAdminService {
     private final BomItemsMasterRepo bomItemsMasterRepo;
     private final TemplateLineVariantRepo templateLineVariantRepo;
     private final BomCatalogueHealthService catalogueHealth;
+    private final ScopeSubItems scopeSubItems;
 
     // ── Header ─────────────────────────────────────────────────────────────────
 
@@ -167,6 +170,10 @@ public class LeadAdminService {
             if (r.getActivity() == null || r.getActivity().isBlank()) {
                 throw new CustomException("Every scope line needs an activity");
             }
+            // Each parent's breakdown is its own weight group, so it is validated
+            // per line — a message that named only "the sub-items" would not say
+            // which activity to go and fix.
+            scopeSubItems.normaliseWeights(r.getActivity().trim(), r.getSubItems());
         }
         // Rejects a bad total / a zero line and silently absorbs display rounding.
         // Enforced here as well as in the browser because this endpoint is
@@ -197,6 +204,7 @@ public class LeadAdminService {
             s.setWeightPct(r.getWeightPct());
             s.setWeightManual(Boolean.TRUE.equals(r.getWeightManual()));
             s.setNotes(r.getNotes());
+            s.setSubItems(scopeSubItems.serialise(r.getSubItems()));
             LeadScopeTemplateItemEntity saved = scopeItemRepo.save(s);
             kept.add(saved.getId());
             out.add(scopeLineMap(saved));
@@ -384,6 +392,8 @@ public class LeadAdminService {
         }
         largest.setWeightPct(largest.getWeightPct().add(delta).setScale(WEIGHT_SCALE, RoundingMode.HALF_UP));
     }
+
+    // ── Sub-items (the second level under a scope line) ─────────────────────────
 
     /** Even split totalling exactly 100 — the last line absorbs the remainder. */
     private void evenSplit(List<TemplateScopeLineRequest> lines) {
@@ -693,6 +703,7 @@ public class LeadAdminService {
         m.put("weightPct", s.getWeightPct());
         m.put("weightManual", Boolean.TRUE.equals(s.getWeightManual()));
         m.put("notes", s.getNotes());
+        m.put("subItems", scopeSubItems.parse(s.getSubItems()));
         return m;
     }
 

@@ -63,9 +63,13 @@ public class LeadScopeTemplateItemEntity {
     private String notes;
 
     /**
-     * Reserved second-level breakdown, same JSON array shape as
-     * {@code project_phases.sub_items}. Storage only — nothing reads or writes
-     * it yet; the template sub-item editor is deferred.
+     * Second-level breakdown under this activity: {@code {name, description, unit,
+     * weightPct, weightManual}} — a subset of {@code project_phases.sub_items}, so a
+     * lead scope item or a project phase seeded from it needs no translation.
+     *
+     * <p>Edited on the Scope Lines tab of the templates admin page, and carried onto a
+     * lead or project by Suggest. Sub-item weights are a share of THIS line and total
+     * 100 within it. Read/written via {@code service.scope.ScopeSubItems}.
      */
     @Column(name = "sub_items", columnDefinition = "JSON")
     private String subItems;

@@ -38,6 +38,16 @@ public class LeadAnalyticsService {
         LocalDate today = LocalDate.now(ZONE);
         LocalDate fromD, toD;
         switch (range == null ? "" : range) {
+            case "this_week":
+                // Monday-anchored (business week), through today inclusive.
+                fromD = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
+                toD = today.plusDays(1); break;
+            case "last_week": {
+                // The whole Mon–Sun block before the current one; 'to' is that
+                // week's Sunday + 1 day, i.e. this week's Monday (exclusive).
+                LocalDate thisMonday = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
+                fromD = thisMonday.minusWeeks(1); toD = thisMonday; break;
+            }
             case "this_month":
                 fromD = today.withDayOfMonth(1); toD = today.plusDays(1); break;
             case "last_month":
@@ -85,6 +95,7 @@ public class LeadAnalyticsService {
      */
     private String granularityFor(String range, LocalDateTime from, LocalDateTime to) {
         String r = range == null ? "last_12_months" : range;
+        if (r.equals("this_week") || r.equals("last_week")) return "daily";   // 7 buckets
         if (r.equals("this_month") || r.equals("last_month")) return "daily";
         if (r.equals("last_3_months")) return "weekly";      // ~13 weekly buckets
         if (r.equals("custom")) {
@@ -97,21 +108,41 @@ public class LeadAnalyticsService {
         return "monthly"; // this_year, last_year, last_12_months
     }
 
-    public Map<String, Object> buildLeadAnalytics(String range, String customFrom, String customTo) {
+    /**
+     * Lead analytics for ONE viewer. Every figure below is restricted to the
+     * viewer's reporting subtree (UserScopeService) using the same ownership rule
+     * the Dashboard uses — assigned_to / bd_assigned_to / closed_by_user_id — so
+     * a telecaller sees their own numbers and a manager sees their team's.
+     * A top-level viewer (SUPERADMIN / ADMIN / ACCOUNTS_CFO) is unrestricted and
+     * keeps seeing company-wide totals, unassigned leads included.
+     */
+    public Map<String, Object> buildLeadAnalytics(String range, String customFrom, String customTo, Long userId) {
+        boolean topLevel = userScopeService.isTopLevel(userId);
+        // Never let the id list go empty: 'IN ()' is invalid SQL. -1 is a real,
+        // never-matching id, so an unresolvable viewer sees nothing rather than
+        // everything — failing closed is the point of this whole block.
+        List<Long> scopeIds = new ArrayList<>(
+                topLevel ? Collections.<Long>emptySet() : userScopeService.getActionableUserIds(userId));
+        if (scopeIds.isEmpty()) scopeIds.add(userId == null ? -1L : userId);
+        final List<Long> ids = scopeIds;
+        final int all = topLevel ? 1 : 0;
         Map<String, Object> rr = resolveRange(range, customFrom, customTo);
         LocalDateTime from = (LocalDateTime) rr.get("from");
         LocalDateTime to   = (LocalDateTime) rr.get("to");
         String granularity = granularityFor(range, from, to);
 
-        long generated = repo.countGenerated(from, to);
-        long won       = repo.countWon(from, to);
-        long closed    = repo.countClosed(from, to);
+        long generated = repo.countGenerated(from, to, ids, all);
+        long won       = repo.countWon(from, to, ids, all);
+        long closed    = repo.countClosed(from, to, ids, all);
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("range", range == null ? "last_12_months" : range);
         out.put("from", from.toLocalDate().toString());
         out.put("to", to.toLocalDate().minusDays(1).toString());
         out.put("granularity", granularity);
+        // "all" | "team" | "self" — drives the scope badge in the header so a
+        // manager understands why their KPIs are smaller than the company's.
+        out.put("scope", topLevel ? "all" : (ids.size() > 1 ? "team" : "self"));
 
         // Headline KPIs
         out.put("leadsGenerated", generated);
@@ -122,14 +153,14 @@ public class LeadAnalyticsService {
         out.put("closeRate", pct(won, closed));
 
         // Status distribution
-        out.put("byStatus", labelCount(repo.countByStatus(from, to)));
+        out.put("byStatus", labelCount(repo.countByStatus(from, to, ids, all)));
         // Source distribution
-        out.put("bySource", labelCount(repo.countBySource(from, to)));
+        out.put("bySource", labelCount(repo.countBySource(from, to, ids, all)));
         // Geographic
-        out.put("byState", labelCount(repo.countByState(from, to)));
+        out.put("byState", labelCount(repo.countByState(from, to, ids, all)));
 
         // Per-priority conversion + weighted conversion
-        List<Object[]> prio = repo.priorityTotalsAndWon(from, to);
+        List<Object[]> prio = repo.priorityTotalsAndWon(from, to, ids, all);
         List<Map<String, Object>> priorityRows = new ArrayList<>();
         double weightedNum = 0.0, weightedDen = 0.0;
         for (Object[] row : prio) {
@@ -158,7 +189,7 @@ public class LeadAnalyticsService {
         // (Volume-weighting each subgroup rate by its own volume algebraically
         // collapses to the global conversion rate — a no-op; the plain mean instead
         // treats every subgroup equally, surfacing small-but-high/low converters.)
-        List<Object[]> grp = repo.groupTotalsAndWon(from, to);
+        List<Object[]> grp = repo.groupTotalsAndWon(from, to, ids, all);
         List<Map<String, Object>> groupRows = new ArrayList<>();
         double rateSum = 0.0; int rateCnt = 0;
         for (Object[] row : grp) {
@@ -179,7 +210,7 @@ public class LeadAnalyticsService {
         out.put("weightedConversionByGroup", rateCnt == 0 ? 0.0 : round1(rateSum / rateCnt));
 
         // Per-employee handling
-        List<Object[]> emp = repo.employeeHandling(from, to);
+        List<Object[]> emp = repo.employeeHandling(from, to, ids, all);
         List<Map<String, Object>> empRows = new ArrayList<>();
         for (Object[] row : emp) {
             long handled = ((Number) row[2]).longValue();
@@ -195,10 +226,10 @@ public class LeadAnalyticsService {
 
         // Time series — Generated (by creation date) vs Won (by win date), bucketed
         // by granularity and zero-filled across the window so there are no gaps.
-        out.put("series", buildSeries(from, to, granularity));
+        out.put("series", buildSeries(from, to, granularity, ids, all));
 
         // Time-to-convert (days) from lead_history, minute precision
-        List<Object[]> mins = repo.minutesToConvertPerLead(from, to);
+        List<Object[]> mins = repo.minutesToConvertPerLead(from, to, ids, all);
         List<Double> days = new ArrayList<>();
         for (Object[] row : mins) {
             if (row[1] == null) continue;
@@ -227,9 +258,24 @@ public class LeadAnalyticsService {
     //  sees only themselves. Rows, metrics and columns are unchanged — only the
     //  set of people included moved.
     // ═════════════════════════════════════════════════════════════════════════
-    public Map<String, Object> buildTeamLeadPerformance(Long userId, String userRole) {
+    public Map<String, Object> buildTeamLeadPerformance(Long userId, String userRole,
+                                                        String range, String customFrom, String customTo) {
         int level = roleHierarchyService.getLevelOrder(userRole);
         boolean topLevel = userScopeService.isTopLevel(userId);
+
+        // No range asked for → all time (the Team Lead Performance page). A range
+        // narrows every column, which is what the analytics report asks for. The
+        // window is always real dates, never nulls, so the SQL stays one shape.
+        boolean allTime = range == null || range.isBlank();
+        LocalDateTime from, to;
+        if (allTime) {
+            from = LocalDate.of(1970, 1, 1).atStartOfDay();
+            to   = LocalDate.now(ZONE).plusDays(1).atStartOfDay();
+        } else {
+            Map<String, Object> rr = resolveRange(range, customFrom, customTo);
+            from = (LocalDateTime) rr.get("from");
+            to   = (LocalDateTime) rr.get("to");
+        }
 
         List<Long> allowedIds = topLevel
             ? repo.findAllActiveUserIds()
@@ -237,7 +283,7 @@ public class LeadAnalyticsService {
 
         List<Map<String, Object>> rows = new ArrayList<>();
         if (!allowedIds.isEmpty()) {
-            for (Object[] r : repo.teamLeadBreakdown(allowedIds)) {
+            for (Object[] r : repo.teamLeadBreakdown(allowedIds, from, to)) {
                 long assigned = num(r[4]);
                 long won      = num(r[6]);
                 Map<String, Object> m = new LinkedHashMap<>();
@@ -258,6 +304,9 @@ public class LeadAnalyticsService {
         // with reports is "team", a leaf user is "self".
         out.put("scope", topLevel ? "all" : (allowedIds.size() > 1 ? "team" : "self"));
         out.put("levelOrder", level);
+        out.put("allTime", allTime);
+        out.put("from", from.toLocalDate().toString());
+        out.put("to", to.toLocalDate().minusDays(1).toString());
         out.put("members", rows);
         return out;
     }
@@ -283,9 +332,10 @@ public class LeadAnalyticsService {
     /** Generated (by creation date) vs Won (by win date), bucketed by granularity
      *  and zero-filled across [from, to). Days are aggregated in SQL and rolled up
      *  here, so bucket keys/labels are fully controlled in Java. */
-    private List<Map<String, Object>> buildSeries(LocalDateTime from, LocalDateTime to, String granularity) {
-        Map<LocalDate, Long> gen = dailyMap(repo.dailyGenerated(from, to));
-        Map<LocalDate, Long> won = dailyMap(repo.dailyWonByWinDate(from, to));
+    private List<Map<String, Object>> buildSeries(LocalDateTime from, LocalDateTime to, String granularity,
+                                                 List<Long> ids, int all) {
+        Map<LocalDate, Long> gen = dailyMap(repo.dailyGenerated(from, to, ids, all));
+        Map<LocalDate, Long> won = dailyMap(repo.dailyWonByWinDate(from, to, ids, all));
         LocalDate start = from.toLocalDate();
         LocalDate endEx = to.toLocalDate();               // 'to' is exclusive (start of next day)
         List<Map<String, Object>> series = new ArrayList<>();
