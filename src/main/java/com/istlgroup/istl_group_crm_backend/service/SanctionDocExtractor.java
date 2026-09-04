@@ -100,6 +100,39 @@ public class SanctionDocExtractor {
         // Borrower-level. These aren't sanction columns — the review screen
         // routes them to /borrower/resolve so they land on the borrower row.
         LABELS.put("borrowername",                      "borrowerName");
+
+        // Borrower's own CIN. Deliberately never a bare "cin" key — the
+        // letterhead/Lender block states the BANK's own CIN inline (e.g.
+        // "...Telangana CIN: U65990TG1994PLC987654"), and every entry here
+        // must require a borrower/company/entity qualifier so a row or
+        // inline pair can only ever match the label that's actually about
+        // the borrower. putIfLabelled only reads a row's own first cell as
+        // the label, and putIfInlinePair splits on the first colon in one
+        // cell — for the Lender cell that puts the whole bank name/address
+        // block before the colon, which never normalises down to one of
+        // these short qualified keys. Safe by construction, not by luck.
+        LABELS.put("borrowercin",                       "cin");
+        LABELS.put("borrowerscin",                      "cin");
+        LABELS.put("cinofborrower",                     "cin");
+        LABELS.put("cinoftheborrower",                  "cin");
+        LABELS.put("borrowercorporateidentificationnumber", "cin");
+        LABELS.put("corporateidentificationnumbercin",  "cin");
+        LABELS.put("corporateidentificationnocin",      "cin");
+        LABELS.put("companycin",                        "cin");
+        LABELS.put("companyscin",                       "cin");
+        LABELS.put("cinofthecompany",                   "cin");
+        LABELS.put("cinofcompany",                      "cin");
+        LABELS.put("companyidentificationnumber",       "cin");
+        LABELS.put("companyidentificationno",           "cin");
+        LABELS.put("entitycin",                         "cin");
+        LABELS.put("entityidentificationnumber",        "cin");
+
+        // Borrower's own registered address — a distinct row from the
+        // Lender's address and from any project-site "Location"/"Site" row
+        // above, so it's given its own output key rather than reusing
+        // "location" (which stays a sanction-level, project-site concept).
+        LABELS.put("registeredaddress",                 "registeredAddress");
+
         LABELS.put("promotername",                      "promoterName");
         LABELS.put("nameofthepromoter",                 "promoterName");
         LABELS.put("promoter",                          "promoterName");
@@ -220,6 +253,73 @@ public class SanctionDocExtractor {
         LABELS.put("tariff",                            "tariffPerUnit");
         LABELS.put("energytariff",                      "tariffPerUnit");
         LABELS.put("unitrate",                          "tariffPerUnit");
+    }
+
+    /**
+     * A prose (non-table) letter states the lender's own CIN in its
+     * letterhead and the borrower's CIN a few lines later in the "To, The
+     * Board of Directors, <borrower>..." addressee block — both as a bare
+     * "CIN: U..." line, with no qualifying label either extractor's LABELS
+     * map would ever match. Matched against the same lines actually printed,
+     * before whitespace-flattening collapses that structure away.
+     */
+    private static final Pattern CIN_ANY =
+            Pattern.compile("\\b([UuLl][0-9]{5}[A-Za-z]{2}[0-9]{4}[A-Za-z]{3}[0-9]{6})\\b");
+
+    /** A block naming one of these is the lender's, never the borrower's. */
+    private static final Set<String> CIN_LENDER_SIGNALS = Set.of(
+            "bank", "banking", "lender", "lending institution",
+            "financial institution", "nbfc", "sanctioning bank");
+
+    /** A block naming one of these is the borrower's/addressee's — preferred outright. */
+    private static final Set<String> CIN_BORROWER_SIGNALS = Set.of(
+            "borrower", "applicant", "obligor", "board of directors",
+            "addressee", "to,");
+
+    /**
+     * Picks the borrower's CIN out of a document that may print more than
+     * one, by classifying the few lines immediately above each candidate
+     * rather than taking the first, last, or nearest match blindly (a letter
+     * always states the lender's own CIN in its letterhead, ahead of the
+     * borrower's in the addressee block below it — position alone is not a
+     * safe signal). A block mentioning the bank/lender is excluded outright;
+     * one naming the borrower/applicant/addressee is preferred outright over
+     * every other candidate; anything else (no signal either way) is kept
+     * only as a fallback for when no borrower-flagged candidate exists.
+     */
+    private static String extractBorrowerCin(String rawText) {
+        if (rawText == null || rawText.isBlank()) return null;
+
+        String borrowerHit = null;
+        String neutralHit = null;
+        java.util.Deque<String> context = new java.util.ArrayDeque<>();
+
+        for (String rawLine : rawText.split("\\r?\\n")) {
+            String trimmed = rawLine.trim();
+            if (trimmed.isEmpty()) continue;
+
+            Matcher m = CIN_ANY.matcher(trimmed);
+            if (m.find()) {
+                String candidate = SanctionValueParser.normalizeCinOrNull(m.group(1));
+                if (candidate != null) {
+                    StringBuilder ctx = new StringBuilder();
+                    for (String c : context) ctx.append(c).append(' ');
+                    ctx.append(trimmed);
+                    String lower = ctx.toString().toLowerCase(Locale.ROOT);
+
+                    boolean lender = CIN_LENDER_SIGNALS.stream().anyMatch(lower::contains);
+                    if (!lender) {
+                        boolean borrower = CIN_BORROWER_SIGNALS.stream().anyMatch(lower::contains);
+                        if (borrower) borrowerHit = candidate;
+                        else neutralHit = candidate;
+                    }
+                }
+            }
+
+            context.addLast(trimmed);
+            if (context.size() > 6) context.removeFirst();
+        }
+        return borrowerHit != null ? borrowerHit : neutralHit;
     }
 
     /**
@@ -400,6 +500,15 @@ public class SanctionDocExtractor {
                 String flatFull = normaliseWhitespace(flattenDocxText(doc));
                 put(out, "interestDuringMoratorium", extractInterestMoratoriumTreatment(flatFull));
             }
+
+            // A prose (non-table) letter never has a labelled "Borrower CIN"
+            // row for putIfLabelled to catch — only a bare "CIN:" line in the
+            // letterhead (the lender's) and another in the addressee block
+            // (the borrower's). Scanned last, and only as a gap-fill, so a
+            // genuinely labelled table row from pass 1 above always wins.
+            if (!out.containsKey("cin")) {
+                put(out, "cin", extractBorrowerCin(flattenDocxText(doc)));
+            }
         }
         normaliseInstrumentInPlace(out);
         deriveRoiFromInterestText(out);
@@ -500,6 +609,13 @@ public class SanctionDocExtractor {
         // The letterhead is the first line of the document, before flattening.
         String firstLine = text.strip().lines().findFirst().orElse("");
         put(out, "lenderName", stripLenderSuffixNoise(SanctionValueParser.clean(firstLine)));
+
+        // Same bare-"CIN:"-line problem as the DOCX prose fallback above —
+        // no labelled row for a table-driven regex to match, just a lender
+        // CIN in the letterhead and a borrower CIN in the addressee block a
+        // few lines later. Read from the original line-broken text, not
+        // `flat`, since the role-classifying context needs line boundaries.
+        put(out, "cin", extractBorrowerCin(text));
 
         normaliseInstrumentInPlace(out);
         deriveRoiFromInterestText(out);

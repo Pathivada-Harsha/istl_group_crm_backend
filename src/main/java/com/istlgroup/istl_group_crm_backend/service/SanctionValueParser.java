@@ -10,6 +10,8 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+
 /**
  * Normalisers shared by the extractors, the service and the derived-value
  * calculator, so a figure typed by a user and the same figure read from a
@@ -77,6 +79,52 @@ public final class SanctionValueParser {
 
     public static boolean isBlank(String s) {
         return s == null || s.trim().isEmpty();
+    }
+
+    // ── CIN ─────────────────────────────────────────────────────────────────
+
+    /**
+     * MCA's Corporate Identification Number: a status/listing digit (U or L),
+     * a 5-digit industry code, a 2-letter state code, a 4-digit year, a
+     * 3-letter ownership-type code, then a 6-digit registration number — 21
+     * characters, always. Checked only after normalising to uppercase with
+     * every non-alphanumeric character stripped, so a stray space, hyphen or
+     * case mismatch is exactly what gets tolerated during input — the shape
+     * itself is never relaxed.
+     */
+    private static final Pattern CIN_PATTERN =
+            Pattern.compile("^[UL][0-9]{5}[A-Z]{2}[0-9]{4}[A-Z]{3}[0-9]{6}$");
+
+    /**
+     * Trims, uppercases and strips anything that isn't a letter or digit,
+     * then returns that result only if it's a well-formed 21-character CIN —
+     * null otherwise (blank input included). Used wherever a wrong/unusable
+     * CIN should simply be left blank rather than block the whole save — the
+     * deterministic sanction-letter extractor, in particular: a letter's
+     * import must never fail over a single mis-scanned identity field.
+     */
+    public static String normalizeCinOrNull(String raw) {
+        if (isBlank(raw)) return null;
+        String upper = raw.trim().toUpperCase(Locale.ENGLISH).replaceAll("[^A-Z0-9]", "");
+        return CIN_PATTERN.matcher(upper).matches() ? upper : null;
+    }
+
+    /**
+     * Same normalisation as {@link #normalizeCinOrNull}, but for a value the
+     * caller is explicitly asserting is correct — the manual borrower form,
+     * and the "correct a misread CIN" screen right after import — where a
+     * malformed value should be rejected outright rather than silently
+     * dropped. Blank stays allowed (a borrower may genuinely have no CIN on
+     * file); only a non-blank, malformed value throws.
+     */
+    public static String requireValidCin(String raw) throws CustomException {
+        if (isBlank(raw)) return null;
+        String normalized = normalizeCinOrNull(raw);
+        if (normalized == null) {
+            throw new CustomException(
+                    "Enter a valid 21-character CIN, e.g. U40106MH2026PTC223978");
+        }
+        return normalized;
     }
 
     // ── money ───────────────────────────────────────────────────────────────

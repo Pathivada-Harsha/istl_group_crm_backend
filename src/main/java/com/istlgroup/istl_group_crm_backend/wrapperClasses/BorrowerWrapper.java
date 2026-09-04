@@ -51,6 +51,14 @@ public class BorrowerWrapper {
     private Boolean isSpv = false;
     /** Derived read-only label: Standalone / Subsidiary / SPV / Subsidiary + SPV. */
     private String companyType;
+    /**
+     * Read-only, derived: "Active" if at least one of this company's own
+     * sanction letters has {@code activeStatus == ACTIVE}, else "Inactive".
+     * Never stored on the company itself and never accepted on a
+     * create/update request — the sanction letter's own status (set via its
+     * dedicated status-change action) is the only editable source.
+     */
+    private String status;
     /** Top-level Parent Group, resolved even when groupId points at a Sub Group. */
     private Long parentGroupId;
     private String parentGroupName;

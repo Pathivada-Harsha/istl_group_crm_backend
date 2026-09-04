@@ -162,6 +162,55 @@ public class BorrowerController {
         }
     }
 
+    /**
+     * Atomic resolve + hierarchy-placement for the sanction-import "confirm
+     * this company" step — see
+     * {@link com.istlgroup.istl_group_crm_backend.service.BorrowerService#resolveBorrowerWithHierarchy}
+     * for why {@code resolve()} + {@code /{id}/hierarchy} as two separate
+     * calls was a data-integrity problem (2026-09-02 save-flow atomicity fix).
+     */
+    @PostMapping("/resolve-with-hierarchy")
+    public ResponseEntity<Map<String, Object>> resolveWithHierarchy(
+            @RequestBody Map<String, Object> body,
+            @RequestHeader(value = "User-Id", required = false) Long userId) {
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper mapper =
+                    new com.fasterxml.jackson.databind.ObjectMapper();
+            BorrowerWrapper identity = mapper.convertValue(body.get("identity"), BorrowerWrapper.class);
+            Long parentGroupId = body.get("parentGroupId") == null ? null
+                    : Long.valueOf(String.valueOf(body.get("parentGroupId")));
+            String newParentGroupName = body.get("newParentGroupName") == null
+                    ? null : String.valueOf(body.get("newParentGroupName"));
+            String newParentGroupCin = body.get("newParentGroupCin") == null
+                    ? null : String.valueOf(body.get("newParentGroupCin"));
+            String newParentGroupAddress = body.get("newParentGroupAddress") == null
+                    ? null : String.valueOf(body.get("newParentGroupAddress"));
+            Long subGroupId = body.get("subGroupId") == null ? null
+                    : Long.valueOf(String.valueOf(body.get("subGroupId")));
+            String newSubGroupName = body.get("newSubGroupName") == null
+                    ? null : String.valueOf(body.get("newSubGroupName"));
+            String newSubGroupCin = body.get("newSubGroupCin") == null
+                    ? null : String.valueOf(body.get("newSubGroupCin"));
+            String newSubGroupAddress = body.get("newSubGroupAddress") == null
+                    ? null : String.valueOf(body.get("newSubGroupAddress"));
+            Boolean isSubsidiary = body.get("isSubsidiary") == null ? null
+                    : Boolean.valueOf(String.valueOf(body.get("isSubsidiary")));
+            Boolean isSpv = body.get("isSpv") == null ? null
+                    : Boolean.valueOf(String.valueOf(body.get("isSpv")));
+            return ok(borrowerService.resolveBorrowerWithHierarchy(identity,
+                    parentGroupId, newParentGroupName, newParentGroupCin, newParentGroupAddress,
+                    subGroupId, newSubGroupName, newSubGroupCin, newSubGroupAddress,
+                    isSubsidiary, isSpv, userId), null);
+        } catch (CustomException e) {
+            return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (DataIntegrityViolationException e) {
+            return error(friendlyDataError(e), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return error("Failed to resolve borrower: " + e.getMessage(),
+                         HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
     /** Move a company between groups, or in/out of standalone. Never touches its sanctions. */
     @PutMapping("/{id}/hierarchy")
     public ResponseEntity<Map<String, Object>> updateHierarchy(
@@ -347,6 +396,45 @@ public class BorrowerController {
         }
     }
 
+    /** Sanctions associated directly with this Parent Group or Sub Group — never a child company's own. */
+    @GetMapping("/groups/{id}/sanctions")
+    public ResponseEntity<Map<String, Object>> groupSanctions(
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole,
+            @PathVariable Long id) {
+        try {
+            return ok(borrowerService.listGroupSanctions(userId, userRole, id), null);
+        } catch (CustomException e) {
+            return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return error("Failed to load the group's sanctions: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /** Save a sanction letter associated directly with this Parent Group or Sub Group, not any company. */
+    @PostMapping("/groups/{id}/sanction/save")
+    public ResponseEntity<Map<String, Object>> saveGroupSanction(
+            @PathVariable Long id,
+            @RequestBody Map<String, Object> body,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole) {
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper mapper =
+                    new com.fasterxml.jackson.databind.ObjectMapper();
+            BorrowerSanctionWrapper sanction =
+                    mapper.convertValue(body.get("sanction"), BorrowerSanctionWrapper.class);
+            String rawJson = body.get("rawExtracted") == null
+                    ? null : mapper.writeValueAsString(body.get("rawExtracted"));
+            return ok(borrowerService.saveGroupSanction(sanction, id, userId, userRole, rawJson), "Sanction saved");
+        } catch (CustomException e) {
+            return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (DataIntegrityViolationException e) {
+            return error(friendlyDataError(e), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return error("Failed to save sanction: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
     // ── import ──────────────────────────────────────────────────────────────
 
     /**
@@ -382,7 +470,17 @@ public class BorrowerController {
             String rawJson = body.get("rawExtracted") == null
                     ? null : mapper.writeValueAsString(body.get("rawExtracted"));
 
-            return ok(borrowerService.saveSanction(sanction, userId, userRole, rawJson), "Sanction saved");
+            // A reviewer's correction to a misread CIN/registered address —
+            // applied to the borrower in the SAME transaction as the
+            // sanction save (see BorrowerService#saveSanction), not a
+            // separate call.
+            String identityCin = body.get("identityCin") == null
+                    ? null : String.valueOf(body.get("identityCin"));
+            String identityRegisteredAddress = body.get("identityRegisteredAddress") == null
+                    ? null : String.valueOf(body.get("identityRegisteredAddress"));
+
+            return ok(borrowerService.saveSanction(sanction, identityCin, identityRegisteredAddress,
+                    userId, userRole, rawJson), "Sanction saved");
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
         } catch (DataIntegrityViolationException e) {
@@ -424,6 +522,24 @@ public class BorrowerController {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
         } catch (Exception e) {
             return error("Failed to delete sanction: " + e.getMessage(),
+                         HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /** The one editable Active/Inactive control — changes only this sanction's own status; see BorrowerService#updateSanctionStatus. */
+    @PutMapping("/sanction/{id}/status")
+    public ResponseEntity<Map<String, Object>> updateSanctionStatus(
+            @PathVariable Long id,
+            @RequestBody Map<String, Object> body,
+            @RequestHeader("User-Id") Long userId,
+            @RequestHeader("User-Role") String userRole) {
+        try {
+            String activeStatus = body.get("activeStatus") == null ? null : String.valueOf(body.get("activeStatus"));
+            return ok(borrowerService.updateSanctionStatus(id, activeStatus, userId, userRole), "Status updated");
+        } catch (CustomException e) {
+            return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return error("Failed to update status: " + e.getMessage(),
                          HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }

@@ -16,6 +16,11 @@ public class CompanyGroupWrapper {
     /** "GROUP" (no parent) or "SUB_GROUP" (has a parent) — read-only. */
     private String type;
 
+    /** Optional master CIN for this Group itself — independent of any company's own CIN. */
+    private String cin;
+    /** Optional master registered address for this Group itself — independent of any company's own. */
+    private String registeredAddress;
+
     private String createdAt;
     private String updatedAt;
 
@@ -41,4 +46,11 @@ public class CompanyGroupWrapper {
     private String totalSanctionedAmount;
     /** Companies sitting directly under a Sub Group — only set on a Sub Group's own summary. */
     private Integer companiesCount;
+    /**
+     * Read-only, derived: "Active" if at least one company anywhere under
+     * this group's own hierarchy (direct, or under one of its Sub Groups) is
+     * Active, else "Inactive" — never stored independently and never sent
+     * back on a create/update request. Never derived from sanctions.
+     */
+    private String status;
 }
