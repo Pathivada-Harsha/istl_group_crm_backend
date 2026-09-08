@@ -1,5 +1,8 @@
 package com.istlgroup.istl_group_crm_backend.wrapperClasses;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Data;
 
@@ -9,6 +12,18 @@ import lombok.Data;
 public class CompanyGroupWrapper {
 
     private Long id;
+
+    /**
+     * On a WRITE (createGroup), a caller may attach exactly one new sanction
+     * here for THIS group directly — the first entry is persisted in the
+     * same transaction as the group, right after it's created, mirroring
+     * {@link BorrowerWrapper#getSanctions()}. Only meaningful when the group
+     * itself is the sanctioned entity (no company beneath it); a group
+     * created purely as an organisational container leaves this empty.
+     */
+    private List<BorrowerSanctionWrapper> sanctions = new ArrayList<>();
+    /** Paired with {@code sanctions} above. */
+    private String rawExtractedJson;
     private String groupName;
     private Long parentGroupId;
     /** Convenience mirror so the picker needn't look it up separately. */

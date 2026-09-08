@@ -35,16 +35,19 @@ import com.istlgroup.istl_group_crm_backend.entity.BorrowerAliasEntity;
 import com.istlgroup.istl_group_crm_backend.entity.BorrowerEntity;
 import com.istlgroup.istl_group_crm_backend.entity.BorrowerSanctionEntity;
 import com.istlgroup.istl_group_crm_backend.entity.CompanyGroupEntity;
+import com.istlgroup.istl_group_crm_backend.entity.SanctionTermEntity;
 import com.istlgroup.istl_group_crm_backend.repo.BorrowerAliasRepo;
 import com.istlgroup.istl_group_crm_backend.repo.BorrowerRepo;
 import com.istlgroup.istl_group_crm_backend.repo.BorrowerSanctionRepo;
 import com.istlgroup.istl_group_crm_backend.repo.CompanyGroupRepo;
+import com.istlgroup.istl_group_crm_backend.repo.SanctionTermRepo;
 import com.istlgroup.istl_group_crm_backend.repo.TeamRepository;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.BorrowerSanctionWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.BorrowerWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.CompanyGroupWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.CompanyMatchWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.PagedResponseWrapper;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.SanctionTermWrapper;
 
 /**
  * Borrower Registry service.
@@ -65,11 +68,19 @@ public class BorrowerService {
     private static final long MAX_FILE_BYTES = 15L * 1024 * 1024;
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("dd MMM yyyy HH:mm");
 
-    /** The seven identity fields the registry counts for completeness. */
-    private static final int IDENTITY_TOTAL = 7;
+    /**
+     * The identity fields the registry counts for completeness — kept in sync
+     * with the "Borrower identity" card's own row list (identityKycAll in
+     * BorrowerDetail.js, excluding Borrower name, which is exempt: it's
+     * always set). Was a fixed 7-field KYC-only pack; widened to match every
+     * row the card actually shows, so the "N of M pending" chip and the
+     * card's own "N of M fields available" line never disagree.
+     */
+    private static final int IDENTITY_TOTAL = 14;
 
     @Autowired private BorrowerRepo borrowerRepo;
     @Autowired private BorrowerSanctionRepo sanctionRepo;
+    @Autowired private SanctionTermRepo sanctionTermRepo;
     @Autowired private SanctionDocExtractor docExtractor;
     @Autowired private SanctionDocAiExtractor aiExtractor;
     @Autowired private SanctionDocOcrService ocrService;
@@ -453,7 +464,39 @@ public class BorrowerService {
         b.setCreatedBy(userId);
         BorrowerEntity saved = borrowerRepo.save(b);
         syncAliases(saved.getId(), in.getAliases(), userId);
+        maybePersistAttachedSanction(in, saved.getId(), null, userId);
         return buildBorrowerWrapper(saved.getId());
+    }
+
+    /**
+     * If the caller attached a new sanction to a {@link BorrowerWrapper}/
+     * {@link CompanyGroupWrapper} being resolved/created (its {@code
+     * sanctions} list — see that field's own javadoc), saves it against the
+     * now-known borrower/group id, in the SAME transaction as the caller's
+     * own save — so a failure here (a duplicate ref no., a missing required
+     * field) rolls back the company/group too, rather than leaving it
+     * committed with zero sanctions. A no-op when the list is empty, so
+     * every existing caller that never populates it is unaffected. Calls
+     * the ordinary public {@link #saveSanction}/{@link #saveGroupSanction}
+     * directly (Spring self-invocation runs them in the caller's own
+     * transaction, not a new one) — no logic duplicated.
+     */
+    private void maybePersistAttachedSanction(
+            BorrowerWrapper in, Long borrowerId, Long groupId, Long userId) throws CustomException {
+        if (in.getSanctions() == null || in.getSanctions().isEmpty()) return;
+        BorrowerSanctionWrapper sanction = in.getSanctions().get(0);
+        if (groupId != null) {
+            saveGroupSanction(sanction, groupId, userId, null, in.getRawExtractedJson());
+        } else {
+            sanction.setBorrowerId(borrowerId);
+            saveSanction(sanction, null, null, userId, null, in.getRawExtractedJson());
+        }
+    }
+
+    /** Same as above, for a group being created directly as the sanctioned entity (no company). */
+    private void maybePersistAttachedSanction(CompanyGroupWrapper in, Long groupId, Long userId) throws CustomException {
+        if (in.getSanctions() == null || in.getSanctions().isEmpty()) return;
+        saveGroupSanction(in.getSanctions().get(0), groupId, userId, null, in.getRawExtractedJson());
     }
 
     @Transactional
@@ -519,6 +562,7 @@ public class BorrowerService {
 
         // Only borrower_sanctions still hangs off a borrower in the current
         // schema; the KYC / onboarding / snapshot / loan tables were removed.
+        deleteSanctionTermsByBorrowerId(id);
         deleteByBorrowerId("borrower_sanctions", id);
 
         em.createNativeQuery("DELETE FROM borrowers WHERE id = :id")
@@ -534,8 +578,31 @@ public class BorrowerService {
           .executeUpdate();
     }
 
+    /**
+     * sanction_terms has an FK to borrower_sanctions with no ON DELETE CASCADE
+     * (see barrower_registry.sql), so every raw-SQL borrower_sanctions purge
+     * below must clear its terms first or the delete fails with a foreign key
+     * violation. Scoped by borrower — see the group-scoped sibling below for
+     * a Group/Sub Group's own direct sanctions.
+     */
+    private void deleteSanctionTermsByBorrowerId(Long borrowerId) {
+        em.createNativeQuery("DELETE FROM sanction_terms WHERE sanction_id IN "
+                + "(SELECT id FROM borrower_sanctions WHERE borrower_id = :id)")
+          .setParameter("id", borrowerId)
+          .executeUpdate();
+    }
+
+    /** Same as {@link #deleteSanctionTermsByBorrowerId}, for a Group/Sub Group's own direct sanctions. */
+    private void deleteSanctionTermsByGroupId(Long groupId) {
+        em.createNativeQuery("DELETE FROM sanction_terms WHERE sanction_id IN "
+                + "(SELECT id FROM borrower_sanctions WHERE group_id = :id)")
+          .setParameter("id", groupId)
+          .executeUpdate();
+    }
+
     /** Sanctions associated directly with this Group (not any child company's) — purged before the Group itself. */
     private void deleteGroupOwnSanctions(Long groupId) {
+        deleteSanctionTermsByGroupId(groupId);
         em.createNativeQuery("DELETE FROM borrower_sanctions WHERE group_id = :id")
           .setParameter("id", groupId)
           .executeUpdate();
@@ -580,6 +647,7 @@ public class BorrowerService {
     /** Every company sitting directly under one group, purged the same way {@link #deleteBorrower} purges one. */
     private void deleteCompaniesInGroup(Long groupId) {
         for (BorrowerEntity b : borrowerRepo.findByGroupId(groupId)) {
+            deleteSanctionTermsByBorrowerId(b.getId());
             deleteByBorrowerId("borrower_sanctions", b.getId());
             em.createNativeQuery("DELETE FROM borrowers WHERE id = :id")
               .setParameter("id", b.getId())
@@ -699,6 +767,7 @@ public class BorrowerService {
         // own group-creation step — see createGroupChecked's own comment.
         Long id = createGroupChecked(in.getGroupName().trim(), in.getParentGroupId(),
                 in.getCin(), in.getRegisteredAddress(), userId);
+        maybePersistAttachedSanction(in, id, userId);
         return toGroupWrapper(companyGroupRepo.findById(id).orElseThrow(
                 () -> new CustomException("Group not found")));
     }
@@ -1544,6 +1613,7 @@ public class BorrowerService {
 
         validateSanction(e);
         sanctionRepo.save(e);
+        persistSanctionTerms(e, in.getTerms());
         return buildBorrowerWrapper(borrower.getId());
     }
 
@@ -1596,6 +1666,7 @@ public class BorrowerService {
 
         validateSanction(e);
         sanctionRepo.save(e);
+        persistSanctionTerms(e, in.getTerms());
         return toWrapper(e, null);
     }
 
@@ -1639,8 +1710,14 @@ public class BorrowerService {
         BorrowerEntity b;
         if (existing.isPresent()) {
             b = existing.get();
-            if (!fillBlanks(b, in)) return buildBorrowerWrapper(b.getId());
-            b.setUpdatedBy(userId);
+            // Only actually saves when something changed — but a sanction
+            // attached via `in.getSanctions()` (see maybePersistAttachedSanction
+            // below) must still be persisted either way, so this no longer
+            // returns early the way it used to.
+            if (fillBlanks(b, in)) {
+                b.setUpdatedBy(userId);
+                b = borrowerRepo.save(b);
+            }
         } else {
             // Defence in depth — the sanction-import UI never reaches this
             // branch for a genuinely new company (it goes through
@@ -1651,8 +1728,10 @@ public class BorrowerService {
             b.setBorrowerName(name);
             fillBlanks(b, in);
             b.setCreatedBy(userId);
+            b = borrowerRepo.save(b);
         }
-        return buildBorrowerWrapper(borrowerRepo.save(b).getId());
+        maybePersistAttachedSanction(in, b.getId(), null, userId);
+        return buildBorrowerWrapper(b.getId());
     }
 
     /**
@@ -1757,7 +1836,9 @@ public class BorrowerService {
         if (resolvedGroupId != null) b.setGroupId(resolvedGroupId);
         if (isSubsidiary != null) b.setIsSubsidiary(isSubsidiary);
         if (isSpv != null) b.setIsSpv(isSpv);
-        return buildBorrowerWrapper(borrowerRepo.save(b).getId());
+        b = borrowerRepo.save(b);
+        maybePersistAttachedSanction(in, b.getId(), null, userId);
+        return buildBorrowerWrapper(b.getId());
     }
 
     /**
@@ -2166,6 +2247,7 @@ public class BorrowerService {
         e.setProjectCost(SanctionValueParser.parseMoneyCrore(in.getProjectCost()));
         e.setSanctionedAmount(SanctionValueParser.parseMoneyCrore(in.getSanctionedAmount()));
         e.setDebtAmount(SanctionValueParser.parseMoneyCrore(in.getDebtAmount()));
+        e.setLimitAmount(SanctionValueParser.parseMoneyCrore(in.getLimitAmount()));
         e.setEquityAmount(SanctionValueParser.parseMoneyCrore(in.getEquityAmount()));
         e.setDebtPct(SanctionValueParser.parsePct(in.getDebtPct()));
         e.setEquityPct(SanctionValueParser.parsePct(in.getEquityPct()));
@@ -2181,6 +2263,8 @@ public class BorrowerService {
                 : SanctionValueParser.parseRatePct(in.getInterestRateText()));
 
         e.setTechnology(SanctionValueParser.clean(in.getTechnology()));
+        e.setProjectGroup(SanctionValueParser.clean(in.getProjectGroup()));
+        e.setProjectSubGroup(SanctionValueParser.clean(in.getProjectSubGroup()));
         e.setInstrument(SanctionValueParser.clean(in.getInstrument()));
 
         e.setCoObligators(SanctionValueParser.clean(in.getCoObligators()));
@@ -2227,6 +2311,7 @@ public class BorrowerService {
                 ? null : in.getRepaymentProfileJson());
 
         e.setDisbursementDate(SanctionValueParser.parseDate(in.getDisbursementDate()));
+        e.setTentativeDisbursementDate(SanctionValueParser.parseDate(in.getTentativeDisbursementDate()));
         e.setRepaymentStartDate(SanctionValueParser.parseDate(in.getRepaymentStartDate()));
         e.setRepaymentEndDate(SanctionValueParser.parseDate(in.getRepaymentEndDate()));
         e.setScheduledCod(SanctionValueParser.parseDate(in.getScheduledCod()));
@@ -2240,6 +2325,102 @@ public class BorrowerService {
         if (!SanctionValueParser.isBlank(in.getExtractionEngine())) {
             e.setExtractionEngine(in.getExtractionEngine());
         }
+    }
+
+    private SanctionTermWrapper toTermWrapper(SanctionTermEntity e) {
+        SanctionTermWrapper w = new SanctionTermWrapper();
+        w.setId(e.getId());
+        w.setTermLimit(SanctionValueParser.formatCrore(e.getTermLimit()));
+        w.setFacilityType(e.getFacilityType());
+        w.setTentativeDisbursementDate(SanctionValueParser.formatDate(e.getTentativeDisbursementDate()));
+        w.setActualDisbursementDate(SanctionValueParser.formatDate(e.getActualDisbursementDate()));
+        w.setRepaymentProfileJson(e.getRepaymentProfileJson());
+        return w;
+    }
+
+    /**
+     * Replaces every Sanction Term row for one sanction with the incoming
+     * list — delete-all-then-reinsert, same pattern QuotationService uses
+     * for its own child line items, rather than a merge-by-id. Called from
+     * within {@link #saveSanction}/{@link #saveGroupSanction}'s own
+     * transaction (after {@code e} itself is already saved, so its id is
+     * known), so a validation failure here rolls back the sanction save too.
+     *
+     * <p>Validates the two rules the Product section's own info box states:
+     * the terms must add up to exactly the sanction's Limit, and every
+     * term's Actual Disb. Date must fall on or before the day before
+     * Scheduled COD date (COD 01-02-2027 → latest 31-01-2027). An empty/
+     * absent list is valid — Sanction Terms are optional.
+     */
+    private void persistSanctionTerms(BorrowerSanctionEntity e, List<SanctionTermWrapper> terms) throws CustomException {
+        sanctionTermRepo.deleteBySanctionId(e.getId());
+        if (terms == null || terms.isEmpty()) return;
+
+        List<SanctionTermEntity> rows = new ArrayList<>();
+        BigDecimal total = BigDecimal.ZERO;
+        int order = 0;
+        for (SanctionTermWrapper t : terms) {
+            SanctionTermEntity row = new SanctionTermEntity();
+            row.setSanctionId(e.getId());
+            row.setTermOrder(order++);
+            BigDecimal limit = SanctionValueParser.parseMoneyCrore(t.getTermLimit());
+            if (limit == null) {
+                throw new CustomException("Every Sanction Term needs a Term Limit.");
+            }
+            row.setTermLimit(limit);
+            total = total.add(limit);
+            row.setFacilityType(SanctionValueParser.clean(t.getFacilityType()));
+            row.setTentativeDisbursementDate(SanctionValueParser.parseDate(t.getTentativeDisbursementDate()));
+            LocalDate actualDisb = SanctionValueParser.parseDate(t.getActualDisbursementDate());
+            row.setActualDisbursementDate(actualDisb);
+            // Verbatim, same "blank means resume the auto equal-split"
+            // contract applySanction already uses for the sanction-level
+            // repaymentProfileJson.
+            row.setRepaymentProfileJson(SanctionValueParser.isBlank(t.getRepaymentProfileJson())
+                    ? null : t.getRepaymentProfileJson());
+
+            if (e.getScheduledCod() != null && actualDisb != null
+                    && !actualDisb.isBefore(e.getScheduledCod())) {
+                throw new CustomException("Each Sanction Term's Actual Disb. Date must fall before the "
+                        + "Scheduled COD date (" + SanctionValueParser.formatDate(e.getScheduledCod())
+                        + ") — latest allowed is "
+                        + SanctionValueParser.formatDate(e.getScheduledCod().minusDays(1)) + ".");
+            }
+            rows.add(row);
+        }
+
+        if (e.getLimitAmount() != null && total.subtract(e.getLimitAmount()).abs().compareTo(new BigDecimal("0.01")) > 0) {
+            throw new CustomException("The Sanction Terms must add up to the Limit ("
+                    + SanctionValueParser.formatCrore(e.getLimitAmount()) + "). Current total: "
+                    + SanctionValueParser.formatCrore(total) + ".");
+        }
+
+        // Defense in depth for the equal-split rule the UI already enforces
+        // (Term Limit is a computed, read-only cell there — see
+        // SanctionFormModal.js's equalSplitTermLimits): every term must be
+        // within a paisa of an equal share of the Limit, so a stale client
+        // or a direct API call can't post an unequal split. Skipped when the
+        // Limit itself isn't known yet (nothing to divide against) — the
+        // sum-to-Limit check above already covers that case.
+        if (e.getLimitAmount() != null && !rows.isEmpty()) {
+            BigDecimal share = e.getLimitAmount()
+                    .divide(new BigDecimal(rows.size()), 2, java.math.RoundingMode.FLOOR);
+            for (int i = 0; i < rows.size(); i++) {
+                // Last term absorbs the rounding remainder, same as
+                // equalSplitTermLimits on the frontend — its expected share
+                // is whatever's left, not the floored per-term amount.
+                BigDecimal expected = (i == rows.size() - 1)
+                        ? e.getLimitAmount().subtract(share.multiply(new BigDecimal(rows.size() - 1)))
+                        : share;
+                if (rows.get(i).getTermLimit().subtract(expected).abs().compareTo(new BigDecimal("0.01")) > 0) {
+                    throw new CustomException("Each Sanction Term must be an equal share of the Limit ("
+                            + SanctionValueParser.formatCrore(e.getLimitAmount()) + " ÷ " + rows.size()
+                            + " terms). Term " + (i + 1) + " does not match its expected share.");
+                }
+            }
+        }
+
+        sanctionTermRepo.saveAll(rows);
     }
 
     private BorrowerWrapper toWrapper(BorrowerEntity b) {
@@ -2277,17 +2458,22 @@ public class BorrowerService {
         w.setCreatedAt(b.getCreatedAt() == null ? null : b.getCreatedAt().format(TS));
         w.setUpdatedAt(b.getUpdatedAt() == null ? null : b.getUpdatedAt().format(TS));
 
-        // Deliberately still the seven KYC-pack fields. The registry-sheet
-        // columns added alongside them are not part of "identity complete", and
-        // counting them would flip every existing Complete chip to "7 of 13".
+        // Every row identityKycAll shows (Borrower name excluded — see IDENTITY_TOTAL).
         int filled = 0;
         if (!SanctionValueParser.isBlank(b.getCin()))               filled++;
         if (!SanctionValueParser.isBlank(b.getPan()))               filled++;
+        if (!SanctionValueParser.isBlank(b.getPromoterName()))      filled++;
         if (!SanctionValueParser.isBlank(b.getSponsorName()))       filled++;
+        if (!SanctionValueParser.isBlank(b.getGuarantorName()))     filled++;
+        if (!SanctionValueParser.isBlank(b.getGroupName()))         filled++;
+        if (!SanctionValueParser.isBlank(b.getBorrowerCategory()))  filled++;
+        if (!SanctionValueParser.isBlank(b.getBorrowerSubCategory())) filled++;
+        if (!SanctionValueParser.isBlank(b.getState()))             filled++;
         if (!SanctionValueParser.isBlank(b.getRegisteredAddress())) filled++;
         if (!SanctionValueParser.isBlank(b.getContactPerson()))     filled++;
         if (!SanctionValueParser.isBlank(b.getContactEmail()))      filled++;
         if (!SanctionValueParser.isBlank(b.getContactPhone()))      filled++;
+        if (b.getProjectId() != null)                               filled++;
         w.setIdentityFilled(filled);
         w.setIdentityTotal(IDENTITY_TOTAL);
 
@@ -2341,7 +2527,12 @@ public class BorrowerService {
         w.setInterestRateText(e.getInterestRateText());
 
         w.setTechnology(e.getTechnology());
+        w.setProjectGroup(e.getProjectGroup());
+        w.setProjectSubGroup(e.getProjectSubGroup());
+        w.setLimitAmount(SanctionValueParser.formatCrore(e.getLimitAmount()));
         w.setInstrument(e.getInstrument());
+        w.setTerms(sanctionTermRepo.findBySanctionIdOrderByTermOrderAsc(e.getId()).stream()
+                .map(this::toTermWrapper).collect(Collectors.toList()));
 
         w.setCoObligators(e.getCoObligators());
         w.setPledgeOfSharesPct(SanctionValueParser.formatPct(e.getPledgeOfSharesPct()));
@@ -2363,6 +2554,11 @@ public class BorrowerService {
         w.setRepaymentProfileJson(e.getRepaymentProfileJson());
 
         w.setDisbursementDate(SanctionValueParser.formatDate(e.getDisbursementDate()));
+        // A sanction saved before this field existed has no tentative date of
+        // its own on file — reads as its own Actual date until someone edits
+        // it, so every pre-existing row displays correctly with no backfill.
+        w.setTentativeDisbursementDate(SanctionValueParser.formatDate(
+                e.getTentativeDisbursementDate() != null ? e.getTentativeDisbursementDate() : e.getDisbursementDate()));
         w.setRepaymentStartDate(SanctionValueParser.formatDate(e.getRepaymentStartDate()));
         w.setRepaymentEndDate(SanctionValueParser.formatDate(e.getRepaymentEndDate()));
         w.setScheduledCod(SanctionValueParser.formatDate(e.getScheduledCod()));

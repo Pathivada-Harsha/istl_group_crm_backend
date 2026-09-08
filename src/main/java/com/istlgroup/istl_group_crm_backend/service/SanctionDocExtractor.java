@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.apache.poi.xwpf.usermodel.IBodyElement;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
@@ -276,16 +277,25 @@ public class SanctionDocExtractor {
             "borrower", "applicant", "obligor", "board of directors",
             "addressee", "to,");
 
+    /** A block naming one of these belongs to a Group/Promoter/Holding entity, never the borrower itself. */
+    private static final Set<String> CIN_GROUP_SIGNALS = Set.of(
+            "group", "promoter", "holding company", "parent company", "sponsor", "flagship company");
+
     /**
      * Picks the borrower's CIN out of a document that may print more than
      * one, by classifying the few lines immediately above each candidate
      * rather than taking the first, last, or nearest match blindly (a letter
      * always states the lender's own CIN in its letterhead, ahead of the
      * borrower's in the addressee block below it — position alone is not a
-     * safe signal). A block mentioning the bank/lender is excluded outright;
-     * one naming the borrower/applicant/addressee is preferred outright over
-     * every other candidate; anything else (no signal either way) is kept
-     * only as a fallback for when no borrower-flagged candidate exists.
+     * safe signal). A block mentioning the bank/lender, or a Group/Promoter/
+     * Holding entity, is excluded outright; one naming the borrower/
+     * applicant/addressee is preferred outright over every other candidate
+     * (even one that also mentions a Group, e.g. "Borrower ... a Group
+     * company"); anything else (no signal either way) is kept only as a
+     * fallback for when no borrower-flagged candidate exists — and only the
+     * *first* such neutral candidate, since a letter typically states the
+     * borrower's own details before any Group/Promoter details later on, so
+     * a later unflagged CIN must never silently displace an earlier one.
      */
     private static String extractBorrowerCin(String rawText) {
         if (rawText == null || rawText.isBlank()) return null;
@@ -308,10 +318,12 @@ public class SanctionDocExtractor {
                     String lower = ctx.toString().toLowerCase(Locale.ROOT);
 
                     boolean lender = CIN_LENDER_SIGNALS.stream().anyMatch(lower::contains);
-                    if (!lender) {
-                        boolean borrower = CIN_BORROWER_SIGNALS.stream().anyMatch(lower::contains);
-                        if (borrower) borrowerHit = candidate;
-                        else neutralHit = candidate;
+                    boolean borrower = CIN_BORROWER_SIGNALS.stream().anyMatch(lower::contains);
+                    boolean group = CIN_GROUP_SIGNALS.stream().anyMatch(lower::contains);
+                    if (borrower) {
+                        borrowerHit = candidate;
+                    } else if (!lender && !group) {
+                        if (neutralHit == null) neutralHit = candidate;
                     }
                 }
             }
@@ -387,21 +399,32 @@ public class SanctionDocExtractor {
         }
     }
 
-    /** Paragraphs then table rows, in document order — shared with the covenant text scan. */
+    /**
+     * Paragraphs and table rows, in true document order — shared with the
+     * covenant text scan and, critically, with {@link #extractBorrowerCin},
+     * whose lender/borrower/group classification depends on the few lines
+     * immediately preceding each CIN candidate. Walking {@code
+     * getBodyElements()} (rather than all paragraphs, then all tables) is
+     * what actually guarantees that order: a letterhead/addressee block laid
+     * out in a table, with loan-terms tables appearing later in the body,
+     * would otherwise have its table rows moved to the very end of the
+     * flattened text, detaching them from their real surrounding context.
+     */
     private static String flattenDocxText(XWPFDocument doc) {
         StringBuilder sb = new StringBuilder();
-        for (XWPFParagraph p : doc.getParagraphs()) {
-            String t = p.getText();
-            if (t != null && !t.isBlank()) sb.append(t.trim()).append('\n');
-        }
-        for (XWPFTable table : doc.getTables()) {
-            for (XWPFTableRow row : table.getRows()) {
-                StringBuilder line = new StringBuilder();
-                for (int i = 0; i < row.getTableCells().size(); i++) {
-                    if (i > 0) line.append(" : ");
-                    line.append(row.getCell(i).getText().trim());
+        for (IBodyElement el : doc.getBodyElements()) {
+            if (el instanceof XWPFParagraph p) {
+                String t = p.getText();
+                if (t != null && !t.isBlank()) sb.append(t.trim()).append('\n');
+            } else if (el instanceof XWPFTable table) {
+                for (XWPFTableRow row : table.getRows()) {
+                    StringBuilder line = new StringBuilder();
+                    for (int i = 0; i < row.getTableCells().size(); i++) {
+                        if (i > 0) line.append(" : ");
+                        line.append(row.getCell(i).getText().trim());
+                    }
+                    if (!line.toString().isBlank()) sb.append(line).append('\n');
                 }
-                if (!line.toString().isBlank()) sb.append(line).append('\n');
             }
         }
         return sb.toString();
@@ -517,9 +540,19 @@ public class SanctionDocExtractor {
 
     // ── PDF: labelled regex over flattened text ─────────────────────────────
 
-    /** A date in any of the shapes the sample letters print. */
+    /**
+     * A date in any of the shapes the sample letters print — including a
+     * bare month-and-year with no day (e.g. "March 2026"), which
+     * SanctionValueParser.parseDate reads as that month's last day. The
+     * day-qualified alternatives are listed first and require a leading
+     * digit, so they always win over the month-year alternative for a
+     * fully-dated string; the month-year alternative only ever matches
+     * when no day was printed at all.
+     */
     private static final String DATE_ALT =
-            "[0-9]{1,2}\\s+[A-Za-z]{3,12}\\s+[0-9]{4}|[0-9]{1,2}[/\\-][0-9]{1,2}[/\\-][0-9]{4}";
+            "[0-9]{1,2}\\s+[A-Za-z]{3,12}\\s+[0-9]{4}"
+          + "|[0-9]{1,2}[/\\-][0-9]{1,2}[/\\-][0-9]{4}"
+          + "|[A-Za-z]{3,12}\\s+[0-9]{4}";
 
     /** An amount with or without its unit. */
     private static final String MONEY =
