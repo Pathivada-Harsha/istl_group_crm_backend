@@ -36,6 +36,7 @@ import com.istlgroup.istl_group_crm_backend.repo.OrderBookRepo;
 import com.istlgroup.istl_group_crm_backend.repo.SiteVisitRepo;
 import com.istlgroup.istl_group_crm_backend.repo.ProjectPhaseRepo;
 import com.istlgroup.istl_group_crm_backend.repo.ProjectScopeRepo;
+import com.istlgroup.istl_group_crm_backend.service.scope.ScopeSubItems;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.BomLineRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.BomSaveRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.ProjectDetailWrapper.PhaseRequest;
@@ -87,6 +88,7 @@ public class ProjectLeadSeedService {
     @Autowired private ProjectPhaseRepo phaseRepo;
     @Autowired private ProjectScopeRepo scopeRepo;
     @Autowired private ProjectDetailService projectDetailService;
+    @Autowired private ScopeSubItems scopeSubItems;
 
     /**
      * Copies the lead's scope and BOM onto a freshly created project.
@@ -202,9 +204,16 @@ public class ProjectLeadSeedService {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * One parent phase per lead scope line, in order, with no sub-items — the PM adds
-     * those afterwards, so a matched template line's sub-items are deliberately not
-     * imported.
+     * One parent phase per lead scope line, in order, carrying the line's own sub-item
+     * breakdown. The lead's breakdown wins; a lead whose scope predates the sub-item
+     * feature (or was typed rather than suggested) falls back to the matched template
+     * line's, by the same {@link #activityKey} match the weights use. Only when neither
+     * has one does the phase arrive flat for the PM to break down.
+     *
+     * <p>The stored sub-item shape is a subset of {@code project_phases.sub_items}, so it
+     * is copied across verbatim — no translation, and crucially <b>no renaming</b>: a
+     * sub-item's name is its identity for the planned-budget merge and for
+     * {@code project_progress_periods.sub_item_key}.
      *
      * <p>Lead scope lines have no category / quantity / unit counterpart on
      * {@code project_phases}; those three are dropped. Quantities still reach the
@@ -214,6 +223,7 @@ public class ProjectLeadSeedService {
                                            LeadScopeTemplateEntity template,
                                            Map<Long, BigDecimal> costByLeadScopeItemId) {
         List<BigDecimal> weights = deriveWeights(leadScope, template);
+        Map<String, String> templateSubs = templateSubItemsByActivity(template);
         List<PhaseRequest> phases = new ArrayList<>();
         for (int i = 0; i < leadScope.size(); i++) {
             LeadScopeItemEntity src = leadScope.get(i);
@@ -226,7 +236,11 @@ public class ProjectLeadSeedService {
             p.setProgressPercent(BigDecimal.ZERO);
             p.setWeightPct(weights.get(i));
             p.setPlannedBudget(costByLeadScopeItemId.get(src.getId()));
-            p.setSubItems(null);
+            String subsJson = (src.getSubItems() != null && !src.getSubItems().isBlank())
+                    ? src.getSubItems()
+                    : templateSubs.get(activityKey(src.getActivity()));
+            List<Map<String, Object>> subs = scopeSubItems.parse(subsJson);
+            p.setSubItems(subs.isEmpty() ? null : subs);
             phases.add(p);
         }
         return phases;
@@ -353,6 +367,25 @@ public class ProjectLeadSeedService {
             // line unmatched lets it take the mean instead of dragging the set to zero.
             if (key == null || line.getWeightPct() == null || line.getWeightPct().signum() <= 0) continue;
             byActivity.putIfAbsent(key, line.getWeightPct());
+        }
+        return byActivity;
+    }
+
+    /**
+     * Activity text of the active template's lines → its sub-item breakdown JSON.
+     * The fallback for a lead scope line that carries no breakdown of its own — a lead
+     * created before this feature, or one whose scope was typed rather than suggested.
+     * First wins on duplicates, matching {@link #templateWeightsByActivity}.
+     */
+    private Map<String, String> templateSubItemsByActivity(LeadScopeTemplateEntity template) {
+        Map<String, String> byActivity = new HashMap<>();
+        if (template == null) return byActivity;
+        List<LeadScopeTemplateItemEntity> lines =
+            leadScopeTemplateItemRepo.findByTemplateIdAndDeletedAtIsNullOrderBySeqNoAscIdAsc(template.getId());
+        for (LeadScopeTemplateItemEntity line : lines) {
+            String key = activityKey(line.getActivity());
+            if (key == null || line.getSubItems() == null || line.getSubItems().isBlank()) continue;
+            byActivity.putIfAbsent(key, line.getSubItems());
         }
         return byActivity;
     }

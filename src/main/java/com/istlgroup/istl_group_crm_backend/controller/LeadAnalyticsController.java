@@ -18,7 +18,9 @@ public class LeadAnalyticsController {
 
     /**
      * Lead analytics for the dashboard.
-     * range: this_month | last_month | last_3_months | this_year | last_year | last_12_months | custom
+     * range: this_week | last_week | this_month | last_month | last_3_months | this_year
+     *      | last_year | last_12_months | custom
+     * Scoped to the acting user's reporting subtree; top-level roles see everything.
      * For range=custom, pass from &amp; to as ISO dates (yyyy-MM-dd); the window is [from, to] inclusive.
      */
     @GetMapping("/leads")
@@ -31,7 +33,7 @@ public class LeadAnalyticsController {
         try {
             Map<String, Object> resp = new HashMap<>();
             resp.put("success", true);
-            resp.put("data", analyticsService.buildLeadAnalytics(range, from, to));
+            resp.put("data", analyticsService.buildLeadAnalytics(range, from, to, userId));
             return ResponseEntity.ok(resp);
         } catch (Exception e) {
             Map<String, Object> err = new HashMap<>();
@@ -41,14 +43,26 @@ public class LeadAnalyticsController {
         }
     }
 
+    /**
+     * Per-person lead breakdown, scoped to the acting user's reporting subtree
+     * (themselves + everyone below them; never their own manager, never a peer).
+     * Top-level roles see every active user.
+     *
+     * <p>Optional range/from/to narrow every column to that window — the same
+     * vocabulary as /analytics/leads. With no range the figures are all-time,
+     * which is what the Team Lead Performance page asks for.
+     */
     @GetMapping("/team-performance")
     public ResponseEntity<Map<String, Object>> teamPerformance(
+            @RequestParam(value = "range", required = false) String range,
+            @RequestParam(value = "from", required = false) String from,
+            @RequestParam(value = "to", required = false) String to,
             @ActingUserId Long userId,
             @ActingUserRole String userRole) {
         try {
             Map<String, Object> resp = new HashMap<>();
             resp.put("success", true);
-            resp.put("data", analyticsService.buildTeamLeadPerformance(userId, userRole));
+            resp.put("data", analyticsService.buildTeamLeadPerformance(userId, userRole, range, from, to));
             return ResponseEntity.ok(resp);
         } catch (Exception e) {
             Map<String, Object> err = new HashMap<>();

@@ -35,6 +35,25 @@ public class LeadTemplateWrapper {
         private BigDecimal weightPct;
         /** TRUE when the user pinned this weight; FALSE when it auto-balances. */
         private Boolean weightManual;
+        /**
+         * Second-level breakdown under this activity — a subset of the
+         * {@code project_phases.sub_items} shape (name / description / unit /
+         * weightPct / weightManual), so a phase seeded from it later needs no
+         * translation. Sub-weights are a share of THIS line and total 100 within
+         * the parent; the parent keeps its own share of the template's 100.
+         * Null or empty means "no breakdown".
+         */
+        private List<TemplateScopeSubItemRequest> subItems;
+    }
+
+    /** One sub-item under a template scope line. */
+    @Data
+    public static class TemplateScopeSubItemRequest {
+        private String name;
+        private String description;
+        private String unit;
+        private BigDecimal weightPct;
+        private Boolean weightManual;
     }
 
     /** PUT /admin/lead-templates/{id}/scope-items — whole-list replace. */

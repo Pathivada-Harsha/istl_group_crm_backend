@@ -94,8 +94,14 @@ public class SiteVisitService {
         SiteVisitEntity visit = existing.isEmpty() ? new SiteVisitEntity() : existing.get(0);
         visit.setLeadId(leadId);
         if (request.getFollowupId() != null) visit.setFollowupId(request.getFollowupId());
-        visit.setVisitedByUserId(userId);
-        visit.setVisitedByName(usersRepo.findUserNameWithUserId(userId));
+        // Who performed the visit — stamped once, by whoever first records the
+        // report, and never rewritten afterwards. This used to be set on every
+        // save, so any later editor (an admin opening the report, say) silently
+        // became "visited by" and the real visitor was lost.
+        if (visit.getVisitedByUserId() == null) {
+            visit.setVisitedByUserId(userId);
+            visit.setVisitedByName(usersRepo.findUserNameWithUserId(userId));
+        }
         if (visit.getCreatedBy() == null) visit.setCreatedBy(userId);
         if (request.getVisitDate() != null && !request.getVisitDate().isBlank()) {
             visit.setVisitDate(LocalDate.parse(request.getVisitDate()));

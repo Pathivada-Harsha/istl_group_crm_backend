@@ -42,6 +42,19 @@ public class LeadScopeItemEntity {
     @Column(name = "notes", length = 500)
     private String notes;
 
+    /**
+     * Second-level breakdown under this activity, same JSON array shape as
+     * {@code lead_scope_template_items.sub_items} and a subset of
+     * {@code project_phases.sub_items} — {@code {name, description, unit, weightPct,
+     * weightManual}}. Seeded from the template by Suggest, then editable on the lead's
+     * Technical Scope tab independently of the template. NULL = never broken down.
+     *
+     * <p>Sub-item weights are a share of THIS line and total 100 within it, never a
+     * share of the whole scope. See {@code service.scope.ScopeSubItems}.
+     */
+    @Column(name = "sub_items", columnDefinition = "JSON")
+    private String subItems;
+
     // ── Audit ────────────────────────────────────────────────────────────────
     @Column(name = "created_by")
     private Long createdBy;

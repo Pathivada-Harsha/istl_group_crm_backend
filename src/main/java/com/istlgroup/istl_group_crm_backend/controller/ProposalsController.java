@@ -475,6 +475,30 @@ public ResponseEntity<Map<String, Object>> createProposal(
     }
 
     /**
+     * Every proposal on one lead the caller may see.
+     * GET /proposals/by-lead/{leadId}
+     */
+    @GetMapping("/by-lead/{leadId}")
+    public ResponseEntity<?> getProposalsByLead(
+            @PathVariable Long leadId,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+        try {
+            return ResponseEntity.ok(Map.of(
+                "success", true,
+                "data", proposalsService.getProposalsByLead(leadId, userId, userRole)
+            ));
+        } catch (CustomException ce) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(Map.of("success", false, "message", ce.getMessage()));
+        } catch (Exception e) {
+            log.error("Error listing proposals for lead {}", leadId, e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
+    /**
      * Upload an offline proposal PDF (scanned/external proposal given by client).
      * POST /proposals/{id}/upload-offline
      * Stores file bytes directly in DB (MEDIUMBLOB). No disk write for new uploads.
@@ -486,6 +510,11 @@ public ResponseEntity<Map<String, Object>> createProposal(
             @ActingUserId Long userId,
             @ActingUserRole String userRole) {
         try {
+            // Ownership: this write path used to accept any proposal id from any
+            // authenticated caller. It answers to the same rule as the other
+            // proposal write paths now.
+            proposalsService.requireEditable(id, userId, userRole);
+
             if (file.isEmpty()) {
                 return ResponseEntity.badRequest().body(Map.of("error", "File is empty"));
             }
@@ -494,6 +523,13 @@ public ResponseEntity<Map<String, Object>> createProposal(
             }
 
             String originalName = file.getOriginalFilename();
+            // The bytes are served back as application/pdf, so only accept a PDF.
+            boolean pdfName = originalName != null && originalName.toLowerCase().endsWith(".pdf");
+            boolean pdfType = "application/pdf".equalsIgnoreCase(file.getContentType());
+            if (!pdfName && !pdfType) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Only PDF files are allowed"));
+            }
+
             byte[] bytes = file.getBytes();
 
             // Store blob + metadata; clear legacy path so view-offline knows to use BLOB
@@ -505,6 +541,9 @@ public ResponseEntity<Map<String, Object>> createProposal(
                 "message", "Offline proposal uploaded successfully",
                 "data", updated
             ));
+        } catch (CustomException ce) {
+            log.warn("Permission denied for upload-offline proposal {}: {}", id, ce.getMessage());
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("error", ce.getMessage()));
         } catch (IOException e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(Map.of("error", "File upload failed: " + e.getMessage()));

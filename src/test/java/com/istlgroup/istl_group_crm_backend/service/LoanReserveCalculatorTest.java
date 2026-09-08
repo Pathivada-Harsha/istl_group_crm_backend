@@ -444,7 +444,11 @@ class LoanReserveCalculatorTest {
             // BorrowerService.toWrapper's own mapping order: the entity's
             // persisted override is copied onto the wrapper before apply()/
             // fillGaps() run, exactly as production code does.
-            e.setDsraAmount(new BigDecimal("999999.00"));
+            // Exact in crore on purpose: formatCrore never rounds (it is the
+            // read half of a format → edit → parseMoneyCrore round trip, so
+            // rounding here would drift the stored figure on every save), and
+            // 999999.00 would print as "₹0.0999999 Cr" rather than "₹0.10 Cr".
+            e.setDsraAmount(new BigDecimal("1000000.00"));
             BorrowerSanctionWrapper w2 = new BorrowerSanctionWrapper();
             w2.setDsraAmount(SanctionValueParser.formatCrore(e.getDsraAmount()));
             derived.apply(e, w2);

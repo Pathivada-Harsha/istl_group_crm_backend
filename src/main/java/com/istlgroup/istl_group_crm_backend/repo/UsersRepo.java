@@ -130,6 +130,20 @@ public interface UsersRepo extends JpaRepository<UsersEntity, Long> {
     List<UsersEntity> findActiveUsersByRoles(@Param("roles") List<String> roles);
 
     /**
+     * Same as {@link #findActiveUsersByRoles} but normalises the stored role the
+     * way {@code RoleNormalizer} does — spaces and hyphens become underscores —
+     * so a legacy row saved as "BD Executive" still matches "BD_EXECUTIVE".
+     * The plain-UPPER query above silently misses those.
+     */
+    @Query(value = """
+        SELECT * FROM users
+         WHERE UPPER(REPLACE(REPLACE(TRIM(role),' ','_'),'-','_')) IN (:roles)
+           AND is_active = 1
+         ORDER BY name
+    """, nativeQuery = true)
+    List<UsersEntity> findActiveUsersByNormalisedRoles(@Param("roles") List<String> roles);
+
+    /**
      * Same team restriction — only users in the same team with matching role.
      * team comparison is case-sensitive (team names are stored consistently).
      */
