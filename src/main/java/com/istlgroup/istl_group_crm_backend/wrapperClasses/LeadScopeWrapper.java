@@ -33,6 +33,10 @@ public class LeadScopeWrapper {
         private BigDecimal quantity;
         private String unit;
         private String notes;
+        /** This activity's own span, and how it divides for the items under it. */
+        private java.time.LocalDate plannedStartDate;
+        private java.time.LocalDate plannedEndDate;
+        private String planUnit;   // "WEEK" | "MONTH"
         /**
          * Second-level breakdown under this activity. Reuses the template's sub-item
          * DTO deliberately — the shape is identical, and one class keeps the template,

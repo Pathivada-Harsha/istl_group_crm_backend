@@ -323,6 +323,11 @@ public class LeadScopeService {
             item.setQuantity(r.getQuantity());
             item.setUnit(r.getUnit());
             item.setNotes(r.getNotes());
+            // The activity's own span and its period unit. Deeper nodes carry theirs
+            // inside sub_items, so only this level needs columns.
+            item.setPlannedStartDate(r.getPlannedStartDate());
+            item.setPlannedEndDate(r.getPlannedEndDate());
+            item.setPlanUnit(r.getPlanUnit());
             item.setSubItems(scopeSubItems.serialise(r.getSubItems()));
 
             LeadScopeItemEntity saved = leadScopeItemRepo.save(item);
@@ -1311,6 +1316,9 @@ public class LeadScopeService {
         m.put("quantity", it.getQuantity());
         m.put("unit", it.getUnit());
         m.put("notes", it.getNotes());
+        m.put("plannedStartDate", it.getPlannedStartDate());
+        m.put("plannedEndDate", it.getPlannedEndDate());
+        m.put("planUnit", it.getPlanUnit());
         m.put("subItems", scopeSubItems.parse(it.getSubItems()));
         return m;
     }

@@ -46,14 +46,51 @@ public class LeadTemplateWrapper {
         private List<TemplateScopeSubItemRequest> subItems;
     }
 
-    /** One sub-item under a template scope line. */
+    /**
+     * One node in a scope line's breakdown tree.
+     *
+     * <p>A node may itself have {@link #children}, to any depth — "Electrical Works →
+     * PV Module → Purchase Order" is three levels and nothing caps it. A node with no
+     * children is a leaf and is where progress is actually recorded.
+     *
+     * <p><b>{@link #id} is the node's identity, not its name.</b> It is a UUID minted
+     * once, when the node is first created, and carried through every copy
+     * (template → lead → project) and every edit. Progress
+     * ({@code project_progress_periods.sub_item_key}) and the planned budget key off it,
+     * so a node can be renamed freely without detaching its history, and two nodes that
+     * happen to share a name in different branches stay separate. A null id on the way in
+     * means "new node" and is filled by {@code ScopeSubItems.ensureIds}.
+     */
     @Data
     public static class TemplateScopeSubItemRequest {
+        /** Stable UUID. Null only for a node the client has just created. */
+        private String id;
         private String name;
         private String description;
         private String unit;
         private BigDecimal weightPct;
         private Boolean weightManual;
+        /**
+         * How this node's own span divides for the items under it: "WEEK" or "MONTH".
+         * Only meaningful on a node that HAS children — it is the grid they are
+         * scheduled against. Null means weekly, the long-standing default.
+         */
+        private String planUnit;
+        /** A node's own span (a parent's grid), ISO yyyy-MM-dd. */
+        private String plannedStartDate;
+        private String plannedEndDate;
+        /** A leaf's own dates, ISO yyyy-MM-dd. */
+        private String startDate;
+        private String endDate;
+        /** A child's 1-based period indices on its PARENT's grid. */
+        private Integer startWeek;
+        private Integer endWeek;
+        /**
+         * This node's own breakdown. Each child's weight is a share of THIS node and the
+         * children total 100 within it — the same rule as the top level, applied at every
+         * depth. Null or empty means this node is a leaf.
+         */
+        private List<TemplateScopeSubItemRequest> children;
     }
 
     /** PUT /admin/lead-templates/{id}/scope-items — whole-list replace. */
