@@ -210,10 +210,13 @@ public class ProjectLeadSeedService {
      * line's, by the same {@link #activityKey} match the weights use. Only when neither
      * has one does the phase arrive flat for the PM to break down.
      *
-     * <p>The stored sub-item shape is a subset of {@code project_phases.sub_items}, so it
-     * is copied across verbatim — no translation, and crucially <b>no renaming</b>: a
-     * sub-item's name is its identity for the planned-budget merge and for
-     * {@code project_progress_periods.sub_item_key}.
+     * <p>The stored shape is a subset of {@code project_phases.sub_items}, so the WHOLE
+     * TREE is copied across verbatim at full depth — no translation, no flattening, and
+     * crucially <b>no re-issuing of ids</b>. Each node keeps the id it had on the lead,
+     * which is what the planned-budget merge and
+     * {@code project_progress_periods.sub_item_key} key off; a node that somehow arrives
+     * without one is given it here rather than being left keyed by its name, which two
+     * nodes in different branches may legitimately share.
      *
      * <p>Lead scope lines have no category / quantity / unit counterpart on
      * {@code project_phases}; those three are dropped. Quantities still reach the
@@ -239,7 +242,7 @@ public class ProjectLeadSeedService {
             String subsJson = (src.getSubItems() != null && !src.getSubItems().isBlank())
                     ? src.getSubItems()
                     : templateSubs.get(activityKey(src.getActivity()));
-            List<Map<String, Object>> subs = scopeSubItems.parse(subsJson);
+            List<Map<String, Object>> subs = scopeSubItems.ensureIdsOnMaps(scopeSubItems.parse(subsJson));
             p.setSubItems(subs.isEmpty() ? null : subs);
             phases.add(p);
         }

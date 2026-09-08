@@ -66,6 +66,7 @@ public class ProjectDetailService {
     @Autowired private ProjectItemRepo    itemRepo;
     @Autowired private LeadScopeTemplateRepo leadScopeTemplateRepo;
     @Autowired private ScopeTemplateExpander expander;
+    @Autowired private com.istlgroup.istl_group_crm_backend.service.scope.ScopeSubItems scopeSubItems;
 
     @PersistenceContext
     private EntityManager em;
@@ -242,6 +243,7 @@ public class ProjectDetailService {
                 ph.setPhaseDescription(p.getPhaseDescription());
                 ph.setStartWeek(p.getStartWeek());
                 ph.setEndWeek(p.getEndWeek());
+                ph.setPlanUnit(p.getPlanUnit());
                 ph.setPlannedStartDate(p.getPlannedStartDate());
                 ph.setPlannedEndDate(p.getPlannedEndDate());
                 ph.setActualStartDate(p.getActualStartDate());
@@ -252,10 +254,17 @@ public class ProjectDetailService {
                 ph.setWeightPct(p.getWeightPct());
                 ph.setPlannedBudget(p.getPlannedBudget());
                 ph.setResponsibleUserId(p.getResponsibleUserId());
-                // Serialise sub-items list → JSON string for storage
+                // Serialise the sub-item TREE → JSON string for storage.
+                //
+                // ensureIdsOnMaps is what keeps identity alive across an edit: a node the
+                // client sent back with its id keeps it (so its progress rows and its
+                // budget stay attached, however it was renamed or moved), and a node the
+                // user just added gets a fresh UUID here rather than being keyed by a name
+                // that another branch may also use. It recurses, so this holds at any depth.
                 if (p.getSubItems() != null && !p.getSubItems().isEmpty()) {
                     try {
-                        ph.setSubItems(new ObjectMapper().writeValueAsString(p.getSubItems()));
+                        ph.setSubItems(new ObjectMapper()
+                                .writeValueAsString(scopeSubItems.ensureIdsOnMaps(p.getSubItems())));
                     } catch (Exception ex) {
                         ph.setSubItems(null);
                     }
@@ -334,33 +343,45 @@ public class ProjectDetailService {
             ProjectPhaseEntity ph = byId.get(pid);
             if (ph == null) continue;
 
-            // Sub-item budgets: merge plannedBudget into the stored sub_items JSON by name.
+            // Sub-item budgets: merge plannedBudget into the stored sub_items TREE by node
+            // id, at any depth.
+            //
+            // This used to match on the sub-item's NAME with an exact, case-sensitive
+            // equals. That was survivable while the breakdown was one flat level, but a
+            // tree legitimately repeats a name across branches — a real schedule has
+            // "Payment" under half a dozen parents — so a name match would have written
+            // one branch's money onto another's. The client now sends the node id it was
+            // editing, and only that node is touched.
             Object subBudgetsRaw = item.get("subBudgets");
             if (subBudgetsRaw instanceof List && ph.getSubItems() != null && !ph.getSubItems().isBlank()) {
                 try {
                     List<java.util.Map<String, Object>> stored =
                         mapper.readValue(ph.getSubItems(), List.class);
-                    List<?> incoming = (List<?>) subBudgetsRaw;
-                    java.util.Map<String, Object> budgetByName = new java.util.HashMap<>();
-                    for (Object o : incoming) {
-                        java.util.Map<?, ?> m = (java.util.Map<?, ?>) o;
-                        if (m.get("name") != null)
-                            budgetByName.put(String.valueOf(m.get("name")), m.get("plannedBudget"));
+                    java.util.Map<String, java.util.Map<String, Object>> nodeById =
+                            scopeSubItems.indexById(stored);
+
+                    for (Object o : (List<?>) subBudgetsRaw) {
+                        if (!(o instanceof java.util.Map<?, ?> m)) continue;
+                        Object idRaw = m.get("id");
+                        java.util.Map<String, Object> node = idRaw == null
+                                ? null : nodeById.get(String.valueOf(idRaw).trim());
+                        // No id, or an id that names nothing here, is DROPPED rather than
+                        // guessed onto a same-named node — the old behaviour silently
+                        // rewrote a figure nobody typed.
+                        if (node == null) continue;
+                        // Only a leaf carries a typed budget; a parent's is its children's
+                        // sum, recomputed below, so writing one here would be overwritten
+                        // anyway and is skipped to keep the stored tree honest.
+                        if (!com.istlgroup.istl_group_crm_backend.service.scope.ScopeSubItems.isLeaf(node)) continue;
+                        node.put("plannedBudget", m.get("plannedBudget"));
                     }
-                    java.math.BigDecimal sum = java.math.BigDecimal.ZERO;
-                    for (java.util.Map<String, Object> si : stored) {
-                        String nm = String.valueOf(si.get("name"));
-                        if (budgetByName.containsKey(nm)) {
-                            Object bv = budgetByName.get(nm);
-                            si.put("plannedBudget", bv);
-                            if (bv != null && !String.valueOf(bv).isBlank())
-                                sum = sum.add(new java.math.BigDecimal(String.valueOf(bv)));
-                        } else if (si.get("plannedBudget") != null && !String.valueOf(si.get("plannedBudget")).isBlank()) {
-                            sum = sum.add(new java.math.BigDecimal(String.valueOf(si.get("plannedBudget"))));
-                        }
-                    }
+
+                    // Roll the leaves up: every parent, at every level, becomes the sum of
+                    // its own children, and the phase total the sum of the top level.
+                    rollUpBudgets(stored);
                     ph.setSubItems(mapper.writeValueAsString(stored));
-                    ph.setPlannedBudget(sum); // parent = sum of sub-item budgets (rollup)
+                    java.math.BigDecimal sum = scopeSubItems.sumLeaves(stored, "plannedBudget");
+                    ph.setPlannedBudget(sum == null ? java.math.BigDecimal.ZERO : sum);
                 } catch (Exception ignored) { /* leave as-is on parse failure */ }
             } else {
                 // Leaf phase (no sub-items): set its own planned budget.
@@ -372,6 +393,36 @@ public class ProjectDetailService {
         }
     }
 
+    /**
+     * Write each parent node's planned budget back into the tree as the sum of its own
+     * children, bottom-up, so a parent at any depth reads as its breakdown's total.
+     *
+     * <p>Stored on the parent rather than derived on read because the Commercial tab shows
+     * the parent figure as a locked, auto-summed cell: keeping it in the JSON means the
+     * screen, the export and any later reader all see the same number without each having
+     * to re-derive it.
+     */
+    private java.math.BigDecimal rollUpBudgets(List<java.util.Map<String, Object>> nodes) {
+        if (nodes == null || nodes.isEmpty()) return null;
+        java.math.BigDecimal total = java.math.BigDecimal.ZERO;
+        boolean any = false;
+        for (java.util.Map<String, Object> n : nodes) {
+            if (n == null) continue;
+            List<java.util.Map<String, Object>> kids =
+                    com.istlgroup.istl_group_crm_backend.service.scope.ScopeSubItems.childrenOf(n);
+            java.math.BigDecimal v;
+            if (kids.isEmpty()) {
+                v = com.istlgroup.istl_group_crm_backend.service.scope.ScopeSubItems
+                        .toBigDecimal(n.get("plannedBudget"));
+            } else {
+                v = rollUpBudgets(kids);
+                n.put("plannedBudget", v);   // a parent never keeps a typed figure of its own
+            }
+            if (v != null) { total = total.add(v); any = true; }
+        }
+        return any ? total : null;
+    }
+
     // ── Per-period progress (DETAILED tracking) ────────────────────────────────
     public List<ProjectProgressPeriodEntity> getProgressPeriods(String projectUniqueId) throws CustomException {
         DropdownProjectEntity project = requireProject(projectUniqueId);
@@ -379,9 +430,12 @@ public class ProjectDetailService {
     }
 
     /**
-     * Replace-all save of per-period progress cells for a project. Only leaf cells
-     * are stored (phase with sub_item_key=null, or sub-items by name). Parent curves are
-     * derived at read time, never stored. Zero-valued cells are skipped to keep the table lean.
+     * Replace-all save of per-period progress cells for a project. Only leaf cells are
+     * stored — a phase with {@code sub_item_key = null}, or a scope node identified by its
+     * {@code id} (never its name: see {@code ProjectProgressPeriodEntity.subItemKey}).
+     * A leaf can now sit at any depth in the tree, and the key is the same either way.
+     * Parent curves are derived at read time by a recursive weighted roll-up, never
+     * stored. Zero-valued cells are skipped to keep the table lean.
      */
     @Transactional
     public void saveProgressPeriods(String projectUniqueId, List<java.util.Map<String, Object>> cells) throws CustomException {

@@ -151,7 +151,10 @@ class BorrowerServiceHierarchyTest {
         var stats = service.getHierarchyStats(1L, "ADMIN");
 
         assertEquals(2, stats.get("totalCompanies"));
-        assertEquals(0, stats.get("totalGroups"));
+        // 0L, not 0: totalGroups comes from a Stream.count(), so the map holds a Long
+        // while totalCompanies/totalSanctionLetters hold Integers. Integer.equals(Long)
+        // is always false, so an int literal here fails whatever the count is.
+        assertEquals(0L, stats.get("totalGroups"));
         assertEquals(3, stats.get("totalSanctionLetters")); // 2 for borrower 10 + 1 for borrower 20
 
         verify(roleHierarchyService, times(1)).getLevelOrder(anyString());

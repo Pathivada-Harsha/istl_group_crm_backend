@@ -30,7 +30,20 @@ public class ProjectProgressPeriodEntity {
     @Column(name = "phase_id", nullable = false)
     private Long phaseId;
 
-    /** NULL = the phase itself is the leaf; otherwise the sub-item's name. */
+    /**
+     * NULL = the phase itself is the leaf; otherwise the scope node's <b>id</b> — the
+     * UUID stored as {@code id} on that node inside {@code project_phases.sub_items}.
+     *
+     * <p>This held the node's NAME until nesting arrived. It had to change: a scope tree
+     * legitimately repeats a name across branches ("Payment" and "Installation" sit under
+     * many parents in a real schedule), so a name key merged unrelated branches' progress
+     * into one row. Keying on the id also means renaming a node no longer detaches its
+     * history — which it silently did before.
+     *
+     * <p>Existing rows were re-pointed from name to id by
+     * {@code migration/ScopeNodeIdMigrationRunner}; the column itself is unchanged, so
+     * there is no DDL for this.
+     */
     @Column(name = "sub_item_key")
     private String subItemKey;
 

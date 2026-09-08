@@ -27,6 +27,7 @@ public class ProjectStatsService {
 
     private final ProjectRepository projectRepository;
     private final ProjectPhaseRepo projectPhaseRepo;   // technical-scope phases for physical progress
+    private final com.istlgroup.istl_group_crm_backend.service.scope.ScopeSubItems scopeSubItems;
     private final PurchaseOrderRepository purchaseOrderRepository;
     private final QuotationRepository quotationRepository;
     private final BillRepository billRepository;
@@ -430,18 +431,22 @@ public class ProjectStatsService {
         return sum.divide(new BigDecimal(phases.size()), 2, RoundingMode.HALF_UP);
     }
 
-    /** A phase's actual %: weighted mean of its sub-items when present, else its own. */
+    /**
+     * A phase's actual %: the weighted roll-up of its sub-item TREE when it has one, else
+     * its own stored figure.
+     *
+     * <p>The walk is recursive because the breakdown is now a tree of any depth: a child
+     * that has children of its own contributes THEIR weighted average, not whatever stale
+     * number sits on it. A single-level pass would have read a mid-level node's own
+     * (never-updated) {@code progressPercent} and reported a branch as 0% while its leaves
+     * were finished. {@code ScopeSubItems.rollUp} is that walk, shared with the read APIs
+     * so the headline and the screen cannot disagree.
+     */
     private BigDecimal parentActual(ProjectPhaseEntity p) {
         List<Map<String, Object>> subs = parseSubItems(p.getSubItems());
         if (subs != null && !subs.isEmpty()) {
-            BigDecimal wsum = BigDecimal.ZERO, acc = BigDecimal.ZERO;
-            for (Map<String, Object> si : subs) {
-                BigDecimal w = toBD(si.get("weightPct"));
-                if (w.signum() <= 0) continue;
-                acc = acc.add(toBD(si.get("progressPercent")).multiply(w));
-                wsum = wsum.add(w);
-            }
-            if (wsum.signum() > 0) return acc.divide(wsum, 2, RoundingMode.HALF_UP);
+            BigDecimal rolled = scopeSubItems.rollUp(subs, "progressPercent");
+            if (rolled != null) return rolled;
         }
         return p.getProgressPercent() != null ? p.getProgressPercent() : BigDecimal.ZERO;
     }

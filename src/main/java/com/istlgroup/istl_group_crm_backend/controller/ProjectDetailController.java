@@ -580,6 +580,7 @@ public class ProjectDetailController {
             m.put("weightPct",         p.getWeightPct());
             m.put("plannedBudget",     p.getPlannedBudget());
             m.put("responsibleUserId", p.getResponsibleUserId());
+            m.put("planUnit",          p.getPlanUnit());
             m.put("plannedStartDate",  p.getPlannedStartDate());
             m.put("plannedEndDate",    p.getPlannedEndDate());
             m.put("actualStartDate",   p.getActualStartDate());

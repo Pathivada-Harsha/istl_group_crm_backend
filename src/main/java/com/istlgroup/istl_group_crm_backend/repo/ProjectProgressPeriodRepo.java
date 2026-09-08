@@ -8,6 +8,12 @@ import com.istlgroup.istl_group_crm_backend.entity.ProjectProgressPeriodEntity;
 public interface ProjectProgressPeriodRepo extends JpaRepository<ProjectProgressPeriodEntity, Long> {
     List<ProjectProgressPeriodEntity> findByProjectId(Long projectId);
 
+    /**
+     * The progress rows of one phase — the unit the scope node-id migration works in,
+     * because a sub-item key was only ever meaningful within its own phase.
+     */
+    List<ProjectProgressPeriodEntity> findByPhaseId(Long phaseId);
+
     @Transactional
     void deleteByProjectId(Long projectId);
 

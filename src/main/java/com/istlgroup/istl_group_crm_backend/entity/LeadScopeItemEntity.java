@@ -55,6 +55,28 @@ public class LeadScopeItemEntity {
     @Column(name = "sub_items", columnDefinition = "JSON")
     private String subItems;
 
+    // ── Schedule ─────────────────────────────────────────────────────────────
+    /**
+     * This activity's own span, and how it divides for the items under it.
+     *
+     * <p>New: the lead Technical Scope tab used to carry no dates at all, on the
+     * rule that scheduling belonged to the project. A lead is quoted against a
+     * programme, so the programme is now built here and carried into the project
+     * rather than retyped. Deeper nodes need no columns — they live inside the
+     * {@code sub_items} JSON.
+     *
+     * <p>{@code plan_unit} is "WEEK" or "MONTH" and is only meaningful when this
+     * activity has a breakdown: it is the period grid its children sit on.
+     */
+    @Column(name = "planned_start_date")
+    private java.time.LocalDate plannedStartDate;
+
+    @Column(name = "planned_end_date")
+    private java.time.LocalDate plannedEndDate;
+
+    @Column(name = "plan_unit", length = 10)
+    private String planUnit;
+
     // ── Audit ────────────────────────────────────────────────────────────────
     @Column(name = "created_by")
     private Long createdBy;

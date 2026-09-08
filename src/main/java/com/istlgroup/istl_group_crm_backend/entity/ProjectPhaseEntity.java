@@ -38,6 +38,18 @@ public class ProjectPhaseEntity {
     @Column(name = "end_week")
     private Integer endWeek;
 
+    /**
+     * How this phase's span divides for the items under it: "WEEK" or "MONTH".
+     *
+     * <p>Only meaningful when the phase has a breakdown — it is the period grid its
+     * sub-items are scheduled against. Previously this choice existed only once for
+     * the whole project ({@code project_scope.plan_unit}); a phase can now set its
+     * own, so a long civil phase can be planned in months while commissioning next to
+     * it is planned in weeks. Null falls back to the project's.
+     */
+    @Column(name = "plan_unit", length = 10)
+    private String planUnit;
+
     @Column(name = "planned_start_date")
     private LocalDate plannedStartDate;
 

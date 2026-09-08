@@ -53,6 +53,8 @@ public class ProjectDetailWrapper {
         private String phaseDescription;
         private Integer startWeek;
         private Integer endWeek;
+        /** How this phase's span divides for its sub-items: "WEEK" | "MONTH". */
+        private String planUnit;
         private LocalDate plannedStartDate;
         private LocalDate plannedEndDate;
         private LocalDate actualStartDate;
