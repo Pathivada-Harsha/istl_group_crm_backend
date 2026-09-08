@@ -167,6 +167,12 @@ public class SanctionDerivedCalculator {
         // valid custom interval yet has nothing to price against.
         Integer monthsPerPeriod = resolveMonthsPerPeriod(e);
         if (monthsPerPeriod == null) return;
+        // Bi-Monthly is a true 15-day cycle, not a whole number of months —
+        // when set, this is what the schedule actually steps by below;
+        // monthsPerPeriod above still stands in for it in
+        // parseReservePeriods' own month/quarter/year covenant-phrase
+        // parsing, which has no day-based path of its own.
+        Integer daysPerPeriod = resolveDaysPerPeriod(e);
 
         // Capitalized: the moratorium's own accrued interest is folded into
         // the balance DSRA/ISRA are priced off, same as it's folded into the
@@ -179,7 +185,7 @@ public class SanctionDerivedCalculator {
         // principal), so DSRA/ISRA here can never silently disagree with
         // what that tab shows for the identical sanction.
         List<LoanReserveCalculator.Period> schedule = reserveCalc.buildQuarterEndSchedule(
-                debt, roi, signed, repayStart, repayEnd, monthsPerPeriod, capitalized,
+                debt, roi, signed, repayStart, repayEnd, monthsPerPeriod, daysPerPeriod, capitalized,
                 parseRepaymentProfile(e.getRepaymentProfileJson()));
 
         String dsraText = e.getDsra();
@@ -327,7 +333,12 @@ public class SanctionDerivedCalculator {
      * Months in one repayment period for the sanction's repaymentFrequency —
      * the single place "3" (a quarter) used to be hardcoded at every DSRA/
      * ISRA/schedule call site. Mirrors the frontend's
-     * repaymentFrequencyMonths() in sanctionDerive.js 1:1.
+     * resolveRepaymentPeriod() in sanctionDerive.js 1:1 for every frequency
+     * except Bi-Monthly (see resolveDaysPerPeriod below) — this still
+     * returns 2 for it (not its real 15-day length), kept only for
+     * parseReservePeriods' own month/quarter/year covenant-phrase parsing,
+     * which has no day-based path of its own; actual schedule stepping uses
+     * resolveDaysPerPeriod for Bi-Monthly instead.
      *
      * <p>Returns null for OTHER with no valid custom interval set — callers
      * must skip pricing rather than silently falling back to quarterly, so
@@ -349,6 +360,17 @@ public class SanctionDerivedCalculator {
                     && e.getRepaymentFrequencyOtherMonths() > 0 ? e.getRepaymentFrequencyOtherMonths() : null;
             default -> 3;
         };
+    }
+
+    /**
+     * Days in one repayment period, only for a frequency whose cycle isn't a
+     * whole number of months — currently just Bi-Monthly's real 15-day
+     * cycle. Returns null for every other frequency, meaning "step in months
+     * instead, via resolveMonthsPerPeriod". Mirrors resolveRepaymentPeriod's
+     * `days` field in the frontend's sanctionDerive.js 1:1.
+     */
+    static Integer resolveDaysPerPeriod(BorrowerSanctionEntity e) {
+        return "BI_MONTHLY".equals(e.getRepaymentFrequency()) ? 15 : null;
     }
 
     /**

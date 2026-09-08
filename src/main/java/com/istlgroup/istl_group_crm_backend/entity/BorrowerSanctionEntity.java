@@ -124,6 +124,24 @@ public class BorrowerSanctionEntity {
     @Column(name = "technology", columnDefinition = "TEXT")
     private String technology;
 
+    /** Value from the technology_groups master list — see TechnologyTaxonomyService. */
+    @Column(name = "project_group", length = 200)
+    private String projectGroup;
+
+    /** Value from the technology_sub_groups master list, scoped to projectGroup. */
+    @Column(name = "project_sub_group", length = 200)
+    private String projectSubGroup;
+
+    /**
+     * Registry sheet: Product → Limit — the total sanctioned limit that
+     * {@code SanctionTermEntity} rows (this sanction's own facility
+     * tranches, if any) must sum to. Auto-filled from {@link #debtAmount}
+     * on the frontend when blank; stored independently since a reviewer can
+     * edit it afterward.
+     */
+    @Column(name = "limit_amount", precision = 18, scale = 2)
+    private BigDecimal limitAmount;
+
     /** Registry sheet: Product → Instrument. */
     @Column(name = "instrument", length = 120)
     private String instrument;
@@ -225,6 +243,15 @@ public class BorrowerSanctionEntity {
     // ── timeline (registry sheet: Time Lines) ──
     @Column(name = "disbursement_date")
     private LocalDate disbursementDate;
+
+    /**
+     * A planning-stage estimate the business records before the loan is
+     * actually disbursed — wholly independent of {@code disbursementDate}
+     * (the "Actual" date), which alone anchors the repayment schedule.
+     * Editing one never touches the other.
+     */
+    @Column(name = "tentative_disbursement_date")
+    private LocalDate tentativeDisbursementDate;
 
     /**
      * The contractual dates as printed. Distinct from

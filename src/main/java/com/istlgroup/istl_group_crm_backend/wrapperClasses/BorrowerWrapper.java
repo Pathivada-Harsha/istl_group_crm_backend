@@ -85,7 +85,18 @@ public class BorrowerWrapper {
     private String notes;
     private Long projectId;
 
+    /**
+     * On a WRITE (resolve/resolveWithHierarchy/create), a caller may attach
+     * exactly one new sanction here — the first entry is persisted in the
+     * SAME transaction as this borrower, right after it's resolved/created,
+     * so a company can never be committed with zero sanctions when the
+     * caller meant to attach one. Ignored (left empty) if absent, so every
+     * existing caller that never populates this is completely unaffected.
+     * On a READ, carries the borrower's actual sanction(s) as documented above.
+     */
     private List<BorrowerSanctionWrapper> sanctions = new ArrayList<>();
+    /** Paired with {@code sanctions} above — the raw extracted-fields JSON blob for that one sanction, if any. */
+    private String rawExtractedJson;
 
     // ── computed for the list view, read-only ──
     /** How many of the seven identity fields are filled. */

@@ -3,6 +3,7 @@ package com.istlgroup.istl_group_crm_backend.service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
@@ -63,6 +64,20 @@ public final class SanctionValueParser {
             DateTimeFormatter.ofPattern("d/M/yyyy",     Locale.ENGLISH),
             DateTimeFormatter.ofPattern("dd-MM-yyyy",   Locale.ENGLISH),
             DateTimeFormatter.ofPattern("yyyy-MM-dd",   Locale.ENGLISH));
+
+    /**
+     * A letter that names only a month and year — no day — for a date field
+     * (e.g. a Scheduled COD stated as "March 2026"). Tried only once every
+     * day-qualified format above has failed, and read as that month's LAST
+     * day, never its first: every field this parses (sanction/disbursement/
+     * COD/repayment dates) is a deadline or milestone, and "by March 2026"
+     * conventionally means by the month's end.
+     */
+    private static final List<DateTimeFormatter> MONTH_YEAR_FORMATS = List.of(
+            DateTimeFormatter.ofPattern("MMMM yyyy", Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("MMM yyyy",  Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("MM/yyyy",   Locale.ENGLISH),
+            DateTimeFormatter.ofPattern("MM-yyyy",   Locale.ENGLISH));
 
     // ── text ────────────────────────────────────────────────────────────────
 
@@ -200,17 +215,17 @@ public final class SanctionValueParser {
     }
 
     /**
-     * Render plain rupees back as "₹153.75 Cr" for display — exactly, never
-     * rounded. movePointLeft(7) only shifts the decimal point (CRORE is a
-     * power of ten), so it can never lose a paisa the way divide(CRORE, 2,
-     * HALF_UP) used to; stripTrailingZeros only removes zeros that were
-     * never significant, then setScale(2) puts a round figure back to the
-     * familiar "232.00" look instead of "232".
+     * Render plain rupees back as "₹153.75 Cr" for display — always exactly
+     * 2 decimals. `rupees` itself is untouched by this method (a computed
+     * figure like first-year interest or a DSRA/ISRA amount keeps its full,
+     * unrounded precision everywhere it's actually used); only the string
+     * this returns for the UI is rounded. movePointLeft(7) only shifts the
+     * decimal point (CRORE is a power of ten), so nothing is lost before
+     * that final, deliberate 2-decimal round.
      */
     public static String formatCrore(BigDecimal rupees) {
         if (rupees == null) return null;
-        BigDecimal cr = rupees.movePointLeft(7).stripTrailingZeros();
-        if (cr.scale() < 2) cr = cr.setScale(2);
+        BigDecimal cr = rupees.movePointLeft(7).setScale(2, RoundingMode.HALF_UP);
         return "₹" + cr.toPlainString() + " Cr";
     }
 
@@ -224,6 +239,13 @@ public final class SanctionValueParser {
         for (DateTimeFormatter f : DATE_FORMATS) {
             try {
                 return LocalDate.parse(s, f);
+            } catch (Exception ignored) {
+                // try the next pattern
+            }
+        }
+        for (DateTimeFormatter f : MONTH_YEAR_FORMATS) {
+            try {
+                return YearMonth.parse(s, f).atEndOfMonth();
             } catch (Exception ignored) {
                 // try the next pattern
             }
