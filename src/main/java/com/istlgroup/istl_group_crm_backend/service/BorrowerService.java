@@ -2023,8 +2023,9 @@ public class BorrowerService {
             LocalDate validTill = derived.sanctionValidTill(e.getSanctionDate());
             if (e.getDisbursementDate().isBefore(e.getSanctionDate())
                     || e.getDisbursementDate().isAfter(validTill)) {
-                throw new CustomException("The disbursement date must fall between the sanction date and "
-                        + "the date the sanction lapses (" + SanctionValueParser.formatDate(validTill) + ").");
+                throw new CustomException("The disbursement date must fall between the sanction date ("
+                        + SanctionValueParser.formatDate(e.getSanctionDate()) + ") and the date the sanction lapses ("
+                        + SanctionValueParser.formatDate(validTill) + ").");
             }
         }
         if (e.getRepaymentStartDate() != null && e.getRepaymentEndDate() != null
