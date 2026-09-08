@@ -88,7 +88,7 @@ public class LoanReserveCalculator {
         }
 
         // ── amortizing phase: equal principal, interest on the declining balance ──
-        int amortizingPeriods = countPeriods(repayStart, repayEnd, monthsPerPeriod);
+        int amortizingPeriods = countPeriods(repayStart, repayEnd, monthsPerPeriod, null);
         if (amortizingPeriods > 0) {
             BigDecimal principalPerPeriod = balance.divide(
                     BigDecimal.valueOf(amortizingPeriods), 10, RoundingMode.HALF_UP);
@@ -118,7 +118,7 @@ public class LoanReserveCalculator {
             LocalDate start, LocalDate repayStart, LocalDate repayEnd, int monthsPerPeriod,
             boolean capitalizeMoratoriumInterest) {
         return buildQuarterEndSchedule(debtAmount, annualRoiPct, start, repayStart, repayEnd,
-                monthsPerPeriod, capitalizeMoratoriumInterest, null);
+                monthsPerPeriod, null, capitalizeMoratoriumInterest, null);
     }
 
     /**
@@ -140,10 +140,18 @@ public class LoanReserveCalculator {
      * generated here, the last period absorbing the remainder exactly as the
      * reference Excel's own final-row formula does — never a fixed
      * percentage nobody actually set.
+     *
+     * <p>{@code daysPerPeriod}, when not null, steps by that many plain
+     * calendar days instead of {@code monthsPerPeriod} whole months (no
+     * EOM-snapping) — currently only Bi-Monthly's 15-day cycle, which isn't a
+     * whole number of months. {@code monthsPerPeriod} is otherwise still
+     * required (and used for {@code countPeriods}) whenever
+     * {@code daysPerPeriod} is null. Mirrors buildQuarterEndSchedule's
+     * `period.days` handling in the frontend's sanctionDerive.js 1:1.
      */
     public List<Period> buildQuarterEndSchedule(BigDecimal debtAmount, BigDecimal annualRoiPct,
             LocalDate start, LocalDate repayStart, LocalDate repayEnd, int monthsPerPeriod,
-            boolean capitalizeMoratoriumInterest, List<BigDecimal> repaymentPercents) {
+            Integer daysPerPeriod, boolean capitalizeMoratoriumInterest, List<BigDecimal> repaymentPercents) {
         List<Period> schedule = new ArrayList<>();
         if (debtAmount == null || annualRoiPct == null || start == null
                 || repayStart == null || repayEnd == null || !repayEnd.isAfter(start)) {
@@ -155,7 +163,8 @@ public class LoanReserveCalculator {
 
         LocalDate cursor = start;
         while (cursor.isBefore(repayStart)) {
-            LocalDate next = cursor.plusMonths(monthsPerPeriod).with(TemporalAdjusters.lastDayOfMonth());
+            LocalDate next = daysPerPeriod != null ? cursor.plusDays(daysPerPeriod)
+                    : cursor.plusMonths(monthsPerPeriod).with(TemporalAdjusters.lastDayOfMonth());
             if (next.isAfter(repayStart)) next = repayStart;
             schedule.add(interestOnlyPeriod(cursor, next, balance, rate));
             cursor = next;
@@ -173,7 +182,7 @@ public class LoanReserveCalculator {
         }
         BigDecimal amortizingBaseAmount = balance;
 
-        int amortizingPeriods = countPeriods(repayStart, repayEnd, monthsPerPeriod);
+        int amortizingPeriods = countPeriods(repayStart, repayEnd, monthsPerPeriod, daysPerPeriod);
         if (amortizingPeriods > 0) {
             List<BigDecimal> percents = (repaymentPercents != null && repaymentPercents.size() == amortizingPeriods)
                     ? repaymentPercents : defaultRepaymentPercents(amortizingPeriods);
@@ -181,6 +190,7 @@ public class LoanReserveCalculator {
             for (int i = 0; i < amortizingPeriods; i++) {
                 boolean last = i == amortizingPeriods - 1;
                 LocalDate next = last ? repayEnd
+                        : daysPerPeriod != null ? cursor.plusDays(daysPerPeriod)
                         : cursor.plusMonths(monthsPerPeriod).with(TemporalAdjusters.lastDayOfMonth());
                 BigDecimal principal = amortizingBaseAmount
                         .multiply(percents.get(i)).divide(BigDecimal.valueOf(100), 10, RoundingMode.HALF_UP);
@@ -232,7 +242,11 @@ public class LoanReserveCalculator {
         return new Period(cursor, next, principal.setScale(2, RoundingMode.HALF_UP), interest);
     }
 
-    private int countPeriods(LocalDate from, LocalDate to, int monthsPerPeriod) {
+    private int countPeriods(LocalDate from, LocalDate to, int monthsPerPeriod, Integer daysPerPeriod) {
+        if (daysPerPeriod != null) {
+            long days = ChronoUnit.DAYS.between(from, to);
+            return (int) Math.max(1, Math.round(days / (double) daysPerPeriod));
+        }
         long months = ChronoUnit.MONTHS.between(from, to);
         return (int) Math.max(1, Math.round(months / (double) monthsPerPeriod));
     }

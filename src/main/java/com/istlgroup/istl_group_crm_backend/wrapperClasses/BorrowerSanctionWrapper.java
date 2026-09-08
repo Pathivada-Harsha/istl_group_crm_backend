@@ -92,7 +92,15 @@ public class BorrowerSanctionWrapper {
 
     // ── project details ──
     private String technology;
+    private String projectGroup;
+    private String projectSubGroup;
+
+    // ── product ──
+    /** Total sanctioned limit — the sum every {@link #terms} row must equal. */
+    private String limitAmount;
     private String instrument;
+    /** This sanction's own facility tranches, if the Limit was split into more than one. */
+    private List<SanctionTermWrapper> terms = new ArrayList<>();
 
     // ── security ──
     private String coObligators;
@@ -128,6 +136,8 @@ public class BorrowerSanctionWrapper {
 
     // ── timeline ──
     private String disbursementDate;
+    /** Planning-stage estimate, independent of the Actual date above. */
+    private String tentativeDisbursementDate;
     /** Contractual, as printed — the {@code derived*} twins stay modelled. */
     private String repaymentStartDate;
     private String repaymentEndDate;
