@@ -43,7 +43,7 @@ public class SanctionDocAiExtractor {
     private static final Set<String> KEYS = Set.of(
             // core letter
             "refNo", "sanctionDate", "lenderName", "borrowerName",
-            "projectName", "category", "location",
+            "projectName", "location",
             "projectCost", "sanctionedAmount", "debtEquityRatio",
             "interestRateText", "tenorText", "scheduledCod",
             // borrower-level, routed to /borrower/resolve by the review screen
@@ -187,7 +187,6 @@ public class SanctionDocAiExtractor {
                             there, even if the letter's own sentence
                             continues past it.
           projectName       description of the project being financed
-          category          e.g. "Utility-Scale Solar", "Wind", "Wind-Solar Hybrid"
           location          site location as printed
           projectCost       total project cost, EXACTLY as printed including units
           sanctionedAmount  the sanctioned term loan amount, EXACTLY as printed

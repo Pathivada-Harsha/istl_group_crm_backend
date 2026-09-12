@@ -358,11 +358,10 @@ public class BorrowerService {
     // Borrowers
     // ════════════════════════════════════════════════════════════════════════
 
-    public List<BorrowerWrapper> getAll(Long userId, String userRole, String search, String category) {
-        // One query handles all four states; blank means "don't filter".
+    public List<BorrowerWrapper> getAll(Long userId, String userRole, String search) {
+        // Blank means "don't filter".
         String q = SanctionValueParser.isBlank(search) ? null : search.trim();
-        String c = SanctionValueParser.isBlank(category) ? null : category.trim();
-        List<BorrowerEntity> rows = borrowerRepo.search(q, c);
+        List<BorrowerEntity> rows = borrowerRepo.search(q);
 
         // Resolved once, not once per row inside borrowerInScope — see the
         // Javadoc on inScope().
@@ -396,7 +395,6 @@ public class BorrowerService {
                 w.getSanctions().add(lw);
                 w.setLatestRefNo(latest.getRefNo());
                 w.setLatestSanctionedAmount(SanctionValueParser.formatCrore(latest.getSanctionedAmount()));
-                w.setLatestCategory(latest.getCategory());
                 w.setLatestScheduledCod(SanctionValueParser.formatDate(latest.getScheduledCod()));
                 w.setLatestCodStatus(lw.getDerivedCodStatus());
             }
@@ -486,7 +484,7 @@ public class BorrowerService {
         if (in.getSanctions() == null || in.getSanctions().isEmpty()) return;
         BorrowerSanctionWrapper sanction = in.getSanctions().get(0);
         if (groupId != null) {
-            saveGroupSanction(sanction, groupId, userId, null, in.getRawExtractedJson());
+            saveGroupSanction(sanction, groupId, userId, null, in.getRawExtractedJson(), null, null);
         } else {
             sanction.setBorrowerId(borrowerId);
             saveSanction(sanction, null, null, userId, null, in.getRawExtractedJson());
@@ -496,7 +494,7 @@ public class BorrowerService {
     /** Same as above, for a group being created directly as the sanctioned entity (no company). */
     private void maybePersistAttachedSanction(CompanyGroupWrapper in, Long groupId, Long userId) throws CustomException {
         if (in.getSanctions() == null || in.getSanctions().isEmpty()) return;
-        saveGroupSanction(in.getSanctions().get(0), groupId, userId, null, in.getRawExtractedJson());
+        saveGroupSanction(in.getSanctions().get(0), groupId, userId, null, in.getRawExtractedJson(), null, null);
     }
 
     @Transactional
@@ -824,8 +822,7 @@ public class BorrowerService {
     // duplicate-detection during import must search every borrower
     // company-wide regardless of who's asking, or a scoped-out user could
     // unknowingly create a duplicate company that already exists under
-    // someone else's scope. Not applied to getCategories() either — that
-    // only returns distinct category strings, not borrower records.
+    // someone else's scope.
     private List<Long> resolveTeamMemberIds(Long userId) {
         List<Long> ids = teamRepository.findTeamMemberIdsByUserId(userId);
         return ids.isEmpty() ? List.of(userId) : ids;
@@ -1624,10 +1621,22 @@ public class BorrowerService {
      * business rules, but never touches a borrower row: a sanction has
      * exactly one of {@code borrowerId}/{@code groupId} set (see {@code
      * BorrowerSanctionEntity}), and this path always sets {@code groupId}.
+     *
+     * <p>{@code groupCin}/{@code groupRegisteredAddress} are the letter's own
+     * parsed values for the entity being sanctioned — when the group being
+     * attached to already existed (picked from the dropdown, not typed as
+     * new), those fields are otherwise never touched by this flow, so an
+     * import into an existing group with a blank CIN/address left it blank
+     * forever. Filled in the same "blank fields only, never overwrite
+     * something already on file" way {@link #fillBlanks} does for a
+     * borrower; pass {@code null} for both when there is nothing to offer
+     * (e.g. the group was just created in this same request, so its
+     * identity already came from the create call).
      */
     @Transactional
     public BorrowerSanctionWrapper saveGroupSanction(BorrowerSanctionWrapper in, Long groupId, Long userId,
-                                                      String userRole, String rawExtractedJson) throws CustomException {
+                                                      String userRole, String rawExtractedJson,
+                                                      String groupCin, String groupRegisteredAddress) throws CustomException {
         if (SanctionValueParser.isBlank(in.getRefNo())) {
             throw new CustomException("Reference number is required");
         }
@@ -1667,7 +1676,42 @@ public class BorrowerService {
         validateSanction(e);
         sanctionRepo.save(e);
         persistSanctionTerms(e, in.getTerms());
+
+        if (fillGroupIdentityBlanks(group, groupCin, groupRegisteredAddress)) {
+            group.setUpdatedBy(userId);
+            companyGroupRepo.save(group);
+        }
+
         return toWrapper(e, null);
+    }
+
+    /**
+     * Copy the letter's parsed CIN/registered address onto the group's own
+     * blank fields only — same convention as {@link #fillBlanks}, just
+     * checked against both the group and borrower CIN namespaces the way
+     * {@link #assertGroupCinFree} does, without throwing: one mis-scanned or
+     * already-used CIN must never fail the sanction import, it's simply left
+     * unfilled, same as if nothing had been extracted at all.
+     */
+    private boolean fillGroupIdentityBlanks(CompanyGroupEntity group, String cin, String registeredAddress) {
+        boolean changed = false;
+        if (SanctionValueParser.isBlank(group.getCin()) && !SanctionValueParser.isBlank(cin)) {
+            String normalized = SanctionValueParser.normalizeCinOrNull(cin);
+            if (normalized != null) {
+                boolean usedByAnotherGroup = companyGroupRepo.findByDeletedAtIsNullOrderByGroupNameAsc().stream()
+                        .anyMatch(g -> normalized.equalsIgnoreCase(g.getCin()) && !g.getId().equals(group.getId()));
+                boolean usedByBorrower = borrowerRepo.findByCinIgnoreCaseAndDeletedAtIsNull(normalized).isPresent();
+                if (!usedByAnotherGroup && !usedByBorrower) {
+                    group.setCin(normalized);
+                    changed = true;
+                }
+            }
+        }
+        if (SanctionValueParser.isBlank(group.getRegisteredAddress()) && !SanctionValueParser.isBlank(registeredAddress)) {
+            group.setRegisteredAddress(SanctionValueParser.clean(registeredAddress));
+            changed = true;
+        }
+        return changed;
     }
 
     /** Every sanction associated directly with one Parent Group or Sub Group — never a child company's own. */
@@ -2184,11 +2228,6 @@ public class BorrowerService {
                 .replace("\"", "&quot;").replace("'", "&#39;");
     }
 
-    /** Categories present across live sanctions, for the registry filter. */
-    public List<String> getCategories() {
-        return sanctionRepo.findDistinctCategories();
-    }
-
     @Transactional(readOnly = true)
     public BorrowerSanctionEntity getDocumentEntity(Long userId, String userRole, Long sanctionId)
             throws CustomException {
@@ -2241,7 +2280,6 @@ public class BorrowerService {
         e.setSanctionDate(SanctionValueParser.parseDate(in.getSanctionDate()));
         e.setLenderName(SanctionValueParser.clean(in.getLenderName()));
         e.setProjectName(SanctionValueParser.clean(in.getProjectName()));
-        e.setCategory(SanctionValueParser.clean(in.getCategory()));
         e.setLocation(SanctionValueParser.clean(in.getLocation()));
 
         // Money on this form is quoted in crore, so a unit-less number scales.
@@ -2328,10 +2366,36 @@ public class BorrowerService {
         }
     }
 
+    /**
+     * "Fund Based Limit" for the first term, "Non Fund Based Limit - I"/
+     * "- II"/... (Roman numerals) for every one after it — deterministic
+     * from a term's own zero-based order, so it's recomputed on every save
+     * rather than trusted from the client (see SanctionTermWrapper.limitLabel).
+     * Mirrors the frontend's own getSanctionLimitLabel (sanctionFields.js).
+     */
+    private static String limitLabelFor(int order) {
+        return order == 0 ? "Fund Based Limit" : "Non Fund Based Limit - " + toRomanNumeral(order);
+    }
+
+    private static String toRomanNumeral(int num) {
+        int[] values = {1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1};
+        String[] symbols = {"M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"};
+        StringBuilder sb = new StringBuilder();
+        int n = num;
+        for (int i = 0; i < values.length; i++) {
+            while (n >= values[i]) {
+                sb.append(symbols[i]);
+                n -= values[i];
+            }
+        }
+        return sb.toString();
+    }
+
     private SanctionTermWrapper toTermWrapper(SanctionTermEntity e) {
         SanctionTermWrapper w = new SanctionTermWrapper();
         w.setId(e.getId());
         w.setTermLimit(SanctionValueParser.formatCrore(e.getTermLimit()));
+        w.setLimitLabel(e.getLimitLabel());
         w.setFacilityType(e.getFacilityType());
         w.setTentativeDisbursementDate(SanctionValueParser.formatDate(e.getTentativeDisbursementDate()));
         w.setActualDisbursementDate(SanctionValueParser.formatDate(e.getActualDisbursementDate()));
@@ -2363,7 +2427,9 @@ public class BorrowerService {
         for (SanctionTermWrapper t : terms) {
             SanctionTermEntity row = new SanctionTermEntity();
             row.setSanctionId(e.getId());
-            row.setTermOrder(order++);
+            int thisOrder = order++;
+            row.setTermOrder(thisOrder);
+            row.setLimitLabel(limitLabelFor(thisOrder));
             BigDecimal limit = SanctionValueParser.parseMoneyCrore(t.getTermLimit());
             if (limit == null) {
                 throw new CustomException("Every Sanction Term needs a Term Limit.");
@@ -2394,31 +2460,6 @@ public class BorrowerService {
             throw new CustomException("The Sanction Terms must add up to the Limit ("
                     + SanctionValueParser.formatCrore(e.getLimitAmount()) + "). Current total: "
                     + SanctionValueParser.formatCrore(total) + ".");
-        }
-
-        // Defense in depth for the equal-split rule the UI already enforces
-        // (Term Limit is a computed, read-only cell there — see
-        // SanctionFormModal.js's equalSplitTermLimits): every term must be
-        // within a paisa of an equal share of the Limit, so a stale client
-        // or a direct API call can't post an unequal split. Skipped when the
-        // Limit itself isn't known yet (nothing to divide against) — the
-        // sum-to-Limit check above already covers that case.
-        if (e.getLimitAmount() != null && !rows.isEmpty()) {
-            BigDecimal share = e.getLimitAmount()
-                    .divide(new BigDecimal(rows.size()), 2, java.math.RoundingMode.FLOOR);
-            for (int i = 0; i < rows.size(); i++) {
-                // Last term absorbs the rounding remainder, same as
-                // equalSplitTermLimits on the frontend — its expected share
-                // is whatever's left, not the floored per-term amount.
-                BigDecimal expected = (i == rows.size() - 1)
-                        ? e.getLimitAmount().subtract(share.multiply(new BigDecimal(rows.size() - 1)))
-                        : share;
-                if (rows.get(i).getTermLimit().subtract(expected).abs().compareTo(new BigDecimal("0.01")) > 0) {
-                    throw new CustomException("Each Sanction Term must be an equal share of the Limit ("
-                            + SanctionValueParser.formatCrore(e.getLimitAmount()) + " ÷ " + rows.size()
-                            + " terms). Term " + (i + 1) + " does not match its expected share.");
-                }
-            }
         }
 
         sanctionTermRepo.saveAll(rows);
@@ -2497,7 +2538,6 @@ public class BorrowerService {
         w.setSanctionDate(SanctionValueParser.formatDate(e.getSanctionDate()));
         w.setLenderName(e.getLenderName());
         w.setProjectName(e.getProjectName());
-        w.setCategory(e.getCategory());
         w.setLocation(e.getLocation());
         if (parent != null) {
             w.setCin(parent.getCin());

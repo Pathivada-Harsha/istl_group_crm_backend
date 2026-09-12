@@ -15,6 +15,14 @@ import lombok.Data;
 public class SanctionTermWrapper {
     private Long id;
     private String termLimit;
+    /**
+     * "Fund Based Limit" / "Non Fund Based Limit - I" / etc. Read-only from
+     * the frontend's point of view: whatever the client sends here is
+     * ignored on save — the service always recomputes it from the term's own
+     * position (see {@code BorrowerService.limitLabelFor}), so it can never
+     * drift from the row it labels.
+     */
+    private String limitLabel;
     private String facilityType;
     private String tentativeDisbursementDate;
     private String actualDisbursementDate;

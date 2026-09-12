@@ -41,6 +41,18 @@ public class SanctionTermEntity {
     @Column(name = "term_limit", nullable = false)
     private BigDecimal termLimit;
 
+    /**
+     * The user-facing name for this tranche — "Fund Based Limit" for order 0,
+     * "Non Fund Based Limit - I"/"- II"/... for every order after it. Set by
+     * {@code BorrowerService.limitLabelFor} on every save (deterministic from
+     * {@code termOrder}, never trusted from the client), so it always matches
+     * the row's own position even though the row itself is fully replaced on
+     * every save (see {@code persistSanctionTerms}). See
+     * {@code database/barrower_registry.sql} for the column's own migration.
+     */
+    @Column(name = "limit_label", length = 40)
+    private String limitLabel;
+
     @Column(name = "facility_type", length = 40)
     private String facilityType;
 
