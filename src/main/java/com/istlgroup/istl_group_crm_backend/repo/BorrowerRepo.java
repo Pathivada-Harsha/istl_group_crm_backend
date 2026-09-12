@@ -153,8 +153,8 @@ public interface BorrowerRepo extends JpaRepository<BorrowerEntity, Long> {
      * placeholder invited it; promoter and group joined the list when they
      * became visible columns.
      *
-     * <p>Both parameters are optional and combine: a null or blank value means
-     * "don't filter on this", so one query serves all four states.
+     * <p>The parameter is optional: a null or blank value means "don't filter
+     * on this".
      */
     @Query("SELECT b FROM BorrowerEntity b WHERE b.deletedAt IS NULL"
          + " AND (:q IS NULL OR :q = '' OR"
@@ -167,13 +167,6 @@ public interface BorrowerRepo extends JpaRepository<BorrowerEntity, Long> {
          + "              WHERE s.borrowerId = b.id AND s.deletedAt IS NULL"
          + "              AND LOWER(s.refNo) LIKE LOWER(CONCAT('%', :q, '%')))"
          + " )"
-         // Category lives on the sanction, not the borrower, so this matches a
-         // borrower with ANY sanction in that category — not just the latest.
-         + " AND (:category IS NULL OR :category = '' OR"
-         + "   EXISTS (SELECT 1 FROM BorrowerSanctionEntity s2"
-         + "           WHERE s2.borrowerId = b.id AND s2.deletedAt IS NULL"
-         + "           AND s2.category = :category)"
-         + " )"
          + " ORDER BY b.createdAt DESC")
-    List<BorrowerEntity> search(@Param("q") String q, @Param("category") String category);
+    List<BorrowerEntity> search(@Param("q") String q);
 }

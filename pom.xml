@@ -139,6 +139,14 @@
 		    <artifactId>tess4j</artifactId>
 		    <version>5.11.0</version>
 		</dependency>
+
+		<!-- Jsoup — deterministic HTML table parsing for the PPP India circulars
+		     page (Infrastructure Master List discovery). No AI/LLM involved. -->
+		<dependency>
+		    <groupId>org.jsoup</groupId>
+		    <artifactId>jsoup</artifactId>
+		    <version>1.18.1</version>
+		</dependency>
 		    </dependencies>
 
     <!-- Build Configuration -->

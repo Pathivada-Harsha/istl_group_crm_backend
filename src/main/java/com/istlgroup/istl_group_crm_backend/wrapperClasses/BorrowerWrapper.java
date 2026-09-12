@@ -105,7 +105,6 @@ public class BorrowerWrapper {
     /** Convenience mirrors of the latest sanction, so the table needn't dig. */
     private String latestRefNo;
     private String latestSanctionedAmount;
-    private String latestCategory;
     private String latestScheduledCod;
     private String latestCodStatus;
 

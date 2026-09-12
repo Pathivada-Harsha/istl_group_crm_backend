@@ -46,30 +46,14 @@ public class BorrowerController {
     public ResponseEntity<Map<String, Object>> getAll(
             @RequestHeader("User-Id") Long userId,
             @RequestHeader("User-Role") String userRole,
-            @RequestParam(value = "search", required = false) String search,
-            @RequestParam(value = "category", required = false) String category) {
+            @RequestParam(value = "search", required = false) String search) {
         try {
-            List<BorrowerWrapper> data = borrowerService.getAll(userId, userRole, search, category);
+            List<BorrowerWrapper> data = borrowerService.getAll(userId, userRole, search);
             return ok(data, null);
         } catch (Exception e) {
             log.error("Failed to load borrowers", e);
             return error("Failed to load borrowers: " + e.getMessage(),
                          HttpStatus.INTERNAL_SERVER_ERROR);
-        }
-    }
-
-    /**
-     * Categories present across live sanctions. Served from the database rather
-     * than derived on the client, so the dropdown lists every category on file
-     * instead of only those on the rows currently displayed.
-     */
-    @GetMapping("/categories")
-    public ResponseEntity<Map<String, Object>> categories() {
-        try {
-            return ok(borrowerService.getCategories(), null);
-        } catch (Exception e) {
-            log.error("Failed to load categories", e);
-            return error("Failed to load categories", HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
 
@@ -425,7 +409,21 @@ public class BorrowerController {
                     mapper.convertValue(body.get("sanction"), BorrowerSanctionWrapper.class);
             String rawJson = body.get("rawExtracted") == null
                     ? null : mapper.writeValueAsString(body.get("rawExtracted"));
-            return ok(borrowerService.saveGroupSanction(sanction, id, userId, userRole, rawJson), "Sanction saved");
+            // The letter's own parsed CIN/registered address — back-fills an
+            // EXISTING group's blank identity fields (see
+            // BorrowerService#fillGroupIdentityBlanks); absent/null when the
+            // frontend has nothing to offer (e.g. a company, not a group, was
+            // actually sanctioned).
+            Object groupIdentityRaw = body.get("groupIdentity");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> groupIdentity = groupIdentityRaw instanceof Map
+                    ? (Map<String, Object>) groupIdentityRaw : Map.of();
+            Object rawCin = groupIdentity.get("cin");
+            Object rawAddress = groupIdentity.get("registeredAddress");
+            String groupCin = rawCin == null ? null : String.valueOf(rawCin).trim();
+            String groupRegisteredAddress = rawAddress == null ? null : String.valueOf(rawAddress).trim();
+            return ok(borrowerService.saveGroupSanction(sanction, id, userId, userRole, rawJson,
+                    groupCin, groupRegisteredAddress), "Sanction saved");
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
         } catch (DataIntegrityViolationException e) {

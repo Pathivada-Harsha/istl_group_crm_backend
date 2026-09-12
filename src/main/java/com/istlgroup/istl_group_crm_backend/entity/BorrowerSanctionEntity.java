@@ -59,9 +59,6 @@ public class BorrowerSanctionEntity {
     @Column(name = "project_name")
     private String projectName;
 
-    @Column(name = "category", length = 120)
-    private String category;
-
     @Column(name = "location")
     private String location;
 

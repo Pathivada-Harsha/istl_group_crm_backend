@@ -55,8 +55,6 @@ public class SanctionDocExtractor {
         LABELS.put("nameoftheborrower",                 "borrowerName");
         LABELS.put("project",                           "projectName");
         LABELS.put("nameoftheproject",                  "projectName");
-        LABELS.put("category",                          "category");
-        LABELS.put("sector",                            "category");
         LABELS.put("location",                          "location");
         LABELS.put("site",                              "location");
         LABELS.put("totalprojectcost",                  "projectCost");
@@ -579,7 +577,10 @@ public class SanctionDocExtractor {
         put(out, "sanctionDate",     group(flat, "Date\\s*[:\\-]\\s*(" + DATE_ALT + ")"));
         put(out, "borrowerName",     group(flat, "Borrower\\s*[:\\-]?\\s*(.{4,120}?)\\s*(?:Project|Category|Location|Total)"));
         put(out, "projectName",      group(flat, "Project\\s*[:\\-]?\\s*(.{4,160}?)\\s*(?:Category|Location|Total\\s+Project)"));
-        put(out, "category",         group(flat, "Category\\s*[:\\-]?\\s*(.{3,60}?)\\s*(?:Location|Total\\s+Project)"));
+        // "Category" is kept above as a boundary token for borrowerName/
+        // projectName even though it's no longer captured itself — a letter
+        // still prints that row between Project and Location, and dropping the
+        // token would let those two fields over-capture on such letters.
         put(out, "location",         group(flat, "Location\\s*[:\\-]?\\s*(.{3,120}?)\\s*(?:Total\\s+Project|Debt)"));
         // "Total" is optional and an "(Rs. Cr's)" header suffix is tolerated,
         // the same way debtAmount/equityAmount below handle their own unit.

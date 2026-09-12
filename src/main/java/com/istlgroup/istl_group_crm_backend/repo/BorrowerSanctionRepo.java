@@ -44,10 +44,4 @@ public interface BorrowerSanctionRepo extends JpaRepository<BorrowerSanctionEnti
     @Query("SELECT s.sanctionDocData FROM BorrowerSanctionEntity s "
          + "WHERE s.id = :id AND s.deletedAt IS NULL")
     byte[] findDocData(@Param("id") Long id);
-
-    /** Distinct categories across all live sanctions, for the filter dropdown. */
-    @Query("SELECT DISTINCT s.category FROM BorrowerSanctionEntity s "
-         + "WHERE s.deletedAt IS NULL AND s.category IS NOT NULL AND s.category <> '' "
-         + "ORDER BY s.category ASC")
-    List<String> findDistinctCategories();
 }
