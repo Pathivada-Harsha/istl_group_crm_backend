@@ -26,6 +26,7 @@ import com.istlgroup.istl_group_crm_backend.repo.BorrowerAliasRepo;
 import com.istlgroup.istl_group_crm_backend.repo.BorrowerRepo;
 import com.istlgroup.istl_group_crm_backend.repo.BorrowerSanctionRepo;
 import com.istlgroup.istl_group_crm_backend.repo.CompanyGroupRepo;
+import com.istlgroup.istl_group_crm_backend.repo.SanctionTermRepo;
 import com.istlgroup.istl_group_crm_backend.repo.TeamRepository;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.BorrowerWrapper;
 
@@ -54,6 +55,7 @@ class BorrowerServiceHierarchyTest {
     @Mock private RoleHierarchyService roleHierarchyService;
     @Mock private TeamRepository teamRepository;
     @Mock private SanctionDerivedCalculator derived;
+    @Mock private SanctionTermRepo sanctionTermRepo;
 
     private BorrowerService newService() {
         BorrowerService s = new BorrowerService();
@@ -64,6 +66,7 @@ class BorrowerServiceHierarchyTest {
         setField(s, "roleHierarchyService", roleHierarchyService);
         setField(s, "teamRepository", teamRepository);
         setField(s, "derived", derived);
+        setField(s, "sanctionTermRepo", sanctionTermRepo);
         return s;
     }
 
