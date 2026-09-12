@@ -103,7 +103,7 @@ class BorrowerServiceHierarchyTest {
 
         BorrowerEntity b10 = borrower(10L, 1L);
         BorrowerEntity b20 = borrower(20L, 1L);
-        when(borrowerRepo.search(null, null)).thenReturn(List.of(b10, b20));
+        when(borrowerRepo.search(null)).thenReturn(List.of(b10, b20));
 
         // Admin level (<=2): inScope short-circuits true without ever needing
         // a per-borrower sanction lookup for the scope check itself.
@@ -118,7 +118,7 @@ class BorrowerServiceHierarchyTest {
         when(sanctionRepo.findByBorrowerIdInAndDeletedAtIsNullOrderBySanctionDateDesc(anyList()))
                 .thenReturn(List.of(s1, s3, s2));
 
-        List<BorrowerWrapper> out = service.getAll(1L, "ADMIN", null, null);
+        List<BorrowerWrapper> out = service.getAll(1L, "ADMIN", null);
 
         assertEquals(2, out.size());
         assertEquals("REF-1", out.get(0).getLatestRefNo()); // borrower 10's latest is s1, not s2

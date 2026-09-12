@@ -42,7 +42,6 @@ public class BorrowerSanctionWrapper {
     private String sanctionDate;
     private String lenderName;
     private String projectName;
-    private String category;
     private String location;
 
     /**
