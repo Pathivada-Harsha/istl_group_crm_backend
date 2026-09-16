@@ -95,11 +95,11 @@ public class BorrowerSanctionWrapper {
     private String projectSubGroup;
 
     // ── product ──
-    /** Total sanctioned limit — the sum every {@link #terms} row must equal. */
+    /** Total sanctioned limit — the sum every {@link #limits} row must equal. */
     private String limitAmount;
     private String instrument;
-    /** This sanction's own facility tranches, if the Limit was split into more than one. */
-    private List<SanctionTermWrapper> terms = new ArrayList<>();
+    /** This sanction's own facility limits, if the overall Limit was split into more than one. */
+    private List<SanctionLimitWrapper> limits = new ArrayList<>();
 
     // ── security ──
     private String coObligators;

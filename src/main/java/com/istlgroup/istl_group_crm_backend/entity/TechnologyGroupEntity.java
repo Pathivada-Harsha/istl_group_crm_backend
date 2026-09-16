@@ -24,7 +24,12 @@ public class TechnologyGroupEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "group_name", nullable = false, unique = true, length = 100)
+    // 200, not 100 — matches InfrastructureCategoryEntity.name's own length,
+    // since this column is upserted directly from that same parsed category
+    // name (see InfrastructureMasterListVersionWriter.upsertLiveDropdownTables).
+    // A shorter cap here truncated/rejected real, longer Harmonized Master
+    // List category names that the audit-snapshot table already accepted.
+    @Column(name = "group_name", nullable = false, unique = true, length = 200)
     private String groupName;
 
     @Column(name = "group_label", nullable = false, length = 200)
