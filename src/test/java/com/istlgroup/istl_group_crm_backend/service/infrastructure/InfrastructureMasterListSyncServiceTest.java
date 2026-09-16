@@ -57,6 +57,14 @@ class InfrastructureMasterListSyncServiceTest {
                 sourceService, extractor, parser, validator, versionWriter, versionRepository, appConfigRepository);
         when(appConfigRepository.findById(anyString())).thenReturn(Optional.empty());
         when(appConfigRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+    }
+
+    /**
+     * Discovery and download both succeed. Kept out of {@link #setUp()} because
+     * the discovery-failure test never reaches the download, and Mockito strict
+     * stubbing rejects a stub that no test path uses.
+     */
+    private void stubSuccessfulDiscovery() {
         when(sourceService.discoverLatest()).thenReturn(DOCUMENT);
         when(sourceService.downloadPdf(DOCUMENT.pdfUrl())).thenReturn(PDF_BYTES);
     }
@@ -71,6 +79,7 @@ class InfrastructureMasterListSyncServiceTest {
 
     @Test
     void identicalHashIsANoOpAndNeverWritesANewVersion() throws Exception {
+        stubSuccessfulDiscovery();
         when(extractor.extract(PDF_BYTES))
                 .thenReturn(new InfrastructureMasterListPdfExtractor.ExtractionResult("same-hash", List.of()));
         when(versionRepository.findByIsCurrentTrue()).thenReturn(Optional.of(currentVersion("same-hash")));
@@ -84,6 +93,7 @@ class InfrastructureMasterListSyncServiceTest {
 
     @Test
     void changedHashButFailedValidationNeverWritesANewVersion() throws Exception {
+        stubSuccessfulDiscovery();
         List<ParsedCategory> parsed = List.of(new ParsedCategory("Bad", 1, List.of()));
         when(extractor.extract(PDF_BYTES))
                 .thenReturn(new InfrastructureMasterListPdfExtractor.ExtractionResult("new-hash", List.of()));
@@ -100,6 +110,7 @@ class InfrastructureMasterListSyncServiceTest {
 
     @Test
     void changedHashAndValidDataActivatesExactlyOneNewVersion() throws Exception {
+        stubSuccessfulDiscovery();
         List<ParsedCategory> parsed = List.of(new ParsedCategory("Energy", 1,
                 List.of(new ParsedSubCategory("Electricity Generation", 1))));
         when(extractor.extract(PDF_BYTES))
@@ -116,6 +127,7 @@ class InfrastructureMasterListSyncServiceTest {
 
     @Test
     void firstEverImportWithNoCurrentVersionStillActivates() throws Exception {
+        stubSuccessfulDiscovery();
         List<ParsedCategory> parsed = List.of(new ParsedCategory("Energy", 1,
                 List.of(new ParsedSubCategory("Electricity Generation", 1))));
         when(extractor.extract(PDF_BYTES))
