@@ -6,6 +6,7 @@ import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.Duration;
@@ -43,12 +44,27 @@ public class InfrastructureMasterListSourceService {
                                       String sourcePageUrl, String pdfUrl) {
     }
 
+    /**
+     * Harmonized Master List PDFs run a few MB — well past WebClient's default
+     * 256KB in-memory buffer cap, which {@link #downloadPdf} used to hit with
+     * a {@code DataBufferLimitException} on every real (non-empty) circular.
+     * 20MB is generous headroom for a PDF of this kind without being unbounded.
+     */
+    private static final int MAX_PDF_BYTES = 20 * 1024 * 1024;
+
     private final WebClient client;
+    private final WebClient pdfClient;
 
     public InfrastructureMasterListSourceService(WebClient.Builder builder) {
         this.client = builder.clone()
                 .baseUrl("https://www.pppinindia.gov.in")
                 .defaultHeader("User-Agent", USER_AGENT)
+                .build();
+        this.pdfClient = builder.clone()
+                .defaultHeader("User-Agent", USER_AGENT)
+                .exchangeStrategies(ExchangeStrategies.builder()
+                        .codecs(c -> c.defaultCodecs().maxInMemorySize(MAX_PDF_BYTES))
+                        .build())
                 .build();
     }
 
@@ -102,10 +118,7 @@ public class InfrastructureMasterListSourceService {
     }
 
     public byte[] downloadPdf(String pdfUrl) {
-        byte[] bytes = WebClient.builder()
-                .defaultHeader("User-Agent", USER_AGENT)
-                .build()
-                .get()
+        byte[] bytes = pdfClient.get()
                 .uri(pdfUrl)
                 .accept(MediaType.APPLICATION_PDF, MediaType.ALL)
                 .retrieve()

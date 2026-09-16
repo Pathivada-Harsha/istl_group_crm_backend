@@ -35,19 +35,22 @@ import com.istlgroup.istl_group_crm_backend.entity.BorrowerAliasEntity;
 import com.istlgroup.istl_group_crm_backend.entity.BorrowerEntity;
 import com.istlgroup.istl_group_crm_backend.entity.BorrowerSanctionEntity;
 import com.istlgroup.istl_group_crm_backend.entity.CompanyGroupEntity;
-import com.istlgroup.istl_group_crm_backend.entity.SanctionTermEntity;
+import com.istlgroup.istl_group_crm_backend.entity.SanctionLimitEntity;
+import com.istlgroup.istl_group_crm_backend.entity.SanctionLimitTrancheEntity;
 import com.istlgroup.istl_group_crm_backend.repo.BorrowerAliasRepo;
 import com.istlgroup.istl_group_crm_backend.repo.BorrowerRepo;
 import com.istlgroup.istl_group_crm_backend.repo.BorrowerSanctionRepo;
 import com.istlgroup.istl_group_crm_backend.repo.CompanyGroupRepo;
-import com.istlgroup.istl_group_crm_backend.repo.SanctionTermRepo;
+import com.istlgroup.istl_group_crm_backend.repo.SanctionLimitRepo;
+import com.istlgroup.istl_group_crm_backend.repo.SanctionLimitTrancheRepo;
 import com.istlgroup.istl_group_crm_backend.repo.TeamRepository;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.BorrowerSanctionWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.BorrowerWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.CompanyGroupWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.CompanyMatchWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.PagedResponseWrapper;
-import com.istlgroup.istl_group_crm_backend.wrapperClasses.SanctionTermWrapper;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.SanctionLimitTrancheWrapper;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.SanctionLimitWrapper;
 
 /**
  * Borrower Registry service.
@@ -80,7 +83,8 @@ public class BorrowerService {
 
     @Autowired private BorrowerRepo borrowerRepo;
     @Autowired private BorrowerSanctionRepo sanctionRepo;
-    @Autowired private SanctionTermRepo sanctionTermRepo;
+    @Autowired private SanctionLimitRepo sanctionLimitRepo;
+    @Autowired private SanctionLimitTrancheRepo sanctionLimitTrancheRepo;
     @Autowired private SanctionDocExtractor docExtractor;
     @Autowired private SanctionDocAiExtractor aiExtractor;
     @Autowired private SanctionDocOcrService ocrService;
@@ -560,7 +564,7 @@ public class BorrowerService {
 
         // Only borrower_sanctions still hangs off a borrower in the current
         // schema; the KYC / onboarding / snapshot / loan tables were removed.
-        deleteSanctionTermsByBorrowerId(id);
+        deleteSanctionLimitsByBorrowerId(id);
         deleteByBorrowerId("borrower_sanctions", id);
 
         em.createNativeQuery("DELETE FROM borrowers WHERE id = :id")
@@ -577,22 +581,35 @@ public class BorrowerService {
     }
 
     /**
-     * sanction_terms has an FK to borrower_sanctions with no ON DELETE CASCADE
+     * sanction_limits has an FK to borrower_sanctions with no ON DELETE CASCADE
      * (see barrower_registry.sql), so every raw-SQL borrower_sanctions purge
-     * below must clear its terms first or the delete fails with a foreign key
-     * violation. Scoped by borrower — see the group-scoped sibling below for
-     * a Group/Sub Group's own direct sanctions.
+     * below must clear its limits first or the delete fails with a foreign key
+     * violation. sanction_limit_tranches is a further FK-less child of
+     * sanction_limits, so it must be cleared even earlier, or its own rows
+     * are orphaned once the parent sanction_limits row disappears. Scoped by
+     * borrower — see the group-scoped sibling below for a Group/Sub Group's
+     * own direct sanctions.
      */
-    private void deleteSanctionTermsByBorrowerId(Long borrowerId) {
-        em.createNativeQuery("DELETE FROM sanction_terms WHERE sanction_id IN "
+    private void deleteSanctionLimitsByBorrowerId(Long borrowerId) {
+        em.createNativeQuery("DELETE FROM sanction_limit_tranches WHERE limit_id IN "
+                + "(SELECT id FROM sanction_limits WHERE sanction_id IN "
+                + "(SELECT id FROM borrower_sanctions WHERE borrower_id = :id))")
+          .setParameter("id", borrowerId)
+          .executeUpdate();
+        em.createNativeQuery("DELETE FROM sanction_limits WHERE sanction_id IN "
                 + "(SELECT id FROM borrower_sanctions WHERE borrower_id = :id)")
           .setParameter("id", borrowerId)
           .executeUpdate();
     }
 
-    /** Same as {@link #deleteSanctionTermsByBorrowerId}, for a Group/Sub Group's own direct sanctions. */
-    private void deleteSanctionTermsByGroupId(Long groupId) {
-        em.createNativeQuery("DELETE FROM sanction_terms WHERE sanction_id IN "
+    /** Same as {@link #deleteSanctionLimitsByBorrowerId}, for a Group/Sub Group's own direct sanctions. */
+    private void deleteSanctionLimitsByGroupId(Long groupId) {
+        em.createNativeQuery("DELETE FROM sanction_limit_tranches WHERE limit_id IN "
+                + "(SELECT id FROM sanction_limits WHERE sanction_id IN "
+                + "(SELECT id FROM borrower_sanctions WHERE group_id = :id))")
+          .setParameter("id", groupId)
+          .executeUpdate();
+        em.createNativeQuery("DELETE FROM sanction_limits WHERE sanction_id IN "
                 + "(SELECT id FROM borrower_sanctions WHERE group_id = :id)")
           .setParameter("id", groupId)
           .executeUpdate();
@@ -600,7 +617,7 @@ public class BorrowerService {
 
     /** Sanctions associated directly with this Group (not any child company's) — purged before the Group itself. */
     private void deleteGroupOwnSanctions(Long groupId) {
-        deleteSanctionTermsByGroupId(groupId);
+        deleteSanctionLimitsByGroupId(groupId);
         em.createNativeQuery("DELETE FROM borrower_sanctions WHERE group_id = :id")
           .setParameter("id", groupId)
           .executeUpdate();
@@ -645,7 +662,7 @@ public class BorrowerService {
     /** Every company sitting directly under one group, purged the same way {@link #deleteBorrower} purges one. */
     private void deleteCompaniesInGroup(Long groupId) {
         for (BorrowerEntity b : borrowerRepo.findByGroupId(groupId)) {
-            deleteSanctionTermsByBorrowerId(b.getId());
+            deleteSanctionLimitsByBorrowerId(b.getId());
             deleteByBorrowerId("borrower_sanctions", b.getId());
             em.createNativeQuery("DELETE FROM borrowers WHERE id = :id")
               .setParameter("id", b.getId())
@@ -1610,7 +1627,7 @@ public class BorrowerService {
 
         validateSanction(e);
         sanctionRepo.save(e);
-        persistSanctionTerms(e, in.getTerms());
+        persistSanctionLimits(e, in.getLimits());
         return buildBorrowerWrapper(borrower.getId());
     }
 
@@ -1675,7 +1692,7 @@ public class BorrowerService {
 
         validateSanction(e);
         sanctionRepo.save(e);
-        persistSanctionTerms(e, in.getTerms());
+        persistSanctionLimits(e, in.getLimits());
 
         if (fillGroupIdentityBlanks(group, groupCin, groupRegisteredAddress)) {
             group.setUpdatedBy(userId);
@@ -2367,10 +2384,10 @@ public class BorrowerService {
     }
 
     /**
-     * "Fund Based Limit" for the first term, "Non Fund Based Limit - I"/
+     * "Fund Based Limit" for the first limit, "Non Fund Based Limit - I"/
      * "- II"/... (Roman numerals) for every one after it — deterministic
-     * from a term's own zero-based order, so it's recomputed on every save
-     * rather than trusted from the client (see SanctionTermWrapper.limitLabel).
+     * from a limit's own zero-based order, so it's recomputed on every save
+     * rather than trusted from the client (see SanctionLimitWrapper.limitLabel).
      * Mirrors the frontend's own getSanctionLimitLabel (sanctionFields.js).
      */
     private static String limitLabelFor(int order) {
@@ -2391,20 +2408,31 @@ public class BorrowerService {
         return sb.toString();
     }
 
-    private SanctionTermWrapper toTermWrapper(SanctionTermEntity e) {
-        SanctionTermWrapper w = new SanctionTermWrapper();
+    private SanctionLimitWrapper toLimitWrapper(SanctionLimitEntity e) {
+        SanctionLimitWrapper w = new SanctionLimitWrapper();
         w.setId(e.getId());
-        w.setTermLimit(SanctionValueParser.formatCrore(e.getTermLimit()));
+        w.setFacilityLimitAmount(SanctionValueParser.formatCrore(e.getFacilityLimitAmount()));
         w.setLimitLabel(e.getLimitLabel());
         w.setFacilityType(e.getFacilityType());
         w.setTentativeDisbursementDate(SanctionValueParser.formatDate(e.getTentativeDisbursementDate()));
         w.setActualDisbursementDate(SanctionValueParser.formatDate(e.getActualDisbursementDate()));
         w.setRepaymentProfileJson(e.getRepaymentProfileJson());
+        w.setTranches(sanctionLimitTrancheRepo.findByLimitIdOrderByTrancheOrderAsc(e.getId()).stream()
+                .map(this::toTrancheWrapper).collect(Collectors.toList()));
+        return w;
+    }
+
+    private SanctionLimitTrancheWrapper toTrancheWrapper(SanctionLimitTrancheEntity e) {
+        SanctionLimitTrancheWrapper w = new SanctionLimitTrancheWrapper();
+        w.setId(e.getId());
+        w.setTrancheAmount(SanctionValueParser.formatCrore(e.getTrancheAmount()));
+        w.setTentativeDisbursementDate(SanctionValueParser.formatDate(e.getTentativeDisbursementDate()));
+        w.setActualDisbursementDate(SanctionValueParser.formatDate(e.getActualDisbursementDate()));
         return w;
     }
 
     /**
-     * Replaces every Sanction Term row for one sanction with the incoming
+     * Replaces every Sanction Limit row for one sanction with the incoming
      * list — delete-all-then-reinsert, same pattern QuotationService uses
      * for its own child line items, rather than a merge-by-id. Called from
      * within {@link #saveSanction}/{@link #saveGroupSanction}'s own
@@ -2412,30 +2440,39 @@ public class BorrowerService {
      * known), so a validation failure here rolls back the sanction save too.
      *
      * <p>Validates the two rules the Product section's own info box states:
-     * the terms must add up to exactly the sanction's Limit, and every
-     * term's Actual Disb. Date must fall on or before the day before
+     * the limits must add up to exactly the sanction's Limit, and every
+     * limit's Actual Disb. Date must fall on or before the day before
      * Scheduled COD date (COD 01-02-2027 → latest 31-01-2027). An empty/
-     * absent list is valid — Sanction Terms are optional.
+     * absent list is valid — Sanction Limits are optional.
      */
-    private void persistSanctionTerms(BorrowerSanctionEntity e, List<SanctionTermWrapper> terms) throws CustomException {
-        sanctionTermRepo.deleteBySanctionId(e.getId());
-        if (terms == null || terms.isEmpty()) return;
+    private void persistSanctionLimits(BorrowerSanctionEntity e, List<SanctionLimitWrapper> limits) throws CustomException {
+        // Tranches key off their own limit's id, not the sanction — since
+        // limits are fully replaced below (new ids on every save), any
+        // existing tranches for this sanction's old limit rows must be
+        // cleared first or they'd be orphaned.
+        List<Long> oldLimitIds = sanctionLimitRepo.findBySanctionIdOrderByLimitOrderAsc(e.getId()).stream()
+                .map(SanctionLimitEntity::getId).collect(Collectors.toList());
+        if (!oldLimitIds.isEmpty()) {
+            sanctionLimitTrancheRepo.deleteByLimitIdIn(oldLimitIds);
+        }
+        sanctionLimitRepo.deleteBySanctionId(e.getId());
+        if (limits == null || limits.isEmpty()) return;
 
-        List<SanctionTermEntity> rows = new ArrayList<>();
+        List<SanctionLimitEntity> rows = new ArrayList<>();
         BigDecimal total = BigDecimal.ZERO;
         int order = 0;
-        for (SanctionTermWrapper t : terms) {
-            SanctionTermEntity row = new SanctionTermEntity();
+        for (SanctionLimitWrapper t : limits) {
+            SanctionLimitEntity row = new SanctionLimitEntity();
             row.setSanctionId(e.getId());
             int thisOrder = order++;
-            row.setTermOrder(thisOrder);
+            row.setLimitOrder(thisOrder);
             row.setLimitLabel(limitLabelFor(thisOrder));
-            BigDecimal limit = SanctionValueParser.parseMoneyCrore(t.getTermLimit());
-            if (limit == null) {
-                throw new CustomException("Every Sanction Term needs a Term Limit.");
+            BigDecimal limitAmount = SanctionValueParser.parseMoneyCrore(t.getFacilityLimitAmount());
+            if (limitAmount == null) {
+                throw new CustomException("Every Sanction Limit needs a Limit Amount.");
             }
-            row.setTermLimit(limit);
-            total = total.add(limit);
+            row.setFacilityLimitAmount(limitAmount);
+            total = total.add(limitAmount);
             row.setFacilityType(SanctionValueParser.clean(t.getFacilityType()));
             row.setTentativeDisbursementDate(SanctionValueParser.parseDate(t.getTentativeDisbursementDate()));
             LocalDate actualDisb = SanctionValueParser.parseDate(t.getActualDisbursementDate());
@@ -2448,7 +2485,7 @@ public class BorrowerService {
 
             if (e.getScheduledCod() != null && actualDisb != null
                     && !actualDisb.isBefore(e.getScheduledCod())) {
-                throw new CustomException("Each Sanction Term's Actual Disb. Date must fall before the "
+                throw new CustomException("Each Sanction Limit's Actual Disb. Date must fall before the "
                         + "Scheduled COD date (" + SanctionValueParser.formatDate(e.getScheduledCod())
                         + ") — latest allowed is "
                         + SanctionValueParser.formatDate(e.getScheduledCod().minusDays(1)) + ".");
@@ -2457,12 +2494,61 @@ public class BorrowerService {
         }
 
         if (e.getLimitAmount() != null && total.subtract(e.getLimitAmount()).abs().compareTo(new BigDecimal("0.01")) > 0) {
-            throw new CustomException("The Sanction Terms must add up to the Limit ("
+            throw new CustomException("The Sanction Limits must add up to the Limit ("
                     + SanctionValueParser.formatCrore(e.getLimitAmount()) + "). Current total: "
                     + SanctionValueParser.formatCrore(total) + ".");
         }
 
-        sanctionTermRepo.saveAll(rows);
+        sanctionLimitRepo.saveAll(rows);
+
+        for (int i = 0; i < rows.size(); i++) {
+            persistSanctionLimitTranches(rows.get(i), limits.get(i).getTranches());
+        }
+    }
+
+    /**
+     * Replaces every Tranche row for one Sanction Limit with the incoming
+     * list — same delete-all-then-reinsert pattern as
+     * {@link #persistSanctionLimits}. An empty/absent list is valid — a
+     * limit with no tranches is disbursed as a single lump sum. When
+     * tranches are present, disbursement can be staged — their total may be
+     * less than the limit's own Limit Amount (more tranches added later) —
+     * but must never exceed it.
+     */
+    private void persistSanctionLimitTranches(SanctionLimitEntity limit, List<SanctionLimitTrancheWrapper> tranches)
+            throws CustomException {
+        sanctionLimitTrancheRepo.deleteByLimitId(limit.getId());
+        if (tranches == null || tranches.isEmpty()) return;
+
+        List<SanctionLimitTrancheEntity> rows = new ArrayList<>();
+        BigDecimal total = BigDecimal.ZERO;
+        int order = 0;
+        for (SanctionLimitTrancheWrapper t : tranches) {
+            SanctionLimitTrancheEntity row = new SanctionLimitTrancheEntity();
+            row.setLimitId(limit.getId());
+            row.setTrancheOrder(order++);
+            BigDecimal amount = SanctionValueParser.parseMoneyCrore(t.getTrancheAmount());
+            if (amount == null) {
+                throw new CustomException("Every Tranche needs an Amount.");
+            }
+            row.setTrancheAmount(amount);
+            total = total.add(amount);
+            row.setTentativeDisbursementDate(SanctionValueParser.parseDate(t.getTentativeDisbursementDate()));
+            row.setActualDisbursementDate(SanctionValueParser.parseDate(t.getActualDisbursementDate()));
+            rows.add(row);
+        }
+
+        // Disbursement can happen in stages — a lender may release less than
+        // the full Limit across one, two, or more tranches, with more added
+        // in a later save, so the total is never required to equal the
+        // Limit Amount exactly. It must simply never exceed it.
+        if (total.subtract(limit.getFacilityLimitAmount()).compareTo(new BigDecimal("0.01")) > 0) {
+            throw new CustomException("The Tranches for " + limit.getLimitLabel() + " must not exceed its Limit Amount ("
+                    + SanctionValueParser.formatCrore(limit.getFacilityLimitAmount()) + "). Current total: "
+                    + SanctionValueParser.formatCrore(total) + ".");
+        }
+
+        sanctionLimitTrancheRepo.saveAll(rows);
     }
 
     private BorrowerWrapper toWrapper(BorrowerEntity b) {
@@ -2572,8 +2658,8 @@ public class BorrowerService {
         w.setProjectSubGroup(e.getProjectSubGroup());
         w.setLimitAmount(SanctionValueParser.formatCrore(e.getLimitAmount()));
         w.setInstrument(e.getInstrument());
-        w.setTerms(sanctionTermRepo.findBySanctionIdOrderByTermOrderAsc(e.getId()).stream()
-                .map(this::toTermWrapper).collect(Collectors.toList()));
+        w.setLimits(sanctionLimitRepo.findBySanctionIdOrderByLimitOrderAsc(e.getId()).stream()
+                .map(this::toLimitWrapper).collect(Collectors.toList()));
 
         w.setCoObligators(e.getCoObligators());
         w.setPledgeOfSharesPct(SanctionValueParser.formatPct(e.getPledgeOfSharesPct()));

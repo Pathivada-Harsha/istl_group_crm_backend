@@ -27,7 +27,13 @@ public class TechnologySubGroupEntity {
     @Column(name = "group_id", nullable = false)
     private Long groupId;
 
-    @Column(name = "sub_group_name", nullable = false, length = 100)
+    // 200, not 100 — matches InfrastructureSubCategoryEntity.name's own
+    // length, since this column is upserted directly from that same parsed
+    // sub-category name (see InfrastructureMasterListVersionWriter
+    // .upsertLiveSubGroups). This is what caused a real 19-Sep-2025 Harmonized
+    // Master List sub-sector name to fail with "Data too long for column
+    // 'sub_group_name'" — the audit-snapshot table already accepted it fine.
+    @Column(name = "sub_group_name", nullable = false, length = 200)
     private String subGroupName;
 
     @Column(name = "sub_group_label", nullable = false, length = 200)

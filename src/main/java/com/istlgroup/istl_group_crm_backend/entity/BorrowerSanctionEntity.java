@@ -131,8 +131,8 @@ public class BorrowerSanctionEntity {
 
     /**
      * Registry sheet: Product → Limit — the total sanctioned limit that
-     * {@code SanctionTermEntity} rows (this sanction's own facility
-     * tranches, if any) must sum to. Auto-filled from {@link #debtAmount}
+     * {@code SanctionLimitEntity} rows (this sanction's own facility
+     * limits, if any) must sum to. Auto-filled from {@link #debtAmount}
      * on the frontend when blank; stored independently since a reviewer can
      * edit it afterward.
      */
