@@ -238,12 +238,18 @@ public class BorrowerController {
 
     // ── company hierarchy — Parent Groups / Sub Groups ─────────────────────
 
-    /** Top-level Parent Groups when parentId is absent, else the Sub Groups under it. */
+    /**
+     * Top-level Parent Groups when parentId is absent, else the Sub Groups
+     * under it — scoped by role/team/createdBy same as every other Borrower
+     * Registry list, via BorrowerService#listGroups.
+     */
     @GetMapping("/groups")
     public ResponseEntity<Map<String, Object>> listGroups(
-            @RequestParam(value = "parentId", required = false) Long parentId) {
+            @RequestParam(value = "parentId", required = false) Long parentId,
+            @RequestHeader(value = "User-Id", required = false) Long userId,
+            @RequestHeader(value = "User-Role", required = false) String userRole) {
         try {
-            return ok(borrowerService.listGroups(parentId), null);
+            return ok(borrowerService.listGroups(parentId, userId, userRole), null);
         } catch (Exception e) {
             return error("Failed to load groups: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
         }
@@ -251,9 +257,11 @@ public class BorrowerController {
 
     @GetMapping("/groups/search")
     public ResponseEntity<Map<String, Object>> searchGroups(
-            @RequestParam(value = "q", required = false) String q) {
+            @RequestParam(value = "q", required = false) String q,
+            @RequestHeader(value = "User-Id", required = false) Long userId,
+            @RequestHeader(value = "User-Role", required = false) String userRole) {
         try {
-            return ok(borrowerService.searchGroups(q), null);
+            return ok(borrowerService.searchGroups(q, userId, userRole), null);
         } catch (Exception e) {
             return error("Failed to search groups: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
         }
@@ -262,9 +270,10 @@ public class BorrowerController {
     @PostMapping("/groups")
     public ResponseEntity<Map<String, Object>> createGroup(
             @RequestBody CompanyGroupWrapper body,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @RequestHeader(value = "User-Id", required = false) Long userId,
+            @RequestHeader(value = "User-Role", required = false) String userRole) {
         try {
-            return ok(borrowerService.createGroup(body, userId), "Group created");
+            return ok(borrowerService.createGroup(body, userId, userRole), "Group created");
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
         } catch (DataIntegrityViolationException e) {
@@ -278,9 +287,10 @@ public class BorrowerController {
     public ResponseEntity<Map<String, Object>> updateGroup(
             @PathVariable Long id,
             @RequestBody CompanyGroupWrapper body,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @RequestHeader(value = "User-Id", required = false) Long userId,
+            @RequestHeader(value = "User-Role", required = false) String userRole) {
         try {
-            return ok(borrowerService.updateGroup(id, body, userId), "Group updated");
+            return ok(borrowerService.updateGroup(id, body, userId, userRole), "Group updated");
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
         } catch (DataIntegrityViolationException e) {
@@ -294,14 +304,16 @@ public class BorrowerController {
      * Deletes a Parent Group or Sub Group and everything under it — every
      * company in it (with its sanctions and documents) and, for a Parent
      * Group, every Sub Group beneath it too. Irreversible; the caller is
-     * expected to have already confirmed with the user.
+     * expected to have already confirmed with the user. Scope-checked the
+     * same way a borrower delete is — an out-of-scope id reads as "not found".
      */
     @DeleteMapping("/groups/{id}")
     public ResponseEntity<Map<String, Object>> deleteGroup(
             @PathVariable Long id,
-            @RequestHeader(value = "User-Id", required = false) Long userId) {
+            @RequestHeader(value = "User-Id", required = false) Long userId,
+            @RequestHeader(value = "User-Role", required = false) String userRole) {
         try {
-            borrowerService.deleteGroup(id, userId);
+            borrowerService.deleteGroup(id, userId, userRole);
             return ok(null, "Group deleted");
         } catch (CustomException e) {
             return error(e.getMessage(), HttpStatus.BAD_REQUEST);
