@@ -227,15 +227,40 @@ public class TelecallerLeadService {
                     .collect(Collectors.toList());
         }
 
-        // ── Sort: NEW leads first, then by most recent ───────────────────────
-        all.sort((a, b) -> {
-            boolean aNew = isNew(a), bNew = isNew(b);
-            if (aNew && !bNew) return -1;
-            if (!aNew && bNew) return  1;
-            if (a.getCreatedAt() != null && b.getCreatedAt() != null)
-                return b.getCreatedAt().compareTo(a.getCreatedAt());
-            return 0;
-        });
+        // ── Sort ───────────────────────────────────────────────────────────
+        if ("ALL".equals(effectiveFilter)) {
+            // Resurfaced (stale, no-action-taken) Not-Responded leads pinned above
+            // everything else — oldest-marked first, since those are most overdue —
+            // then NEW leads, then the rest by most recent.
+            all.sort((a, b) -> {
+                boolean ar = isResurfaced(a), br = isResurfaced(b);
+                if (ar != br) return ar ? -1 : 1;
+                if (ar) return a.getTelecallerStatusUpdatedAt().compareTo(b.getTelecallerStatusUpdatedAt());
+                boolean aNew = isNew(a), bNew = isNew(b);
+                if (aNew != bNew) return aNew ? -1 : 1;
+                if (a.getCreatedAt() != null && b.getCreatedAt() != null)
+                    return b.getCreatedAt().compareTo(a.getCreatedAt());
+                return 0;
+            });
+        } else if ("NOT_RESPONDED".equals(effectiveFilter)) {
+            // Freshest (most recently marked) Not-Responded leads first.
+            all.sort((a, b) -> {
+                LocalDateTime ta = a.getTelecallerStatusUpdatedAt(), tb = b.getTelecallerStatusUpdatedAt();
+                if (ta != null && tb != null) return tb.compareTo(ta);
+                if (ta == null && tb == null) return 0;
+                return ta == null ? 1 : -1;
+            });
+        } else {
+            // NEW leads first, then by most recent.
+            all.sort((a, b) -> {
+                boolean aNew = isNew(a), bNew = isNew(b);
+                if (aNew && !bNew) return -1;
+                if (!aNew && bNew) return  1;
+                if (a.getCreatedAt() != null && b.getCreatedAt() != null)
+                    return b.getCreatedAt().compareTo(a.getCreatedAt());
+                return 0;
+            });
+        }
 
         // ── Paginate ─────────────────────────────────────────────────────────
         int total    = all.size();
@@ -259,6 +284,13 @@ public class TelecallerLeadService {
         String s = l.getStatus();
         // "New" is the default; null/empty also counts as new
         return s == null || s.isBlank() || "New".equalsIgnoreCase(s);
+    }
+
+    /** Not Responded, marked before today (calendar day) — matches the frontend's isResurfaced(). */
+    private boolean isResurfaced(LeadsEntity l) {
+        return "Not Responded".equalsIgnoreCase(l.getStatus())
+                && l.getTelecallerStatusUpdatedAt() != null
+                && l.getTelecallerStatusUpdatedAt().toLocalDate().isBefore(LocalDate.now());
     }
 
     /** Returns true when the lead's main status is in the BD+ pipeline — not visible to telecaller. */
@@ -611,7 +643,7 @@ public class TelecallerLeadService {
                                 .filter(l -> "Keep in View".equalsIgnoreCase(l.getStatus()))
                                 .count();
 
-        LocalDateTime cutoff = LocalDateTime.now().minusDays(1);
+        LocalDateTime cutoff = LocalDate.now().atStartOfDay();
         long resurfaces = all.stream()
                 .filter(l -> "Not Responded".equalsIgnoreCase(l.getStatus())
                           && l.getTelecallerStatusUpdatedAt() != null

@@ -54,6 +54,7 @@ public class NotRespondedRequeueJob {
         for (LeadsEntity lead : staleLeads) {
             String previousStatus = lead.getTelecallerStatus();
             lead.setTelecallerStatus("PENDING");
+            lead.setStatus("New");   // keep main status in sync — was left stuck at "Not Responded"
             lead.setTelecallerStatusUpdatedAt(LocalDateTime.now());
             leadsRepo.save(lead);
 
