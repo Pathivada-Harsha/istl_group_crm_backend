@@ -8,6 +8,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -49,6 +50,7 @@ import com.istlgroup.istl_group_crm_backend.wrapperClasses.BorrowerWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.CompanyGroupWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.CompanyMatchWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.PagedResponseWrapper;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.SanctionCompareSummaryWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.SanctionLimitTrancheWrapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.SanctionLimitWrapper;
 
@@ -635,9 +637,8 @@ public class BorrowerService {
      * (ON DELETE RESTRICT) never blocks the delete.
      */
     @Transactional
-    public void deleteGroup(Long id, Long userId) throws CustomException {
-        companyGroupRepo.findByIdAndDeletedAtIsNull(id)
-                .orElseThrow(() -> new CustomException("Group not found"));
+    public void deleteGroup(Long id, Long userId, String userRole) throws CustomException {
+        assertGroupWriteScope(userId, userRole, id);
 
         // Sub Groups directly under this one -- only relevant when id is a
         // Parent Group; a Sub Group can never have children of its own
@@ -757,25 +758,45 @@ public class BorrowerService {
         return w;
     }
 
-    /** Top-level Parent Groups when {@code parentGroupId} is null, else the Sub Groups under it. */
+    /**
+     * Top-level Parent Groups when {@code parentGroupId} is null, else the Sub
+     * Groups under it — scoped the same "visible via what's mine" way the
+     * Registry's own {@code getHierarchyPage} already filters its top-level
+     * group list, via {@link #groupInScope}, rather than returning every
+     * group in the system to every caller regardless of role/team.
+     */
     @Transactional(readOnly = true)
-    public List<CompanyGroupWrapper> listGroups(Long parentGroupId) {
+    public List<CompanyGroupWrapper> listGroups(Long parentGroupId, Long userId, String userRole) {
         List<CompanyGroupEntity> rows = parentGroupId == null
                 ? companyGroupRepo.findByParentGroupIdIsNullAndDeletedAtIsNullOrderByGroupNameAsc()
                 : companyGroupRepo.findByParentGroupIdAndDeletedAtIsNullOrderByGroupNameAsc(parentGroupId);
-        return rows.stream().map(this::toGroupWrapper).collect(Collectors.toList());
+        int level = roleHierarchyService.getLevelOrder(userRole);
+        return rows.stream()
+                .filter(g -> groupInScope(g, userId, level))
+                .map(this::toGroupWrapper).collect(Collectors.toList());
     }
 
     @Transactional(readOnly = true)
-    public List<CompanyGroupWrapper> searchGroups(String q) {
+    public List<CompanyGroupWrapper> searchGroups(String q, Long userId, String userRole) {
         String query = SanctionValueParser.isBlank(q) ? "" : q.trim();
-        return companyGroupRepo.search(query).stream().map(this::toGroupWrapper).collect(Collectors.toList());
+        int level = roleHierarchyService.getLevelOrder(userRole);
+        return companyGroupRepo.search(query).stream()
+                .filter(g -> groupInScope(g, userId, level))
+                .map(this::toGroupWrapper).collect(Collectors.toList());
     }
 
     @Transactional
-    public CompanyGroupWrapper createGroup(CompanyGroupWrapper in, Long userId) throws CustomException {
+    public CompanyGroupWrapper createGroup(CompanyGroupWrapper in, Long userId, String userRole) throws CustomException {
         if (SanctionValueParser.isBlank(in.getGroupName())) {
             throw new CustomException("Group name is required");
+        }
+        // Attaching a new Sub Group under an existing Parent Group requires
+        // that parent to already be in the caller's scope — otherwise a
+        // level-3/4 user could grow a group tree they can't otherwise see.
+        // A brand-new top-level Parent Group (parentGroupId null) has nothing
+        // to scope-check yet, same as creating a new Borrower.
+        if (in.getParentGroupId() != null) {
+            assertGroupWriteScope(userId, userRole, in.getParentGroupId());
         }
         // Shares its duplicate-name checks (against other groups AND against
         // existing companies/borrowers) with resolveBorrowerWithHierarchy's
@@ -789,9 +810,8 @@ public class BorrowerService {
 
     /** Rename a group and/or move it under a different Parent Group (or make it top-level). */
     @Transactional
-    public CompanyGroupWrapper updateGroup(Long id, CompanyGroupWrapper in, Long userId) throws CustomException {
-        CompanyGroupEntity g = companyGroupRepo.findByIdAndDeletedAtIsNull(id)
-                .orElseThrow(() -> new CustomException("Group not found"));
+    public CompanyGroupWrapper updateGroup(Long id, CompanyGroupWrapper in, Long userId, String userRole) throws CustomException {
+        CompanyGroupEntity g = assertGroupWriteScope(userId, userRole, id);
         if (SanctionValueParser.isBlank(in.getGroupName())) {
             throw new CustomException("Group name is required");
         }
@@ -915,6 +935,27 @@ public class BorrowerService {
     }
 
     /**
+     * Same "never reveal an out-of-scope record exists" contract as
+     * {@link #assertWriteScope}, for a Parent/Sub Group — used before
+     * renaming/re-parenting/deleting a group, and before attaching a new Sub
+     * Group under an existing Parent. Uses {@link #groupInScope} rather than
+     * a plain createdBy check, so the same "visible via a borrower/sanction
+     * of mine underneath it" fallback that grants read access also grants
+     * write access — a group's visibility and its writability are the same
+     * question here, unlike borrowers/sanctions where a personally-owned
+     * sanction can make someone else's borrower visible without making it
+     * editable. Returns the loaded entity so callers don't need a second query.
+     */
+    private CompanyGroupEntity assertGroupWriteScope(Long userId, String userRole, Long groupId) throws CustomException {
+        CompanyGroupEntity g = companyGroupRepo.findByIdAndDeletedAtIsNull(groupId)
+                .orElseThrow(() -> new CustomException("Group not found"));
+        if (!groupInScope(g, userId, roleHierarchyService.getLevelOrder(userRole))) {
+            throw new CustomException("Group not found");
+        }
+        return g;
+    }
+
+    /**
      * Same "visible via what's mine" principle as borrowerInScope, applied to
      * a single sanction-level write (edit/delete/re-upload a letter) — the
      * borrower's own scope OR this specific sanction's own createdBy grants
@@ -967,6 +1008,159 @@ public class BorrowerService {
         if (!groupInScope(group, userId, level)) {
             throw new CustomException("Sanction not found");
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Borrower Comparison (read-only) — a standalone module, not part of the
+    // Borrower Registry's own CRUD surface. Reuses the exact same scope rules
+    // as getAll/getById/assertSanctionReadScope above rather than introducing
+    // a second authorization model: a sanction is comparable by this caller
+    // iff it would already be visible to them on the registry/detail page.
+    // ════════════════════════════════════════════════════════════════════════
+
+    private static String nullToEmpty(String s) { return s == null ? "" : s; }
+
+    private static boolean containsIgnoreCase(String haystack, String needleLower) {
+        return haystack != null && haystack.toLowerCase(Locale.ROOT).contains(needleLower);
+    }
+
+    /**
+     * The Compare Borrower picker's selection list — every live sanction the
+     * caller is allowed to see (same rule {@link #assertSanctionReadScope}
+     * enforces one id at a time), with search/filters applied in memory
+     * afterwards, same "batch-load then filter" shape {@link #getAll} already
+     * uses. Deliberately thin — see {@link SanctionCompareSummaryWrapper}.
+     */
+    public List<SanctionCompareSummaryWrapper> getSanctionsCompareSummary(Long userId, String userRole,
+            String search, String lenderName, String status, String projectName, Long groupId) {
+        int level = roleHierarchyService.getLevelOrder(userRole);
+        List<BorrowerSanctionEntity> all = sanctionRepo.findByDeletedAtIsNullOrderByCreatedAtDesc();
+
+        List<Long> borrowerIds = all.stream().map(BorrowerSanctionEntity::getBorrowerId)
+                .filter(Objects::nonNull).distinct().collect(Collectors.toList());
+        Map<Long, BorrowerEntity> borrowersById = borrowerRepo.findAllById(borrowerIds).stream()
+                .collect(Collectors.toMap(BorrowerEntity::getId, b -> b));
+
+        List<Long> directGroupIds = all.stream().filter(s -> s.getBorrowerId() == null)
+                .map(BorrowerSanctionEntity::getGroupId).filter(Objects::nonNull).distinct()
+                .collect(Collectors.toList());
+        Map<Long, CompanyGroupEntity> groupsById = companyGroupRepo.findAllById(directGroupIds).stream()
+                .collect(Collectors.toMap(CompanyGroupEntity::getId, g -> g));
+
+        // Memoized per borrower/group id — borrowerInScope/groupInScope each
+        // re-query that record's own sanctions to check the "visible via
+        // what's mine" fallback, so without this a borrower with N sanctions
+        // in this same list would repeat that query N times.
+        Map<Long, Boolean> borrowerScopeCache = new HashMap<>();
+        Map<Long, Boolean> groupScopeCache = new HashMap<>();
+
+        String q = SanctionValueParser.isBlank(search) ? null : search.trim().toLowerCase(Locale.ROOT);
+        String lenderQ = SanctionValueParser.isBlank(lenderName) ? null : lenderName.trim();
+        String statusQ = SanctionValueParser.isBlank(status) ? null : status.trim();
+        String projectQ = SanctionValueParser.isBlank(projectName) ? null : projectName.trim().toLowerCase(Locale.ROOT);
+
+        List<SanctionCompareSummaryWrapper> out = new ArrayList<>();
+        for (BorrowerSanctionEntity s : all) {
+            BorrowerEntity borrower = s.getBorrowerId() != null ? borrowersById.get(s.getBorrowerId()) : null;
+            CompanyGroupEntity group = s.getBorrowerId() == null ? groupsById.get(s.getGroupId()) : null;
+            if (s.getBorrowerId() != null && borrower == null) continue; // orphaned/deleted borrower
+
+            boolean visible = borrower != null
+                    ? borrowerScopeCache.computeIfAbsent(borrower.getId(), id -> borrowerInScope(borrower, userId, level))
+                    : (group != null && groupScopeCache.computeIfAbsent(group.getId(), id -> groupInScope(group, userId, level)));
+            if (!visible) continue;
+
+            if (groupId != null) {
+                GroupPath gp = borrower != null ? resolveGroupPath(borrower.getGroupId())
+                        : resolveGroupPath(group != null ? group.getId() : null);
+                Long ownGroupId = borrower != null ? borrower.getGroupId() : (group != null ? group.getId() : null);
+                boolean matchesGroup = Objects.equals(ownGroupId, groupId)
+                        || Objects.equals(gp.parentGroupId, groupId) || Objects.equals(gp.subGroupId, groupId);
+                if (!matchesGroup) continue;
+            }
+            if (lenderQ != null && !lenderQ.equalsIgnoreCase(nullToEmpty(s.getLenderName()))) continue;
+            if (statusQ != null && !statusQ.equalsIgnoreCase(nullToEmpty(s.getStatus()))) continue;
+            if (projectQ != null && !nullToEmpty(s.getProjectName()).toLowerCase(Locale.ROOT).contains(projectQ)) continue;
+
+            String displayName = borrower != null ? borrower.getBorrowerName() : (group != null ? group.getGroupName() : null);
+            String cin = borrower != null ? borrower.getCin() : (group != null ? group.getCin() : null);
+            if (q != null) {
+                boolean hit = containsIgnoreCase(displayName, q) || containsIgnoreCase(cin, q)
+                        || containsIgnoreCase(s.getProjectName(), q) || containsIgnoreCase(s.getRefNo(), q);
+                if (!hit) continue;
+            }
+
+            SanctionCompareSummaryWrapper w = new SanctionCompareSummaryWrapper();
+            w.setId(s.getId());
+            w.setBorrowerId(s.getBorrowerId());
+            w.setGroupId(s.getGroupId());
+            w.setCin(cin);
+            w.setRefNo(s.getRefNo());
+            w.setSanctionDate(SanctionValueParser.formatDate(s.getSanctionDate()));
+            w.setSanctionedAmount(SanctionValueParser.formatCrore(s.getSanctionedAmount()));
+            w.setLenderName(s.getLenderName());
+            w.setProjectName(s.getProjectName());
+            w.setStatus(s.getStatus());
+
+            if (borrower != null) {
+                w.setAssociatedWithType("COMPANY");
+                w.setAssociatedWithName(borrower.getBorrowerName());
+                GroupPath gp = resolveGroupPath(borrower.getGroupId());
+                w.setParentGroupId(gp.parentGroupId);
+                w.setParentGroupName(gp.parentGroupName);
+                w.setSubGroupId(gp.subGroupId);
+                w.setSubGroupName(gp.subGroupName);
+            } else if (group != null) {
+                w.setAssociatedWithType(group.getParentGroupId() == null ? "GROUP" : "SUB_GROUP");
+                w.setAssociatedWithName(group.getGroupName());
+                GroupPath gp = resolveGroupPath(group.getId());
+                w.setParentGroupId(gp.parentGroupId);
+                w.setParentGroupName(gp.parentGroupName);
+                w.setSubGroupId(gp.subGroupId);
+                w.setSubGroupName(gp.subGroupName);
+            }
+            out.add(w);
+        }
+        return out;
+    }
+
+    /**
+     * Full detail for a caller-picked set of sanctions to compare side by
+     * side — the exact same {@link BorrowerSanctionWrapper} (limits/tranches/
+     * derived values included) the single-borrower detail view already
+     * returns, scoped exactly like {@link #assertSanctionReadScope}: any id
+     * the caller isn't allowed to see is silently dropped from the result,
+     * never surfaced as an error — a comparison request must never reveal
+     * whether an out-of-scope id exists.
+     */
+    public List<BorrowerSanctionWrapper> getSanctionsForComparison(Long userId, String userRole, List<Long> sanctionIds) {
+        if (sanctionIds == null || sanctionIds.isEmpty()) return List.of();
+        int level = roleHierarchyService.getLevelOrder(userRole);
+
+        List<BorrowerSanctionEntity> sanctions = sanctionRepo.findAllById(sanctionIds).stream()
+                .filter(s -> s.getDeletedAt() == null)
+                .collect(Collectors.toList());
+
+        List<Long> borrowerIds = sanctions.stream().map(BorrowerSanctionEntity::getBorrowerId)
+                .filter(Objects::nonNull).distinct().collect(Collectors.toList());
+        Map<Long, BorrowerEntity> borrowersById = borrowerRepo.findAllById(borrowerIds).stream()
+                .collect(Collectors.toMap(BorrowerEntity::getId, b -> b));
+
+        List<BorrowerSanctionWrapper> out = new ArrayList<>();
+        for (BorrowerSanctionEntity s : sanctions) {
+            BorrowerEntity borrower = s.getBorrowerId() != null ? borrowersById.get(s.getBorrowerId()) : null;
+            boolean visible;
+            if (s.getBorrowerId() != null) {
+                visible = borrower != null && borrowerInScope(borrower, userId, level);
+            } else {
+                CompanyGroupEntity group = s.getGroupId() != null
+                        ? companyGroupRepo.findByIdAndDeletedAtIsNull(s.getGroupId()).orElse(null) : null;
+                visible = group != null && groupInScope(group, userId, level);
+            }
+            if (!visible) continue;
+            out.add(toWrapper(s, borrower));
+        }
+        return out;
     }
 
     /**
@@ -1270,6 +1464,20 @@ public class BorrowerService {
         for (Rollup r : rollups.values()) {
             sanctionsCount += r.sanctionsCount;
             total = total.add(r.total);
+        }
+        // A sanction can be attached directly to a Parent/Sub Group instead
+        // of to a company under it (see BorrowerSanctionEntity.groupId) —
+        // `rollups` above only ever counts borrower-attached sanctions, so
+        // without this loop these undercount the registry-wide totals by
+        // however many letters are attached at the group level itself.
+        // rollupForGroupHierarchy already folds this in for one group's own
+        // row total; this is the same addition for the aggregate stat cards.
+        for (CompanyGroupEntity g : groups) {
+            for (BorrowerSanctionEntity s
+                    : sanctionRepo.findByGroupIdAndDeletedAtIsNullOrderBySanctionDateDesc(g.getId())) {
+                sanctionsCount++;
+                if (s.getSanctionedAmount() != null) total = total.add(s.getSanctionedAmount());
+            }
         }
         // Top-level Parent Groups only — a Sub Group is part of its Parent
         // Group's own hierarchy, not a second top-level entity, so it must
