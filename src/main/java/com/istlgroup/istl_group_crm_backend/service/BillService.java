@@ -196,6 +196,17 @@ public class BillService {
     }
 
     /** Lightweight enrich — skips items and paymentHistory to keep response fast. */
+    /**
+     * A bill has a document when it is either stored as a BLOB (every upload since the
+     * move off disk — those deliberately leave bill_file_path null) or still sits on disk
+     * under the legacy path. Callers must not test bill_file_path alone.
+     */
+    private boolean hasStoredFile(BillEntity bill) {
+        if (bill == null) return false;
+        if (bill.getBillFileData() != null && bill.getBillFileData().length > 0) return true;
+        return bill.getBillFilePath() != null && !bill.getBillFilePath().isBlank();
+    }
+
     private BillDTO enrichBillEntityLightweight(BillEntity bill) {
         BillDTO dto = new BillDTO();
         dto.setId(bill.getId());
@@ -215,6 +226,10 @@ public class BillService {
         dto.setSourceType(bill.getSourceType() != null ? bill.getSourceType() : "VENDOR");
         dto.setWarehouseId(bill.getWarehouseId());
         dto.setInvTxnRef(bill.getInvTxnRef());
+        dto.setBillFileName(bill.getBillFileName());
+        dto.setBillFileSize(bill.getBillFileSize());
+        dto.setBillFilePath(bill.getBillFilePath());
+        dto.setHasFile(hasStoredFile(bill));
 
         if ("WAREHOUSE".equalsIgnoreCase(bill.getSourceType())) {
             if (bill.getWarehouseId() != null) {
@@ -938,6 +953,7 @@ public class BillService {
         dto.setBillFilePath(bill.getBillFilePath());
         dto.setBillFileName(bill.getBillFileName());
         dto.setBillFileSize(bill.getBillFileSize());
+        dto.setHasFile(hasStoredFile(bill));
         dto.setUploadedOn(bill.getUploadedOn());
         dto.setCreatedAt(bill.getCreatedAt());
         dto.setUpdatedAt(bill.getUpdatedAt());

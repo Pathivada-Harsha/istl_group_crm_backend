@@ -56,6 +56,8 @@ public class BillDTO {
     private String billFilePath;
     private String billFileName;
     private Long billFileSize;
+    /** True when a document exists, whether stored as a BLOB (new uploads) or on disk (legacy path). */
+    private Boolean hasFile;
     
     // Notes
     private String notes;
