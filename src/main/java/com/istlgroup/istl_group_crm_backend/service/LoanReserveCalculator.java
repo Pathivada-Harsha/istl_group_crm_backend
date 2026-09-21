@@ -202,6 +202,100 @@ public class LoanReserveCalculator {
         return schedule;
     }
 
+    /** One draw-down: the amount that joins the outstanding balance on {@code date}. */
+    public record Disbursement(LocalDate date, BigDecimal amount) {}
+
+    /**
+     * Tranche-aware counterpart of the schedule above, used only when a
+     * sanction has tranches with an Actual Disb. Date — every other caller
+     * keeps the lump-sum method above, unchanged. Same period stepping,
+     * Repayment % profile, capitalization and average-balance repayment
+     * interest; the difference is the moratorium (interest-only) phase, which
+     * is priced segment by segment: the balance steps up on each
+     * {@code disbursements} date, so interest is
+     * {@code Σ balance × ROI × days / 365} over each stretch, never the whole
+     * amount from the first date.
+     *
+     * <p>The principal base is the total disbursed (a draw-down dated after
+     * {@code repayStart} is treated as landing on it — the application rejects
+     * such a tranche on save, so this only keeps a stale row from being
+     * dropped), plus capitalized moratorium interest when
+     * {@code capitalizeMoratoriumInterest}. Unlike the frontend's Repayment
+     * Schedule table, this still uses the sanction-level window this class has
+     * always been fed ({@code repayStart}/{@code repayEnd}) and has no
+     * split-period rows, since it only prices the sanction-level DSRA/ISRA.
+     */
+    public List<Period> buildQuarterEndSchedule(List<Disbursement> disbursements, BigDecimal annualRoiPct,
+            LocalDate start, LocalDate repayStart, LocalDate repayEnd, int monthsPerPeriod,
+            Integer daysPerPeriod, boolean capitalizeMoratoriumInterest, List<BigDecimal> repaymentPercents) {
+        List<Period> schedule = new ArrayList<>();
+        if (disbursements == null || disbursements.isEmpty() || annualRoiPct == null || start == null
+                || repayStart == null || repayEnd == null || !repayEnd.isAfter(start)) {
+            return schedule;
+        }
+        BigDecimal rate = annualRoiPct.divide(BigDecimal.valueOf(100), 10, RoundingMode.HALF_UP);
+        List<Disbursement> events = new ArrayList<>();
+        BigDecimal base = BigDecimal.ZERO;
+        for (Disbursement d : disbursements) {
+            LocalDate date = d.date().isAfter(repayStart) ? repayStart : d.date().isBefore(start) ? start : d.date();
+            events.add(new Disbursement(date, d.amount()));
+            base = base.add(d.amount());
+        }
+
+        LocalDate cursor = start;
+        while (cursor.isBefore(repayStart)) {
+            LocalDate next = daysPerPeriod != null ? cursor.plusDays(daysPerPeriod)
+                    : cursor.plusMonths(monthsPerPeriod).with(TemporalAdjusters.lastDayOfMonth());
+            if (next.isAfter(repayStart)) next = repayStart;
+            schedule.add(new Period(cursor, next, BigDecimal.ZERO, segmentInterest(events, cursor, next, rate)));
+            cursor = next;
+        }
+
+        BigDecimal balance = base;
+        if (capitalizeMoratoriumInterest) {
+            balance = balance.add(schedule.stream().map(Period::interestDue).reduce(BigDecimal.ZERO, BigDecimal::add));
+        }
+        BigDecimal amortizingBaseAmount = balance;
+
+        int amortizingPeriods = countPeriods(repayStart, repayEnd, monthsPerPeriod, daysPerPeriod);
+        if (amortizingPeriods > 0) {
+            List<BigDecimal> percents = (repaymentPercents != null && repaymentPercents.size() == amortizingPeriods)
+                    ? repaymentPercents : defaultRepaymentPercents(amortizingPeriods);
+            cursor = repayStart;
+            for (int i = 0; i < amortizingPeriods; i++) {
+                boolean last = i == amortizingPeriods - 1;
+                LocalDate next = last ? repayEnd
+                        : daysPerPeriod != null ? cursor.plusDays(daysPerPeriod)
+                        : cursor.plusMonths(monthsPerPeriod).with(TemporalAdjusters.lastDayOfMonth());
+                BigDecimal principal = amortizingBaseAmount
+                        .multiply(percents.get(i)).divide(BigDecimal.valueOf(100), 10, RoundingMode.HALF_UP);
+                schedule.add(amortizingPeriod(cursor, next, balance, principal, rate));
+                balance = balance.subtract(principal);
+                cursor = next;
+            }
+        }
+        return schedule;
+    }
+
+    /** Interest over [from, to) with the balance stepping up on every disbursement date strictly inside it. */
+    private BigDecimal segmentInterest(List<Disbursement> events, LocalDate from, LocalDate to, BigDecimal rate) {
+        List<LocalDate> points = new ArrayList<>();
+        points.add(from);
+        events.stream().map(Disbursement::date).filter(d -> d.isAfter(from) && d.isBefore(to))
+                .distinct().sorted().forEach(points::add);
+        points.add(to);
+        BigDecimal total = BigDecimal.ZERO;
+        for (int i = 0; i < points.size() - 1; i++) {
+            LocalDate a = points.get(i);
+            BigDecimal balance = events.stream().filter(d -> !d.date().isAfter(a))
+                    .map(Disbursement::amount).reduce(BigDecimal.ZERO, BigDecimal::add);
+            long days = ChronoUnit.DAYS.between(a, points.get(i + 1));
+            total = total.add(balance.multiply(rate).multiply(BigDecimal.valueOf(days))
+                    .divide(BigDecimal.valueOf(DAYS_IN_YEAR), 10, RoundingMode.HALF_UP));
+        }
+        return total.setScale(2, RoundingMode.HALF_UP);
+    }
+
     /**
      * Equal 100/N split: 100/periods for every period except the last, which
      * absorbs whatever remains so the total is always exactly 100 — mirrors

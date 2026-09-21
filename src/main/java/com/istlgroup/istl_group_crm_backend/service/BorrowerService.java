@@ -1833,7 +1833,7 @@ public class BorrowerService {
             }
         }
 
-        validateSanction(e);
+        validateSanction(e, in.getLimits());
         sanctionRepo.save(e);
         persistSanctionLimits(e, in.getLimits());
         return buildBorrowerWrapper(borrower.getId());
@@ -1898,7 +1898,7 @@ public class BorrowerService {
             }
         }
 
-        validateSanction(e);
+        validateSanction(e, in.getLimits());
         sanctionRepo.save(e);
         persistSanctionLimits(e, in.getLimits());
 
@@ -2267,7 +2267,7 @@ public class BorrowerService {
     }
 
     /** Blocking checks only. Soft mismatches surface as derived text, not errors. */
-    private void validateSanction(BorrowerSanctionEntity e) throws CustomException {
+    private void validateSanction(BorrowerSanctionEntity e, List<SanctionLimitWrapper> limits) throws CustomException {
         if (e.getProjectCost() != null && e.getSanctionedAmount() != null
                 && e.getSanctionedAmount().compareTo(e.getProjectCost()) > 0) {
             throw new CustomException(
@@ -2285,10 +2285,16 @@ public class BorrowerService {
                 && e.getActualCod().isBefore(e.getSanctionDate())) {
             throw new CustomException("The actual COD cannot fall before the sanction date.");
         }
-        if (e.getDisbursementDate() == null) {
+        // A limit disbursed in tranches takes its dates from those tranches, so
+        // the sanction has no disbursement date of its own to require when any
+        // limit has tranches (every tranche date is validated separately in
+        // persistSanctionLimitTranches).
+        boolean anyTranches = limits != null && limits.stream()
+                .anyMatch(l -> l.getTranches() != null && !l.getTranches().isEmpty());
+        if (e.getDisbursementDate() == null && !anyTranches) {
             throw new CustomException("Disbursement date is required.");
         }
-        if (e.getSanctionDate() != null) {
+        if (e.getSanctionDate() != null && e.getDisbursementDate() != null) {
             LocalDate validTill = derived.sanctionValidTill(e.getSanctionDate());
             if (e.getDisbursementDate().isBefore(e.getSanctionDate())
                     || e.getDisbursementDate().isAfter(validTill)) {
@@ -2698,6 +2704,16 @@ public class BorrowerService {
                         + ") — latest allowed is "
                         + SanctionValueParser.formatDate(e.getScheduledCod().minusDays(1)) + ".");
             }
+            // Same Sanction Valid End Date rule the frontend already applies
+            // to a Limit's Actual Disb. Date (its date-picker max and
+            // limitsValidTillViolation) — enforced here too so a value that
+            // bypasses the form, or arrived already out of range, can't be
+            // persisted.
+            LocalDate limitValidTill = derived.sanctionValidTill(e.getSanctionDate());
+            if (limitValidTill != null && actualDisb != null && actualDisb.isAfter(limitValidTill)) {
+                throw new CustomException("Actual Disbursement Date cannot be later than the Sanction Valid End Date ("
+                        + dashDate(limitValidTill) + ").");
+            }
             rows.add(row);
         }
 
@@ -2709,9 +2725,16 @@ public class BorrowerService {
 
         sanctionLimitRepo.saveAll(rows);
 
+        LocalDate sanctionValidTill = derived.sanctionValidTill(e.getSanctionDate());
+        int moratoriumMonths = e.getMoratoriumMonths() != null ? e.getMoratoriumMonths() : 0;
         for (int i = 0; i < rows.size(); i++) {
-            persistSanctionLimitTranches(rows.get(i), limits.get(i).getTranches());
+            persistSanctionLimitTranches(rows.get(i), limits.get(i).getTranches(), sanctionValidTill, moratoriumMonths);
         }
+    }
+
+    /** DD-MMM-YYYY, the format the Actual Disbursement Date validation messages quote. */
+    private static String dashDate(LocalDate d) {
+        return d.format(DateTimeFormatter.ofPattern("dd-MMM-yyyy", Locale.ENGLISH));
     }
 
     /**
@@ -2722,9 +2745,21 @@ public class BorrowerService {
      * tranches are present, disbursement can be staged — their total may be
      * less than the limit's own Limit Amount (more tranches added later) —
      * but must never exceed it.
+     *
+     * @param sanctionValidTill the parent sanction's own validity cutoff
+     *                          (Sanction Date + 6 months, see
+     *                          {@link SanctionDerivedCalculator#sanctionValidTill}) —
+     *                          no Tranche's own Actual Disb. Date may fall
+     *                          after it. The frontend's own SanctionDatePicker
+     *                          already disables picking such a date going
+     *                          forward; this is the backstop for a value that
+     *                          arrived already out of range (an imported
+     *                          letter's raw parsed date, a value typed before
+     *                          the Sanction Date changed underneath it, or a
+     *                          direct API call bypassing the picker).
      */
-    private void persistSanctionLimitTranches(SanctionLimitEntity limit, List<SanctionLimitTrancheWrapper> tranches)
-            throws CustomException {
+    private void persistSanctionLimitTranches(SanctionLimitEntity limit, List<SanctionLimitTrancheWrapper> tranches,
+            LocalDate sanctionValidTill, int moratoriumMonths) throws CustomException {
         sanctionLimitTrancheRepo.deleteByLimitId(limit.getId());
         if (tranches == null || tranches.isEmpty()) return;
 
@@ -2734,7 +2769,8 @@ public class BorrowerService {
         for (SanctionLimitTrancheWrapper t : tranches) {
             SanctionLimitTrancheEntity row = new SanctionLimitTrancheEntity();
             row.setLimitId(limit.getId());
-            row.setTrancheOrder(order++);
+            int thisOrder = order++;
+            row.setTrancheOrder(thisOrder);
             BigDecimal amount = SanctionValueParser.parseMoneyCrore(t.getTrancheAmount());
             if (amount == null) {
                 throw new CustomException("Every Tranche needs an Amount.");
@@ -2742,8 +2778,35 @@ public class BorrowerService {
             row.setTrancheAmount(amount);
             total = total.add(amount);
             row.setTentativeDisbursementDate(SanctionValueParser.parseDate(t.getTentativeDisbursementDate()));
-            row.setActualDisbursementDate(SanctionValueParser.parseDate(t.getActualDisbursementDate()));
+            LocalDate actualDisb = SanctionValueParser.parseDate(t.getActualDisbursementDate());
+            row.setActualDisbursementDate(actualDisb);
+
+            if (sanctionValidTill != null && actualDisb != null && actualDisb.isAfter(sanctionValidTill)) {
+                throw new CustomException(limit.getLimitLabel() + " Tranche " + (thisOrder + 1)
+                        + ": Actual Disbursement Date cannot be later than the Sanction Valid End Date ("
+                        + dashDate(sanctionValidTill) + ").");
+            }
             rows.add(row);
+        }
+
+        // The schedule is anchored on the earliest tranche Actual Disb. Date,
+        // and its Repayment % profile is applied to what has been disbursed by
+        // Moratorium End (anchor + moratorium months) — a tranche dated after
+        // that has no principal base to be repaid from, so it's rejected.
+        // Mirrors SanctionFormModal's trancheAfterMoratorium check.
+        LocalDate anchor = rows.stream().map(SanctionLimitTrancheEntity::getActualDisbursementDate)
+                .filter(java.util.Objects::nonNull).min(LocalDate::compareTo).orElse(null);
+        if (anchor != null) {
+            LocalDate moratoriumEnd = anchor.plusMonths(moratoriumMonths);
+            for (int i = 0; i < rows.size(); i++) {
+                LocalDate actual = rows.get(i).getActualDisbursementDate();
+                if (actual != null && actual.isAfter(moratoriumEnd)) {
+                    throw new CustomException(limit.getLimitLabel() + " Tranche " + (i + 1)
+                            + ": Actual Disbursement Date cannot be later than the Moratorium End Date ("
+                            + dashDate(moratoriumEnd) + "), since repayment principal is based on the amount "
+                            + "disbursed by then.");
+                }
+            }
         }
 
         // Disbursement can happen in stages — a lender may release less than

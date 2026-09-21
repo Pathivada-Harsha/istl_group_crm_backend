@@ -14,6 +14,8 @@ import org.springframework.stereotype.Component;
 
 import com.istlgroup.istl_group_crm_backend.entity.BorrowerSanctionEntity;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.BorrowerSanctionWrapper;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.SanctionLimitTrancheWrapper;
+import com.istlgroup.istl_group_crm_backend.wrapperClasses.SanctionLimitWrapper;
 
 /**
  * Values the letter doesn't print but a credit officer would work out.
@@ -184,9 +186,22 @@ public class SanctionDerivedCalculator {
         // Repayment Schedule tab uses (EOMONTH dates, percentage-driven
         // principal), so DSRA/ISRA here can never silently disagree with
         // what that tab shows for the identical sanction.
-        List<LoanReserveCalculator.Period> schedule = reserveCalc.buildQuarterEndSchedule(
-                debt, roi, signed, repayStart, repayEnd, monthsPerPeriod, daysPerPeriod, capitalized,
-                parseRepaymentProfile(e.getRepaymentProfileJson()));
+        // A sanction with tranches is priced off each tranche's own Actual
+        // Disb. Date (interest steps up as each is drawn); one without keeps
+        // the original lump-sum schedule below, completely unchanged.
+        List<LoanReserveCalculator.Disbursement> draws = trancheDisbursements(w);
+        List<LoanReserveCalculator.Period> schedule;
+        if (draws.isEmpty()) {
+            schedule = reserveCalc.buildQuarterEndSchedule(
+                    debt, roi, signed, repayStart, repayEnd, monthsPerPeriod, daysPerPeriod, capitalized,
+                    parseRepaymentProfile(e.getRepaymentProfileJson()));
+        } else {
+            LocalDate firstDraw = draws.stream().map(LoanReserveCalculator.Disbursement::date)
+                    .min(LocalDate::compareTo).get();
+            schedule = reserveCalc.buildQuarterEndSchedule(
+                    draws, roi, firstDraw, repayStart, repayEnd, monthsPerPeriod, daysPerPeriod, capitalized,
+                    parseRepaymentProfile(e.getRepaymentProfileJson()));
+        }
 
         String dsraText = e.getDsra();
         Integer dsraPeriods = SanctionValueParser.parseReservePeriods(dsraText, monthsPerPeriod);
@@ -210,6 +225,40 @@ public class SanctionDerivedCalculator {
                     : SanctionValueParser.formatCrore(reserveCalc.sumInterest(schedule, dsraPeriods)));
             w.setDerivedIsraIsContractual(false);
         }
+    }
+
+    /**
+     * The draw-downs behind a sanction that has tranches: every tranche with a
+     * parseable Actual Disb. Date and amount (a Pending tranche is left out,
+     * so it never counts as outstanding), plus — for a limit in the same
+     * sanction that has no tranches — that limit as one draw on its own Actual
+     * Disb. Date. Empty unless at least one tranche has an Actual Disb. Date,
+     * which is what keeps every tranche-less sanction on the original path.
+     */
+    private static List<LoanReserveCalculator.Disbursement> trancheDisbursements(BorrowerSanctionWrapper w) {
+        List<LoanReserveCalculator.Disbursement> draws = new ArrayList<>();
+        boolean anyTrancheDraw = false;
+        if (w.getLimits() == null) return draws;
+        for (SanctionLimitWrapper l : w.getLimits()) {
+            List<SanctionLimitTrancheWrapper> tranches = l.getTranches();
+            if (tranches != null && !tranches.isEmpty()) {
+                for (SanctionLimitTrancheWrapper t : tranches) {
+                    LocalDate date = SanctionValueParser.parseDate(t.getActualDisbursementDate());
+                    BigDecimal amount = SanctionValueParser.parseMoneyCrore(t.getTrancheAmount());
+                    if (date != null && amount != null && amount.signum() > 0) {
+                        draws.add(new LoanReserveCalculator.Disbursement(date, amount));
+                        anyTrancheDraw = true;
+                    }
+                }
+            } else {
+                LocalDate date = SanctionValueParser.parseDate(l.getActualDisbursementDate());
+                BigDecimal amount = SanctionValueParser.parseMoneyCrore(l.getFacilityLimitAmount());
+                if (date != null && amount != null && amount.signum() > 0) {
+                    draws.add(new LoanReserveCalculator.Disbursement(date, amount));
+                }
+            }
+        }
+        return anyTrancheDraw ? draws : new ArrayList<>();
     }
 
     /** The date after which an unrenewed sanction lapses. */
