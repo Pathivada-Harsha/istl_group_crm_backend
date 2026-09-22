@@ -22,6 +22,22 @@ public interface UserPagePermissionRepo extends JpaRepository<UserPagePermission
     """, nativeQuery = true)
     List<String> findPermissionNamesByUserId(@Param("userId") Long userId);
 
+    // Does this user hold one specific page permission? The name is the DB form —
+    // dot-separated and lowercase, e.g. "proposals.edit" — not the uppercased
+    // MODULE/ACTION shape that LoginService builds for the login response.
+    // Returns a count rather than a boolean, matching countPagePermissions below:
+    // a native query's 0/1 would have to survive a Number→Boolean conversion.
+    @Query(value = """
+        SELECT COUNT(*)
+        FROM permissions p
+        JOIN user_page_permissions upp ON p.id = upp.permission_id
+        WHERE upp.user_id = :userId
+          AND upp.has_permission = 1
+          AND LOWER(p.name) = LOWER(:permissionName)
+    """, nativeQuery = true)
+    long countPagePermission(@Param("userId") Long userId,
+                             @Param("permissionName") String permissionName);
+
     // Get permission IDs where has_permission = 1 (used when creating new users)
     @Query(value = """
         SELECT permission_id FROM user_page_permissions
