@@ -1240,6 +1240,9 @@ public class BorrowerService {
          * {@link #deriveStatusLabel}.
          */
         boolean hasActiveSanction;
+        /** Sanction counts by active status - feeds the registry analytics only; nothing else reads them. */
+        int activeSanctions;
+        int inactiveSanctions;
         /**
          * Only ever set on a single BORROWER's own rollup (from {@link
          * #rollupsFor}) — the id of that company's most recent sanction
@@ -1297,7 +1300,7 @@ public class BorrowerService {
             if (r == null) continue; // defensive; every id here came from borrowerIds
             r.sanctionsCount++;
             if (s.getSanctionedAmount() != null) r.total = r.total.add(s.getSanctionedAmount());
-            if (isActiveSanction(s.getActiveStatus())) r.hasActiveSanction = true;
+            if (isActiveSanction(s.getActiveStatus())) { r.hasActiveSanction = true; r.activeSanctions++; } else { r.inactiveSanctions++; }
             // The query is already ordered by sanctionDate desc across every
             // borrower in the batch, so the first row seen for a given
             // borrower is necessarily that borrower's own most recent one.
@@ -1472,11 +1475,18 @@ public class BorrowerService {
         // however many letters are attached at the group level itself.
         // rollupForGroupHierarchy already folds this in for one group's own
         // row total; this is the same addition for the aggregate stat cards.
+        Map<Long, BigDecimal> groupDirectTotal = new HashMap<>();
+        int groupActive = 0;
+        int groupInactive = 0;
         for (CompanyGroupEntity g : groups) {
             for (BorrowerSanctionEntity s
                     : sanctionRepo.findByGroupIdAndDeletedAtIsNullOrderBySanctionDateDesc(g.getId())) {
                 sanctionsCount++;
-                if (s.getSanctionedAmount() != null) total = total.add(s.getSanctionedAmount());
+                if (s.getSanctionedAmount() != null) {
+                    total = total.add(s.getSanctionedAmount());
+                    groupDirectTotal.merge(g.getId(), s.getSanctionedAmount(), BigDecimal::add);
+                }
+                if (isActiveSanction(s.getActiveStatus())) groupActive++; else groupInactive++;
             }
         }
         // Top-level Parent Groups only — a Sub Group is part of its Parent
@@ -1489,7 +1499,97 @@ public class BorrowerService {
         stats.put("totalCompanies", borrowers.size());
         stats.put("totalSanctionLetters", sanctionsCount);
         stats.put("totalSanctionedAmount", SanctionValueParser.formatCrore(total));
+        stats.put("analytics", buildRegistryAnalytics(
+                borrowers, groups, rollups, groupDirectTotal, groupActive, groupInactive, totalParentGroups));
         return stats;
+    }
+
+    /**
+     * The breakdowns behind the registry page's analytics cards, registry-wide and
+     * computed from the same in-scope borrowers/groups/rollups getHierarchyStats
+     * already walked for the KPI cards - so the segments always reconcile with those
+     * cards (type counts add to Groups + Companies, amounts add to Total Sanctioned
+     * Amount, statuses add to Total Sanction Letters). Amounts are sent as exact
+     * crore decimals (amountCr) plus the display string.
+     *
+     * Types are the ones the registry table already shows: "Parent Group" for a
+     * top-level group, and a company's own companyTypeLabel. A sanction attached
+     * straight to a Parent/Sub Group counts under "Parent Group"; each company's own
+     * sanctions stay under its company type. The top-borrowers list ranks the
+     * table's own rows - a Parent Group (with everything beneath it) or a company
+     * that sits in no group - so nothing is counted twice.
+     */
+    private Map<String, Object> buildRegistryAnalytics(List<BorrowerEntity> borrowers, List<CompanyGroupEntity> groups,
+            Map<Long, Rollup> rollups, Map<Long, BigDecimal> groupDirectTotal, int groupActive, int groupInactive,
+            long totalParentGroups) {
+        Map<String, Integer> typeCount = new LinkedHashMap<>();
+        Map<String, BigDecimal> typeAmount = new LinkedHashMap<>();
+        typeCount.put("Parent Group", (int) totalParentGroups);
+        typeAmount.put("Parent Group", BigDecimal.ZERO);
+        int active = groupActive;
+        int inactive = groupInactive;
+
+        Map<Long, Long> topOf = new HashMap<>();
+        Map<Long, BigDecimal> topTotal = new LinkedHashMap<>();
+        Map<Long, String> topName = new LinkedHashMap<>();
+        for (CompanyGroupEntity g : groups) {
+            Long topId = g.getParentGroupId() == null ? g.getId() : g.getParentGroupId();
+            topOf.put(g.getId(), topId);
+            if (g.getParentGroupId() == null) topName.put(g.getId(), g.getGroupName());
+            BigDecimal direct = groupDirectTotal.getOrDefault(g.getId(), BigDecimal.ZERO);
+            typeAmount.merge("Parent Group", direct, BigDecimal::add);
+            topTotal.merge(topId, direct, BigDecimal::add);
+        }
+
+        List<Object[]> ranked = new ArrayList<>(); // {name, kind, amount}
+        for (BorrowerEntity b : borrowers) {
+            Rollup r = rollups.getOrDefault(b.getId(), new Rollup());
+            String label = companyTypeLabel(b.getIsSubsidiary(), b.getIsSpv());
+            typeCount.merge(label, 1, Integer::sum);
+            typeAmount.merge(label, r.total, BigDecimal::add);
+            active += r.activeSanctions;
+            inactive += r.inactiveSanctions;
+            Long topId = b.getGroupId() == null ? null : topOf.get(b.getGroupId());
+            if (topId != null && topName.containsKey(topId)) {
+                topTotal.merge(topId, r.total, BigDecimal::add);
+            } else {
+                ranked.add(new Object[] { b.getBorrowerName(), "COMPANY", r.total });
+            }
+        }
+        for (Map.Entry<Long, String> e : topName.entrySet()) {
+            ranked.add(new Object[] { e.getValue(), "GROUP", topTotal.getOrDefault(e.getKey(), BigDecimal.ZERO) });
+        }
+        ranked.removeIf(x -> ((BigDecimal) x[2]).signum() <= 0);
+        ranked.sort((a, b) -> ((BigDecimal) b[2]).compareTo((BigDecimal) a[2]));
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("borrowerTypes", typeCount.entrySet().stream().filter(e -> e.getValue() > 0)
+                .map(e -> labelValue(e.getKey(), e.getValue())).collect(Collectors.toList()));
+        List<Map<String, Object>> statuses = new ArrayList<>();
+        statuses.add(labelValue("Active", active));
+        statuses.add(labelValue("Inactive", inactive));
+        out.put("sanctionStatus", statuses);
+        out.put("amountByType", typeAmount.entrySet().stream().filter(e -> e.getValue().signum() > 0)
+                .map(e -> amountEntry(e.getKey(), null, e.getValue())).collect(Collectors.toList()));
+        out.put("topBorrowers", ranked.stream().limit(5)
+                .map(x -> amountEntry((String) x[0], (String) x[1], (BigDecimal) x[2])).collect(Collectors.toList()));
+        return out;
+    }
+
+    private static Map<String, Object> labelValue(String label, int count) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("label", label);
+        m.put("count", count);
+        return m;
+    }
+
+    private static Map<String, Object> amountEntry(String label, String kind, BigDecimal amount) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("label", label);
+        if (kind != null) m.put("kind", kind);
+        m.put("amountCr", amount.toPlainString());
+        m.put("amountLabel", SanctionValueParser.formatCrore(amount));
+        return m;
     }
 
     /** The lightweight row shape for a Level-1 group — its own hierarchy-wide rollup, no nested companies/subGroups. */
