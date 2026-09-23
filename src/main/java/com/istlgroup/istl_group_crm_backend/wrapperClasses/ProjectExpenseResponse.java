@@ -20,7 +20,12 @@ public class ProjectExpenseResponse {
     // Header
     private LocalDate tripDate;
     private String    tripReason;
+    /** The FINAL total, after round-off. */
     private BigDecimal totalAmount;
+
+    /** The total before round-off, and the adjustment applied to it. */
+    private BigDecimal exactTotal;
+    private BigDecimal roundOff;
 
     // People
     private Long   paidByUserId;

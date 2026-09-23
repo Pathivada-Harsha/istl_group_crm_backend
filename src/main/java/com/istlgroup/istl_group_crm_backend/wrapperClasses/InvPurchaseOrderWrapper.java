@@ -31,7 +31,16 @@ public class InvPurchaseOrderWrapper {
     private LocalDate expectedDelivery;
     private String status;
     private String paymentStatus;
+    /**
+     * The FINAL total, after round-off. Writable only because this wrapper doubles
+     * as the request body; the service always derives the total from the items and
+     * ignores whatever arrives here.
+     */
     private BigDecimal totalValue;
+
+    /** The total before round-off, and the adjustment applied to it. Output only. */
+    private BigDecimal exactTotal;
+    private BigDecimal roundOff;
     private Integer totalItemsOrdered;
     private Integer totalItemsReceived;
     private String paymentTerms;
@@ -107,6 +116,8 @@ public class InvPurchaseOrderWrapper {
             .status(e.getStatus())
             .paymentStatus(e.getPaymentStatus())
             .totalValue(e.getTotalValue())
+            .exactTotal(e.getExactTotal())
+            .roundOff(e.getRoundOff())
             .totalItemsOrdered(e.getTotalItemsOrdered())
             .totalItemsReceived(e.getTotalItemsReceived())
             .paymentTerms(e.getPaymentTerms())

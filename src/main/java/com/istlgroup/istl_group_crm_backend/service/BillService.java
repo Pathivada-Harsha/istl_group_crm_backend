@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import com.istlgroup.istl_group_crm_backend.entity.BillEntity;
 import com.istlgroup.istl_group_crm_backend.entity.BillItemEntity;
 import com.istlgroup.istl_group_crm_backend.entity.BillPaymentEntity;
@@ -217,6 +218,8 @@ public class BillService {
         dto.setBillDate(bill.getBillDate());
         dto.setDueDate(bill.getDueDate());
         dto.setTotalAmount(bill.getTotalAmount());
+        dto.setExactTotal(bill.getExactTotal());
+        dto.setRoundOff(bill.getRoundOff());
         dto.setPaidAmount(bill.getPaidAmount());
         dto.setBalanceAmount(bill.getBalanceAmount());
         dto.setStatus(bill.getStatus());
@@ -390,7 +393,7 @@ public class BillService {
             }
         }
 
-        recalculateBillTotal(bill);
+        recalculateBillTotal(bill, dto.getRoundOff());
         bill = billRepository.save(bill);
 
         log.info("Created bill: {} with {} items", bill.getBillNo(), bill.getItems().size());
@@ -572,7 +575,7 @@ public class BillService {
                 }
             }
 
-            recalculateBillTotal(bill);
+            recalculateBillTotal(bill, dto.getRoundOff());
             // CRITICAL: recalculate status after total changes.
             // If quantities / items increased, totalAmount now exceeds paidAmount →
             // status must flip from "Paid" → "Partially Paid" (or "Pending" if nothing paid).
@@ -943,6 +946,8 @@ public class BillService {
         dto.setBillDate(bill.getBillDate());
         dto.setDueDate(bill.getDueDate());
         dto.setTotalAmount(bill.getTotalAmount());
+        dto.setExactTotal(bill.getExactTotal());
+        dto.setRoundOff(bill.getRoundOff());
         dto.setPaidAmount(bill.getPaidAmount());
         dto.setBalanceAmount(bill.getBalanceAmount());
         dto.setStatus(bill.getStatus());
@@ -1042,16 +1047,32 @@ public class BillService {
         return dto;
     }
 
-    private void recalculateBillTotal(BillEntity bill) {
+    /**
+     * The only writer of a bill's three money values.
+     *
+     * A vendor bill is an INCOMING document: it is a transcription of what the
+     * vendor printed, so the round-off is pre-filled with the automatic value but
+     * the user may nudge it by up to a rupee to land on the vendor's own figure.
+     * MoneyRounding rejects anything further out with a 400.
+     *
+     * @param requestedRoundOff what the user typed, or null to round automatically.
+     */
+    private void recalculateBillTotal(BillEntity bill, BigDecimal requestedRoundOff) {
         BigDecimal subtotal = bill.getItems().stream()
-                .map(item -> item.getQuantity().multiply(item.getUnitPrice()))
+                .map(BillItemEntity::getSubtotal)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
         BigDecimal taxAmount = bill.getItems().stream()
                 .map(BillItemEntity::getTaxAmount)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        bill.setTotalAmount(subtotal.add(taxAmount));
+        MoneyRounding.RoundedTotal totals =
+                MoneyRounding.withOverride(subtotal.add(taxAmount), requestedRoundOff);
+        bill.setExactTotal(totals.exactTotal());
+        bill.setRoundOff(totals.roundOff());
+        // total_amount is the FINAL total, which is what keeps the generated
+        // balance_amount column and recalculateStatus() honest.
+        bill.setTotalAmount(totals.finalTotal());
     }
 
     private String generateBillNumber() {
@@ -1190,9 +1211,11 @@ public class BillService {
         }
 
         // Calculate total — leave status=Pending, paidAmount=0.
+        // null round-off: this bill is raised by the warehouse issuance flow with
+        // no user to confirm a figure, so it rounds automatically.
         // Payment will be recorded via VendorAdvanceService.createAdvance
         // (BILL_PAYMENT type) which updates paidAmount + status to Paid.
-        recalculateBillTotal(bill);
+        recalculateBillTotal(bill, null);
 
         bill = billRepository.saveAndFlush(bill);
 

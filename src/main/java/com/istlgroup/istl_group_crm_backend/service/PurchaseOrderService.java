@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import com.istlgroup.istl_group_crm_backend.entity.*;
 import com.istlgroup.istl_group_crm_backend.repo.*;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.PurchaseOrderDropdownWrapper;
@@ -16,7 +17,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -624,14 +624,9 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                     ? new BigDecimal(itemData.get("discount").toString()) 
                     : BigDecimal.ZERO;
                 
-                // Calculate line total
-                BigDecimal lineSubtotal = quantity.multiply(unitPrice);
-                BigDecimal discountAmount = lineSubtotal.multiply(discount)
-                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-                BigDecimal taxableAmount = lineSubtotal.subtract(discountAmount);
-                BigDecimal gstAmount = taxableAmount.multiply(gst)
-                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-                BigDecimal lineTotal = taxableAmount.add(gstAmount);
+                // Line total is computed below, AFTER the quantity guard — it used
+                // to be computed here, so a quantity the guard then corrected to 1
+                // had already been multiplied into the total at its bad value.
                 if (quantity.compareTo(BigDecimal.ZERO) <= 0) {
                     log.warn("Invalid quantity for item: {}, using 1", itemData.get("itemName"));
                     quantity = BigDecimal.ONE;
@@ -664,7 +659,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                         .build();
 
                 poItems.add(poItem);
-                totalValue = totalValue.add(lineTotal);
+                totalValue = totalValue.add(computeLineTotal(quantity, unitPrice, gst, discount));
                 totalItemsOrdered += quantity.intValue();
             }
             
@@ -673,7 +668,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
             log.info("Saved {} PO items", savedItems.size());
             
             // Update PO totals
-            savedPO.setTotalValue(totalValue.setScale(2, RoundingMode.HALF_UP));
+            applyTotals(savedPO, totalValue);
             savedPO.setTotalItemsOrdered(totalItemsOrdered);
             savedPO.setTotalItemsDelivered(0);
             savedPO.setItems(savedItems);
@@ -800,14 +795,9 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                     ? new BigDecimal(itemData.get("discount").toString()) 
                     : BigDecimal.ZERO;
                 
-                // Calculate line total
-                BigDecimal lineSubtotal = quantity.multiply(unitPrice);
-                BigDecimal discountAmount = lineSubtotal.multiply(discount)
-                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-                BigDecimal taxableAmount = lineSubtotal.subtract(discountAmount);
-                BigDecimal gstAmount = taxableAmount.multiply(gst)
-                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-                BigDecimal lineTotal = taxableAmount.add(gstAmount);
+                // Line total is computed below, AFTER the quantity guard — it used
+                // to be computed here, so a quantity the guard then corrected to 1
+                // had already been multiplied into the total at its bad value.
                 if (quantity.compareTo(BigDecimal.ZERO) <= 0) {
                     log.warn("Invalid quantity for item: {}, using 1", itemData.get("itemName"));
                     quantity = BigDecimal.ONE;
@@ -837,7 +827,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                         .build();
 
                 poItems.add(poItem);
-                totalValue = totalValue.add(lineTotal);
+                totalValue = totalValue.add(computeLineTotal(quantity, unitPrice, gst, discount));
                 totalItemsOrdered += quantity.intValue();
             }
             
@@ -848,7 +838,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
             log.info("Saved {} PO items from order books", savedItems.size());
             
             // Update PO totals
-            savedPO.setTotalValue(totalValue.setScale(2, RoundingMode.HALF_UP));
+            applyTotals(savedPO, totalValue);
             savedPO.setTotalItemsOrdered(totalItemsOrdered);
             savedPO.setTotalItemsDelivered(0);
             savedPO.setItems(savedItems);
@@ -1293,14 +1283,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                 BigDecimal gst       = safeToBigDecimal(itemData.get("gst"), new BigDecimal("18"));
                 BigDecimal discount  = safeToBigDecimal(itemData.get("discount"));
 
-                // Calculate line total
-                BigDecimal lineSubtotal   = quantity.multiply(unitPrice);
-                BigDecimal discountAmount = lineSubtotal.multiply(discount)
-                        .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-                BigDecimal taxableAmount  = lineSubtotal.subtract(discountAmount);
-                BigDecimal gstAmount      = taxableAmount.multiply(gst)
-                        .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-                BigDecimal lineTotal      = taxableAmount.add(gstAmount);
+                // Line total is computed below, after the quantity/unit-price guards.
 
                 if (quantity.compareTo(BigDecimal.ZERO) <= 0) {
                     throw new RuntimeException("Quantity must be greater than 0 for item: " + itemData.get("itemName"));
@@ -1361,7 +1344,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                 }
 
                 poItems.add(poItem);
-                totalValue = totalValue.add(lineTotal);
+                totalValue = totalValue.add(computeLineTotal(quantity, unitPrice, gst, discount));
                 totalItemsOrdered += quantity.intValue();
             }
 
@@ -1383,7 +1366,7 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                     .sum();
 
             // Update totals
-            po.setTotalValue(totalValue.setScale(2, RoundingMode.HALF_UP));
+            applyTotals(po, totalValue);
             po.setTotalItemsOrdered(totalItemsOrdered);
             po.setTotalItemsDelivered(totalDelivered);   // ← FIX: was hard-coded 0
             po.setItems(savedItems);
@@ -1438,10 +1421,17 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
             po.setTotalItemsOrdered(totalOrdered);
             po.setTotalItemsDelivered(0);
             
+            // This used to sum quantity * unitPrice and stop there — no GST, no
+            // discount — so a PO created through this entity-bound endpoint stored
+            // a total materially below the same PO created through the map-driven
+            // paths. It now uses the same line arithmetic as everything else.
+            // PurchaseOrderItemEntity has no discount column, so the discount is
+            // zero here by structure rather than by omission.
             BigDecimal totalValue = po.getItems().stream()
-                    .map(item -> item.getQuantity().multiply(item.getUnitPrice()))
+                    .map(item -> computeLineTotal(item.getQuantity(), item.getUnitPrice(),
+                            item.getTaxPercent(), BigDecimal.ZERO))
                     .reduce(BigDecimal.ZERO, BigDecimal::add);
-            po.setTotalValue(totalValue);
+            applyTotals(po, totalValue);
         }
         
         // First save — DB assigns auto-increment id
@@ -1815,6 +1805,44 @@ public Page<PurchaseOrderEntity> getPurchaseOrders(
                 .map(this::convertToDropdownWrapper)
                 .collect(Collectors.toList());
     }
+    /**
+     * What one PO line comes to, including its discount and its GST.
+     *
+     * This arithmetic used to be written out four times: three byte-identical
+     * copies in the create-from-quotation, plain-create and update paths, plus a
+     * fourth in the entity-bound createPurchaseOrder that summed
+     * quantity * unitPrice with NO GST and NO discount — so the same PO stored a
+     * materially lower total depending on which endpoint made it.
+     *
+     * It is also the input to the round-off, which is a second reason it has to be
+     * one function: the pre-round total has to mean the same thing on every path.
+     */
+    private BigDecimal computeLineTotal(BigDecimal quantity, BigDecimal unitPrice,
+                                        BigDecimal gstPercent, BigDecimal discountPercent) {
+        BigDecimal lineSubtotal   = MoneyRounding.money(quantity.multiply(unitPrice));
+        BigDecimal discountAmount = MoneyRounding.percentOf(lineSubtotal, discountPercent);
+        BigDecimal taxableAmount  = lineSubtotal.subtract(discountAmount);
+        BigDecimal gstAmount      = MoneyRounding.percentOf(taxableAmount, gstPercent);
+        return taxableAmount.add(gstAmount);
+    }
+
+    /**
+     * The only writer of a purchase order's three money values. Purchase orders
+     * are outgoing, so the round-off is automatic.
+     *
+     * Nothing client-sent needs discarding here: every PurchaseOrderController
+     * write endpoint binds a Map<String, Object> and reads only item fields off
+     * it, so a total has no route in. Keep it that way — if a PO endpoint ever
+     * starts binding PurchaseOrderEntity from the body, it must null the three
+     * money fields on entry the way InvoiceService.clearClientTotals does.
+     */
+    private void applyTotals(PurchaseOrderEntity po, BigDecimal exactTotal) {
+        MoneyRounding.RoundedTotal totals = MoneyRounding.auto(exactTotal);
+        po.setExactTotal(totals.exactTotal());
+        po.setRoundOff(totals.roundOff());
+        po.setTotalValue(totals.finalTotal());
+    }
+
     private BigDecimal safeToBigDecimal(Object value) {
         return safeToBigDecimal(value, BigDecimal.ZERO);
     }

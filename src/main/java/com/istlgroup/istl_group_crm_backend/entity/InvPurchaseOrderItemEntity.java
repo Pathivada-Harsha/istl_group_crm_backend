@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.entity;
 
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import com.fasterxml.jackson.annotation.JsonBackReference;
 import jakarta.persistence.*;
 import lombok.*;
@@ -69,14 +70,17 @@ public class InvPurchaseOrderItemEntity {
 
     @Transient
     public BigDecimal getSubtotal() {
-        return (orderedQty == null ? BigDecimal.ZERO : orderedQty)
-            .multiply(rate == null ? BigDecimal.ZERO : rate);
+        return MoneyRounding.money((orderedQty == null ? BigDecimal.ZERO : orderedQty)
+            .multiply(rate == null ? BigDecimal.ZERO : rate));
     }
 
     @Transient
     public BigDecimal getTaxAmount() {
-        if (taxPct == null || taxPct.compareTo(BigDecimal.ZERO) == 0) return BigDecimal.ZERO;
-        return getSubtotal().multiply(taxPct).divide(new BigDecimal("100"));
+        // percentOf, not a bare divide(new BigDecimal("100")). The bare form did
+        // not throw — the quotient always terminates — but it returned a value
+        // carried to the sum of the operand scales, which made the pre-round total
+        // an over-precise number for the round-off to be measured against.
+        return MoneyRounding.percentOf(getSubtotal(), taxPct);
     }
 
     @Transient

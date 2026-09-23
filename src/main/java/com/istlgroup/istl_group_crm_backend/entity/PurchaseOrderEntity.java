@@ -91,6 +91,18 @@ public class PurchaseOrderEntity {
     
     @Column(name = "total_value", precision = 18, scale = 6)
     private BigDecimal totalValue;
+
+    // -- Round off ------------------------------------------------------------
+    //  total_value above is the FINAL total, rounded to the nearest whole rupee.
+    //  These two record what it came to before rounding and how far it moved, so
+    //  a screen or a PDF can show the Round Off line without recomputing it.
+    //  Both are null on a document that predates the feature; MoneyRounding
+    //  .ofStored() reads that as "this total was never rounded".
+    @Column(name = "exact_total", precision = 18, scale = 6)
+    private BigDecimal exactTotal;
+
+    @Column(name = "round_off", precision = 6, scale = 2)
+    private BigDecimal roundOff;
     
     @Column(name = "total_items_ordered")
     private Integer totalItemsOrdered;

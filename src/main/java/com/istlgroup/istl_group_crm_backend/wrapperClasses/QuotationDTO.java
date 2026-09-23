@@ -30,7 +30,14 @@ public class QuotationDTO {
     private String type;
     private String status;
     private LocalDate validTill;
+    /** The FINAL total, after round-off. */
     private BigDecimal totalValue;
+
+    /** The total before round-off. */
+    private BigDecimal exactTotal;
+
+    /** The round-off, in [-1.00, +1.00]. */
+    private BigDecimal roundOff;
     private Long preparedBy;
     private String groupName;
     private String subGroupName;

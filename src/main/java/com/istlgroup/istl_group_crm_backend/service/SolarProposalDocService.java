@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
@@ -326,6 +327,8 @@ public class SolarProposalDocService {
 
         // Keep the tracked record in step: its version mirrors the latest file.
         proposal.setVersion(version);
+        proposal.setExactTotal(money.exactTotal);
+        proposal.setRoundOff(money.roundOff());
         proposal.setTotalValue(money.total);
         if (req.getTitle() != null && !req.getTitle().isBlank()) proposal.setTitle(req.getTitle().trim());
         proposalsRepo.save(proposal);
@@ -449,7 +452,15 @@ public class SolarProposalDocService {
             Map<String, Object> payload = latestPayload(proposalId);
             if (payload != null) {
                 BigDecimal total = decimal(payload.get("totalCost"));
-                if (total != null && total.signum() > 0) proposal.setTotalValue(total);
+                // totalCost in the stored payload is the pre-round figure the
+                // preparer confirmed, so it is the exact total and the rounding is
+                // re-applied on top — the same answer Money.of gives it.
+                if (total != null && total.signum() > 0) {
+                    MoneyRounding.RoundedTotal t = MoneyRounding.auto(total);
+                    proposal.setExactTotal(t.exactTotal());
+                    proposal.setRoundOff(t.roundOff());
+                    proposal.setTotalValue(t.finalTotal());
+                }
                 Object t = payload.get("title");
                 if (t != null && !String.valueOf(t).isBlank()) proposal.setTitle(String.valueOf(t).trim());
             }
@@ -625,9 +636,23 @@ public class SolarProposalDocService {
         final BigDecimal gst;
         final BigDecimal total;
         final BigDecimal gstPercent;
+        /**
+         * The total before it was rounded to the whole rupee, which is what the
+         * proposal's exact_total column records. This class has always rounded —
+         * it predates the round-off feature — so the pre-round figure is kept
+         * rather than the rounding being applied a second time on top.
+         */
+        final BigDecimal exactTotal;
 
-        private Money(BigDecimal base, BigDecimal gst, BigDecimal total, BigDecimal gstPercent) {
-            this.base = base; this.gst = gst; this.total = total; this.gstPercent = gstPercent;
+        private Money(BigDecimal base, BigDecimal gst, BigDecimal total,
+                      BigDecimal gstPercent, BigDecimal exactTotal) {
+            this.base = base; this.gst = gst; this.total = total;
+            this.gstPercent = gstPercent; this.exactTotal = exactTotal;
+        }
+
+        /** total - exactTotal, i.e. the document's round-off. */
+        BigDecimal roundOff() {
+            return total.setScale(2).subtract(exactTotal);
         }
 
         static Money of(BigDecimal base, BigDecimal gstPercent, BigDecimal total) {
@@ -636,11 +661,13 @@ public class SolarProposalDocService {
             if (total != null && total.signum() > 0) {
                 BigDecimal t = total.setScale(0, RoundingMode.HALF_UP);
                 BigDecimal b = t.divide(factor, 0, RoundingMode.HALF_UP);
-                return new Money(b, t.subtract(b), t, pct);
+                return new Money(b, t.subtract(b), t, pct, MoneyRounding.money(total));
             }
+            BigDecimal exact = MoneyRounding.money(
+                    (base == null ? BigDecimal.ZERO : base).multiply(factor));
             BigDecimal b = base == null ? BigDecimal.ZERO : base.setScale(0, RoundingMode.HALF_UP);
             BigDecimal t = b.multiply(factor).setScale(0, RoundingMode.HALF_UP);
-            return new Money(b, t.subtract(b), t, pct);
+            return new Money(b, t.subtract(b), t, pct, exact);
         }
     }
 

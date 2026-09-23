@@ -1,6 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.PoDocumentRequest;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.PoDocumentRequest.PoLineItem;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.PoDocumentRequest.PoAdjustmentLine;
@@ -19,6 +20,8 @@ import com.itextpdf.layout.borders.SolidBorder;
 import com.itextpdf.layout.element.*;
 import com.itextpdf.layout.properties.TextAlignment;
 import com.itextpdf.layout.properties.UnitValue;
+
+import java.math.BigDecimal;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.ClassPathResource;
@@ -346,6 +349,21 @@ public class PurchaseOrderPdfService {
             sNo++;
         }
 
+        // ── Summary block: Subtotal, GST per rate, adjustments, Round Off, Total ──
+        //
+        // Every figure below is derived HERE, from the line items, rather than
+        // taken from the payload's own gstAmount/totalAmount. Two reasons: the
+        // rows then genuinely add up to the total printed under them, and with no
+        // adjustment lines the result is the same arithmetic
+        // PurchaseOrderService uses, so the printed total equals the saved
+        // purchase_orders.total_value.
+        BigDecimal subtotal = BigDecimal.ZERO;
+        for (PoLineItem it : items) {
+            subtotal = subtotal.add(MoneyRounding.money(
+                    it.getAmount() == null ? BigDecimal.ZERO : BigDecimal.valueOf(it.getAmount())));
+        }
+        addSpanSummaryRow(t, b, normal, bold, "Subtotal", money(subtotal.doubleValue()));
+
         // GST rows — grouped by rate: one "GST @ x%" row per distinct rate present.
         java.util.Map<Double, Double> gstGroups = new java.util.TreeMap<>();
         for (PoLineItem it : items) {
@@ -354,21 +372,33 @@ public class PurchaseOrderPdfService {
                     : (it.getAmount() != null ? it.getAmount() : 0) * it.getGstPercent() / 100;
             gstGroups.merge(it.getGstPercent(), amt, Double::sum);
         }
+        BigDecimal gstTotal = BigDecimal.ZERO;
         if (!gstGroups.isEmpty()) {
-            gstGroups.forEach((pct, amt) ->
-                    addSpanSummaryRow(t, b, normal, bold, "GST @ " + trimNum(pct) + "%", money(amt)));
+            for (java.util.Map.Entry<Double, Double> g : gstGroups.entrySet()) {
+                BigDecimal amt = MoneyRounding.money(BigDecimal.valueOf(g.getValue()));
+                gstTotal = gstTotal.add(amt);
+                addSpanSummaryRow(t, b, normal, bold,
+                        "GST @ " + trimNum(g.getKey()) + "%", money(amt.doubleValue()));
+            }
         } else {
             // Backward-compat: old single-rate payloads with only top-level GST.
+            gstTotal = MoneyRounding.money(
+                    r.getGstAmount() == null ? BigDecimal.ZERO : BigDecimal.valueOf(r.getGstAmount()));
             addSpanSummaryRow(t, b, normal, bold,
-                    "GST" + (r.getGstPercent() != null ? " " + trimNum(r.getGstPercent()) + "%" : ""), money(r.getGstAmount()));
+                    "GST" + (r.getGstPercent() != null ? " " + trimNum(r.getGstPercent()) + "%" : ""),
+                    money(gstTotal.doubleValue()));
         }
-        // Total row
-        addSpanSummaryRow(t, b, normal, bold, "Total Amount", money(r.getTotalAmount()));
 
-        // Optional adjustments (label spans description, amount in last col)
+        // Optional adjustments (label spans description, amount in last col).
+        //
+        // These print ABOVE the total, because they are part of it. They used to
+        // print below it, which read as though the total excluded them.
+        BigDecimal adjustmentTotal = BigDecimal.ZERO;
         if (r.getAdjustments() != null) {
             for (PoAdjustmentLine adj : r.getAdjustments()) {
                 if (adj == null || (!notBlank(adj.getLabel()) && adj.getAmount() == null)) continue;
+                adjustmentTotal = adjustmentTotal.add(MoneyRounding.money(
+                        adj.getAmount() == null ? BigDecimal.ZERO : BigDecimal.valueOf(adj.getAmount())));
                 t.addCell(cell("", normal, b, TextAlignment.CENTER));
                 t.addCell(cell(nz(adj.getLabel()), normal, b, TextAlignment.LEFT));
                 t.addCell(cell("", normal, b, TextAlignment.CENTER));
@@ -377,6 +407,23 @@ public class PurchaseOrderPdfService {
                 t.addCell(cell(money(adj.getAmount()), normal, b, TextAlignment.RIGHT));
             }
         }
+
+        // Round off LAST, over subtotal + GST + adjustments. An adjustment is a
+        // deliberate change to what is payable, so it belongs inside the figure
+        // being rounded — rounding before it would leave a total off the rupee.
+        MoneyRounding.RoundedTotal totals =
+                MoneyRounding.auto(subtotal.add(gstTotal).add(adjustmentTotal));
+
+        // Suppressed at zero, so a PO that already lands on a whole rupee — and
+        // every PO whose document is regenerated from an older payload — does not
+        // print a meaningless "0.00" line.
+        if (totals.roundOff().signum() != 0) {
+            addSpanSummaryRow(t, b, normal, bold, "Round Off",
+                    signedMoney(totals.roundOff()));
+        }
+
+        // Total row
+        addSpanSummaryRow(t, b, normal, bold, "Total Amount", money(totals.finalTotal().doubleValue()));
         // Let the pricing table flow across pages when there are many items.
         // Header cells (addHeaderCell) repeat automatically on each continuation page.
         doc.add(t.setMarginBottom(6));
@@ -460,6 +507,16 @@ public class PurchaseOrderPdfService {
     private static boolean notBlank(String s) { return s != null && !s.trim().isEmpty(); }
     private static String nz(String s) { return s == null ? "" : s; }
     private static String defIfBlank(String s, String d) { return notBlank(s) ? s : d; }
+    /**
+     * A round-off is signed, and a bare "0.49" on a deduction reads as a typo.
+     * Always two decimals: a round-off is by definition sub-rupee, so the
+     * whole-number branch in money() would print it as "0" or "1".
+     */
+    private static String signedMoney(BigDecimal v) {
+        if (v == null || v.signum() == 0) return "0.00";
+        return (v.signum() > 0 ? "+" : "-") + MONEY2.format(v.abs());
+    }
+
     private static String money(Double v) {
         if (v == null) return "";
         // Preserve decimals when present (e.g. 1234.56 → "1,234.56"); keep whole amounts clean (1000 → "1,000").

@@ -30,9 +30,19 @@ public class InvBillWrapper {
     private String projectId;
     private LocalDate  billDate;
     private LocalDate  dueDate;
+    /** The FINAL total, after round-off. Ignored on the way in. */
     private BigDecimal totalAmount;
     private BigDecimal paidAmount;
     private BigDecimal balanceAmount;
+
+    /** The total before round-off. Output only. */
+    private BigDecimal exactTotal;
+
+    /**
+     * The round-off, in [-1.00, +1.00]. Read on the way IN: an inventory bill is
+     * incoming, so the user may nudge the automatic value onto the vendor figure.
+     */
+    private BigDecimal roundOff;
     private String     status;
     private String     notes;
     private Long       createdBy;
@@ -95,6 +105,8 @@ public class InvBillWrapper {
             .billDate(e.getBillDate())
             .dueDate(e.getDueDate())
             .totalAmount(e.getTotalAmount())
+            .exactTotal(e.getExactTotal())
+            .roundOff(e.getRoundOff())
             .paidAmount(e.getPaidAmount() != null ? e.getPaidAmount() : BigDecimal.ZERO)
             .balanceAmount(e.getBalanceAmount())
             .status(e.getStatus())

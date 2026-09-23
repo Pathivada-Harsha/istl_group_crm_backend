@@ -1,5 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
+import java.math.BigDecimal;
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.ProposalsEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
@@ -65,6 +67,30 @@ public class ProposalsService {
     private static final String PERM_PROPOSALS_EDIT = "proposals.edit";
 
     private static final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+
+    /**
+     * The only writer of a proposal's three money values.
+     *
+     * A proposal is the one document whose total is NOT derived from line items,
+     * and deliberately so. The figure is typed by hand on the commercial screen,
+     * while the priceable detail lives partly in proposal_items and partly in the
+     * raw JSON of proposals.system_pricing / proposals.bom_items, which is what
+     * the generated document actually renders from. Recomputing from items would
+     * overwrite a deliberately negotiated number, and would store zero for every
+     * proposal whose pricing exists only in the JSON.
+     *
+     * So what the user typed is taken as the EXACT total and only the rounding is
+     * applied on top. Rounding a quote by up to a rupee is not a commercial
+     * change, and the solar document path has always done exactly this — see
+     * SolarProposalDocService.Money.of, which produces a whole-rupee total with
+     * the GST as its residual.
+     */
+    private void applyTotals(ProposalsEntity proposal, BigDecimal typedTotal) {
+        MoneyRounding.RoundedTotal totals = MoneyRounding.auto(typedTotal);
+        proposal.setExactTotal(totals.exactTotal());
+        proposal.setRoundOff(totals.roundOff());
+        proposal.setTotalValue(totals.finalTotal());
+    }
 
     // ── Visibility helper (same level logic as LeadsService) ─────────────────
     private List<Long> resolveTeamMemberIds(Long userId) {
@@ -198,7 +224,7 @@ public class ProposalsService {
         proposal.setDescription(requestWrapper.getDescription());
         proposal.setPreparedBy(userId);
         proposal.setStatus(requestWrapper.getStatus() != null ? requestWrapper.getStatus() : "Draft");
-        proposal.setTotalValue(requestWrapper.getTotalValue());
+        applyTotals(proposal, requestWrapper.getTotalValue());
         proposal.setGroupName(requestWrapper.getGroupName());
         proposal.setSubGroupName(requestWrapper.getSubGroupName());
         proposal.setCompanyName(requestWrapper.getCompanyName() != null ?
@@ -233,7 +259,7 @@ public class ProposalsService {
         if (requestWrapper.getTitle()                != null) proposal.setTitle(requestWrapper.getTitle());
         if (requestWrapper.getDescription()          != null) proposal.setDescription(requestWrapper.getDescription());
         if (requestWrapper.getStatus()               != null) proposal.setStatus(requestWrapper.getStatus());
-        if (requestWrapper.getTotalValue()           != null) proposal.setTotalValue(requestWrapper.getTotalValue());
+        if (requestWrapper.getTotalValue()           != null) applyTotals(proposal, requestWrapper.getTotalValue());
         if (requestWrapper.getGroupName()            != null) proposal.setGroupName(requestWrapper.getGroupName());
         if (requestWrapper.getSubGroupName()         != null) proposal.setSubGroupName(requestWrapper.getSubGroupName());
         if (requestWrapper.getCompanyName()          != null) proposal.setCompanyName(requestWrapper.getCompanyName());
@@ -412,6 +438,8 @@ public class ProposalsService {
             dto.put("title",       proposal.getTitle());
             dto.put("status",      proposal.getStatus());
             dto.put("totalValue",  proposal.getTotalValue());
+            dto.put("exactTotal",  proposal.getExactTotal());
+            dto.put("roundOff",    proposal.getRoundOff());
             dto.put("createdAt",   proposal.getCreatedAt());
             result.add(dto);
         }
@@ -505,6 +533,8 @@ public class ProposalsService {
         wrapper.setVersion(entity.getVersion());
         wrapper.setStatus(entity.getStatus());
         wrapper.setTotalValue(entity.getTotalValue());
+        wrapper.setExactTotal(entity.getExactTotal());
+        wrapper.setRoundOff(entity.getRoundOff());
         wrapper.setGroupName(entity.getGroupName());
         wrapper.setSubGroupName(entity.getSubGroupName());
         wrapper.setCompanyName(entity.getCompanyName());

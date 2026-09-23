@@ -37,6 +37,13 @@ public class ProjectExpenseRequest {
     // ── Line items ────────────────────────────────────────────────────────────
     private List<ExpenseItemRequest> expenseItems;
 
+    /**
+     * The round-off on the claim total, in [-1.00, +1.00]; null rounds
+     * automatically. There is deliberately still no total field on this request —
+     * the total is the sum of the items, and only this adjustment is the user's.
+     */
+    private BigDecimal roundOff;
+
     @Data
     public static class ExpenseItemRequest {
         private String     category;

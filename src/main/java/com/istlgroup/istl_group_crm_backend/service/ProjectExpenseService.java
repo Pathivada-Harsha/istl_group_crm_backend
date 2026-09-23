@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.*;
 import com.istlgroup.istl_group_crm_backend.entity.*;
@@ -64,11 +65,14 @@ public class ProjectExpenseService {
         // constraint until the real id is available after the first flush.
         final String TEMP_CODE = "__PENDING_" + System.nanoTime() + "__";
 
-        // Calculate total from all items
-        BigDecimal total = request.getExpenseItems() == null ? BigDecimal.ZERO :
+        // Calculate total from all items. Expense items are flat amounts with no
+        // tax, so the round-off is a pure header adjustment.
+        BigDecimal exactTotal = request.getExpenseItems() == null ? BigDecimal.ZERO :
             request.getExpenseItems().stream()
                 .map(i -> i.getAmount() != null ? i.getAmount() : BigDecimal.ZERO)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
+        MoneyRounding.RoundedTotal totals =
+            MoneyRounding.withOverride(exactTotal, request.getRoundOff());
 
         // ── Resolve the reporting manager (Stage 1 approver) from the creator ──
         Long   managerId   = null;
@@ -88,7 +92,9 @@ public class ProjectExpenseService {
             .subGroupName(request.getSubGroupName())
             .tripDate(request.getTripDate())
             .tripReason(request.getTripReason())
-            .totalAmount(total)
+            .totalAmount(totals.finalTotal())
+            .exactTotal(totals.exactTotal())
+            .roundOff(totals.roundOff())
             .paidByUserId(request.getPaidByUserId())
             .paidByName(request.getPaidByName())
             .status("Pending")
@@ -290,10 +296,14 @@ public class ProjectExpenseService {
                 item.setDescription(itemReq.getDescription());
                 expense.getExpenseItems().add(item);
             }
-            BigDecimal newTotal = expense.getExpenseItems().stream()
+            BigDecimal newExactTotal = expense.getExpenseItems().stream()
                 .map(i -> i.getAmount() != null ? i.getAmount() : BigDecimal.ZERO)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
-            expense.setTotalAmount(newTotal);
+            MoneyRounding.RoundedTotal newTotals =
+                MoneyRounding.withOverride(newExactTotal, request.getRoundOff());
+            expense.setExactTotal(newTotals.exactTotal());
+            expense.setRoundOff(newTotals.roundOff());
+            expense.setTotalAmount(newTotals.finalTotal());
         }
 
         ProjectExpense saved = expenseRepo.save(expense);
@@ -1123,6 +1133,8 @@ public class ProjectExpenseService {
             .tripDate(e.getTripDate())
             .tripReason(e.getTripReason())
             .totalAmount(e.getTotalAmount())
+            .exactTotal(e.getExactTotal())
+            .roundOff(e.getRoundOff())
             .paidByUserId(e.getPaidByUserId())
             .paidByName(resolvedPaidByName)
             .status(e.getStatus())

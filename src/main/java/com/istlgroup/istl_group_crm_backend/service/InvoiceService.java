@@ -31,7 +31,6 @@ import com.istlgroup.istl_group_crm_backend.repo.OrderBookItemRepo;
 import com.istlgroup.istl_group_crm_backend.entity.OrderBookEntity;
 import com.istlgroup.istl_group_crm_backend.entity.OrderBookItemEntity;
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -258,6 +257,11 @@ public class InvoiceService {
         try {
             log.info("Creating invoice for user: {} role: {}", userId, userRole);
 
+            // The controller binds InvoiceEntity straight off the request body, so
+            // a client can post its own totals. Discard them: applyTotals() below
+            // recomputes all three from the line items.
+            clearClientTotals(invoice);
+
             // Invoice number is derived from the DB-generated id (see below).
             // Use a temp placeholder to satisfy any NOT NULL constraint.
             invoice.setInvoiceNo("__TEMP_INV_" + System.nanoTime() + "__");
@@ -307,9 +311,13 @@ public class InvoiceService {
             // Clear items to prevent cascade issues
             invoice.setItems(new ArrayList<>());
 
-            // Calculate total
-            BigDecimal totalAmount = calculateTotalAmount(itemsToSave);
-            invoice.setTotalAmount(totalAmount);
+            // Calculate total.
+            // Defaults are applied FIRST, deliberately: they used to be applied
+            // further down, after the total had already been summed, so an item
+            // posted without a tax percent was totalled at 0% and then stored at
+            // 18% — the saved invoice disagreed with its own line items.
+            normaliseItems(itemsToSave);
+            applyTotals(invoice, itemsToSave);
 
             // Save invoice — DB assigns auto-increment id
             InvoiceEntity savedInvoice = invoiceRepository.save(invoice);
@@ -328,9 +336,6 @@ public class InvoiceService {
             if (!itemsToSave.isEmpty()) {
                 for (InvoiceItemEntity item : itemsToSave) {
                     item.setInvoice(savedInvoice);
-                    if (item.getQuantity() == null) item.setQuantity(BigDecimal.ONE);
-                    if (item.getUnitPrice() == null) item.setUnitPrice(BigDecimal.ZERO);
-                    if (item.getTaxPercent() == null) item.setTaxPercent(BigDecimal.valueOf(18));
                 }
 
                 List<InvoiceItemEntity> savedItems = invoiceItemRepository.saveAll(itemsToSave);
@@ -488,6 +493,11 @@ public class InvoiceService {
     public InvoiceEntity updateInvoice(Long id, InvoiceEntity updatedInvoice) {
         InvoiceEntity existing = getInvoiceById(id);
 
+        // Body-bound entity again — ignore any totals the client sent. Note this
+        // clears them on the INCOMING object, never on `existing`, so an update
+        // that omits items leaves the stored trio untouched.
+        clearClientTotals(updatedInvoice);
+
         // Capture old project before changing it
         String oldInvoiceProjectId = existing.getProjectId();
 
@@ -512,19 +522,18 @@ public class InvoiceService {
             // Sync order book items that were on the old invoice (decrement)
             syncOrderBookItemInvoicedQty(oldItems);
             
+            normaliseItems(updatedInvoice.getItems());
             for (InvoiceItemEntity item : updatedInvoice.getItems()) {
                 item.setInvoice(existing);
-                if (item.getQuantity() == null) item.setQuantity(BigDecimal.ONE);
-                if (item.getUnitPrice() == null) item.setUnitPrice(BigDecimal.ZERO);
-                if (item.getTaxPercent() == null) item.setTaxPercent(BigDecimal.valueOf(18));
             }
             List<InvoiceItemEntity> savedItems = invoiceItemRepository.saveAll(updatedInvoice.getItems());
             // Sync order book items with new quantities
             syncOrderBookItemInvoicedQty(savedItems);
             
-            // Recalculate total
-            BigDecimal totalAmount = calculateTotalAmount(updatedInvoice.getItems());
-            existing.setTotalAmount(totalAmount);
+            // Recalculate total. Only inside this branch: when the caller omits
+            // items entirely the stored total, exact total and round-off must all
+            // be left exactly as they were.
+            applyTotals(existing, updatedInvoice.getItems());
         }
         
         existing.setUpdatedAt(LocalDateTime.now());
@@ -1352,22 +1361,45 @@ public class InvoiceService {
 //        throw new RuntimeException("Failed to generate unique invoice number after " + maxAttempts + " attempts");
 //    }
     
-    private BigDecimal calculateTotalAmount(List<InvoiceItemEntity> items) {
-        BigDecimal total = BigDecimal.ZERO;
-        
+    /**
+     * Drops any total, exact total or round-off that arrived from the browser.
+     *
+     * An invoice's money is derived from its line items on the server and nowhere
+     * else. balance_amount needs no clearing — it is a generated column, mapped
+     * insertable=false/updatable=false.
+     */
+    private void clearClientTotals(InvoiceEntity invoice) {
+        if (invoice == null) return;
+        invoice.setTotalAmount(null);
+        invoice.setExactTotal(null);
+        invoice.setRoundOff(null);
+    }
+
+    /**
+     * Fills in the per-item defaults the DB expects, before anything totals them.
+     */
+    private void normaliseItems(List<InvoiceItemEntity> items) {
+        if (items == null) return;
         for (InvoiceItemEntity item : items) {
-            BigDecimal quantity = item.getQuantity() != null ? item.getQuantity() : BigDecimal.ONE;
-            BigDecimal unitPrice = item.getUnitPrice() != null ? item.getUnitPrice() : BigDecimal.ZERO;
-            BigDecimal taxPercent = item.getTaxPercent() != null ? item.getTaxPercent() : BigDecimal.ZERO;
-            
-            BigDecimal lineSubtotal = quantity.multiply(unitPrice);
-            BigDecimal taxAmount = lineSubtotal.multiply(taxPercent)
-                .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-            
-            total = total.add(lineSubtotal).add(taxAmount);
+            if (item.getQuantity() == null) item.setQuantity(BigDecimal.ONE);
+            if (item.getUnitPrice() == null) item.setUnitPrice(BigDecimal.ZERO);
+            if (item.getTaxPercent() == null) item.setTaxPercent(BigDecimal.valueOf(18));
         }
-        
-        return total.setScale(2, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * The only writer of an invoice's three money values.
+     *
+     * Invoices are an outgoing document, so the round-off is automatic and any
+     * total or round-off that arrived on the request body is ignored — the items
+     * are the only input. The formula lives in InvoiceTotals so that the PDF
+     * renders the same numbers instead of deriving its own.
+     */
+    private void applyTotals(InvoiceEntity invoice, List<InvoiceItemEntity> items) {
+        InvoiceTotals.Totals totals = InvoiceTotals.of(items);
+        invoice.setExactTotal(totals.exactTotal());
+        invoice.setRoundOff(totals.roundOff());
+        invoice.setTotalAmount(totals.finalTotal());
     }
 
     // Stats inner class

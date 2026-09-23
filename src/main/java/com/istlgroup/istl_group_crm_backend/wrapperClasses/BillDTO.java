@@ -40,9 +40,20 @@ public class BillDTO {
     private LocalDate dueDate;
     
     // Amounts
+    /** The FINAL total, after round-off. Output only — never read on the way in. */
     private BigDecimal totalAmount;
     private BigDecimal paidAmount;
     private BigDecimal balanceAmount;
+
+    /** The total before round-off. Output only. */
+    private BigDecimal exactTotal;
+
+    /**
+     * The round-off, in [-1.00, +1.00]. The one money field on this DTO that IS
+     * read on the way in: a vendor bill is incoming, so the user may nudge the
+     * automatic value to match the figure the vendor printed.
+     */
+    private BigDecimal roundOff;
     
     // Status
     private String status;

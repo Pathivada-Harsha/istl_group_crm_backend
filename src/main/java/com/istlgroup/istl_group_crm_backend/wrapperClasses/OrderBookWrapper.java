@@ -47,8 +47,15 @@ public class OrderBookWrapper {
 
     // Financial
     private BigDecimal subtotal;
+    /** Taxable value and GST, both EXACT — the round-off is not in either. */
     private BigDecimal taxAmount;
+
+    /** The FINAL total, after round-off. */
     private BigDecimal totalAmount;
+
+    /** The total before round-off, and the adjustment applied to it. */
+    private BigDecimal exactTotal;
+    private BigDecimal roundOff;
     private BigDecimal advanceAmount;
     private BigDecimal balanceAmount;
 

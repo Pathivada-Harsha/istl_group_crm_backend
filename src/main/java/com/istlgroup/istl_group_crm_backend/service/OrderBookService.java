@@ -29,6 +29,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.CustomersEntity;
 import com.istlgroup.istl_group_crm_backend.entity.DropdownProjectEntity;
@@ -966,12 +967,15 @@ public class OrderBookService {
         BigDecimal grandTotal = BigDecimal.ZERO;
 
         for (OrderBookItemEntity item : items) {
-            BigDecimal itemSubtotal = item.getQuantity().multiply(item.getUnitPrice());
-            BigDecimal itemDiscount = itemSubtotal.multiply(item.getDiscountPercent())
-                                        .divide(new BigDecimal("100"));
+            // percentOf replaces a bare divide(new BigDecimal("100")). The bare
+            // form did not throw, but it returned a quotient carried to the sum of
+            // the operand scales, which made the pre-round total an over-precise
+            // figure for the round-off to be measured against.
+            BigDecimal itemSubtotal = MoneyRounding.money(
+                                        item.getQuantity().multiply(item.getUnitPrice()));
+            BigDecimal itemDiscount = MoneyRounding.percentOf(itemSubtotal, item.getDiscountPercent());
             BigDecimal itemTaxable  = itemSubtotal.subtract(itemDiscount);
-            BigDecimal itemTax      = itemTaxable.multiply(item.getTaxPercent())
-                                        .divide(new BigDecimal("100"));
+            BigDecimal itemTax      = MoneyRounding.percentOf(itemTaxable, item.getTaxPercent());
             BigDecimal itemTotal    = itemTaxable.add(itemTax);
 
             subtotal   = subtotal.add(itemSubtotal);
@@ -979,11 +983,22 @@ public class OrderBookService {
             grandTotal = grandTotal.add(itemTotal);
         }
 
+        // Order book is an outgoing document: the round-off is automatic, and
+        // OrderBookRequestWrapper carries no total fields at all, so there is
+        // nothing client-sent to discard.
+        MoneyRounding.RoundedTotal totals = MoneyRounding.auto(grandTotal);
+
         OrderBookEntity orderBook = orderBookRepo.findById(orderBookId).get();
+        // subtotal and tax stay EXACT — they are taxable value and GST, and the
+        // round-off must never be folded into either.
         orderBook.setSubtotal(subtotal);
         orderBook.setTaxAmount(totalTax);
-        orderBook.setTotalAmount(grandTotal);
-        orderBook.setBalanceAmount(grandTotal.subtract(
+        orderBook.setExactTotal(totals.exactTotal());
+        orderBook.setRoundOff(totals.roundOff());
+        orderBook.setTotalAmount(totals.finalTotal());
+        // Balance comes off the ROUNDED total. Deriving it from the exact total
+        // would leave every order book up to a rupee out against its own total.
+        orderBook.setBalanceAmount(totals.finalTotal().subtract(
             orderBook.getAdvanceAmount() != null ? orderBook.getAdvanceAmount() : BigDecimal.ZERO));
         orderBookRepo.save(orderBook);
     }
@@ -1036,6 +1051,8 @@ public class OrderBookService {
         wrapper.setSubtotal(entity.getSubtotal());
         wrapper.setTaxAmount(entity.getTaxAmount());
         wrapper.setTotalAmount(entity.getTotalAmount());
+        wrapper.setExactTotal(entity.getExactTotal());
+        wrapper.setRoundOff(entity.getRoundOff());
         wrapper.setAdvanceAmount(entity.getAdvanceAmount());
         wrapper.setBalanceAmount(entity.getBalanceAmount());
         wrapper.setStatus(entity.getStatus());

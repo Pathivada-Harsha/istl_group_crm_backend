@@ -54,6 +54,18 @@ public class ProjectExpense {
     @Column(name = "total_amount", precision = 15, scale = 2)
     private BigDecimal totalAmount;
 
+    // -- Round off ------------------------------------------------------------
+    //  total_amount above is the FINAL total, rounded to the nearest whole rupee.
+    //  These two record what it came to before rounding and how far it moved, so
+    //  a screen or a PDF can show the Round Off line without recomputing it.
+    //  Both are null on a document that predates the feature; MoneyRounding
+    //  .ofStored() reads that as "this total was never rounded".
+    @Column(name = "exact_total", precision = 15, scale = 2)
+    private BigDecimal exactTotal;
+
+    @Column(name = "round_off", precision = 6, scale = 2)
+    private BigDecimal roundOff;
+
     // ── People ────────────────────────────────────────────────────────────────
     @Column(name = "paid_by_user_id")
     private Long paidByUserId;

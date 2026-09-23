@@ -19,7 +19,12 @@ public class ProposalWrapper {
     private String preparedByName;
     private Integer version;
     private String status;
+    /** The FINAL total, after round-off. */
     private BigDecimal totalValue;
+
+    /** The total before round-off, and the adjustment applied to it. */
+    private BigDecimal exactTotal;
+    private BigDecimal roundOff;
     private String groupName;
     private String subGroupName;
     

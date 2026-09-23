@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import com.istlgroup.istl_group_crm_backend.entity.*;
 import com.istlgroup.istl_group_crm_backend.repo.*;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.*;
@@ -118,7 +119,7 @@ public class InvPurchaseOrderService {
         entity.setItems(itemEntities);
         entity.setTotalItemsOrdered(itemEntities.size());
         entity.setTotalItemsReceived(0);
-        entity.setTotalValue(computeTotal(itemEntities));
+        applyTotals(entity, itemEntities);
 
         InvPurchaseOrderEntity saved = poRepository.saveAndFlush(entity);
 
@@ -323,7 +324,7 @@ public class InvPurchaseOrderService {
                 po.getItems().add(item);
             }
             po.setTotalItemsOrdered(po.getItems().size());
-            po.setTotalValue(computeTotal(po.getItems()));
+            applyTotals(po, po.getItems());
 
             // Recalculate PO status after items rebuilt (only if caller did not force a status)
             boolean anyRcv = po.getItems().stream().anyMatch(it -> it.getReceivedQty() != null && it.getReceivedQty().compareTo(BigDecimal.ZERO) > 0);
@@ -438,6 +439,20 @@ public class InvPurchaseOrderService {
         return items.stream()
             .map(InvPurchaseOrderItemEntity::getLineTotal)
             .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    /**
+     * The only writer of an inventory PO's three money values.
+     *
+     * Outgoing document, so the round-off is automatic. InvPurchaseOrderWrapper
+     * does expose a writable totalValue, but nothing reads it on the way in — the
+     * total has always been derived from the items here, and it stays that way.
+     */
+    private void applyTotals(InvPurchaseOrderEntity po, List<InvPurchaseOrderItemEntity> items) {
+        MoneyRounding.RoundedTotal totals = MoneyRounding.auto(computeTotal(items));
+        po.setExactTotal(totals.exactTotal());
+        po.setRoundOff(totals.roundOff());
+        po.setTotalValue(totals.finalTotal());
     }
 
     private Map<String, String> buildWarehouseNameMap(Set<Long> ids) {

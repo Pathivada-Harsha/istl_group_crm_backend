@@ -1,6 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.entity;
 
 
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -51,13 +52,20 @@ public class BillItemEntity {
     
     // Calculate tax amount
     public BigDecimal getTaxAmount() {
-        BigDecimal subtotal = quantity.multiply(unitPrice);
-        return subtotal.multiply(taxPercent).divide(BigDecimal.valueOf(100));
+        // percentOf, not a bare divide(BigDecimal.valueOf(100)) — see the note in
+        // MoneyRounding.percentOf. The null guards matter too: the fields default
+        // to ONE/ZERO but are settable to null, and this used to NPE on either.
+        return MoneyRounding.percentOf(getSubtotal(), taxPercent);
+    }
+
+    /** Quantity x unit price, to the paisa. */
+    public BigDecimal getSubtotal() {
+        return MoneyRounding.money((quantity == null ? BigDecimal.ZERO : quantity)
+                .multiply(unitPrice == null ? BigDecimal.ZERO : unitPrice));
     }
     
     // Calculate total with tax
     public BigDecimal getTotalWithTax() {
-        BigDecimal subtotal = quantity.multiply(unitPrice);
-        return subtotal.add(getTaxAmount());
+        return getSubtotal().add(getTaxAmount());
     }
 }

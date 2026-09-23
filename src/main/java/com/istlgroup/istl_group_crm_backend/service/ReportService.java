@@ -359,8 +359,20 @@ public class ReportService {
         BigDecimal additionalGST = invoiceGST.subtract(poGST);
 
         // ── Keep excl-GST values for display/reference ─────────────────────────
-        BigDecimal totalRevenueExclGST     = totalRevenue.subtract(invoiceGST);
-        BigDecimal totalProcurementExclGST = totalProcurement.subtract(poGST);
+        // Round-off comes out too, not just GST.
+        //
+        // totalRevenue and totalProcurement are sums of the stored FINAL totals, so
+        // each carries its document's round-off. Subtracting only the GST would
+        // leave that adjustment inside the taxable figure, which is exactly where
+        // it must never appear — round-off is not taxable value and does not belong
+        // in a tax return.
+        BigDecimal invoiceRoundOff = safeSum(invoices.stream()
+            .map(InvoiceEntity::getRoundOff).collect(Collectors.toList()));
+        BigDecimal billRoundOff = safeSum(bills.stream()
+            .map(BillEntity::getRoundOff).collect(Collectors.toList()));
+
+        BigDecimal totalRevenueExclGST     = totalRevenue.subtract(invoiceGST).subtract(invoiceRoundOff);
+        BigDecimal totalProcurementExclGST = totalProcurement.subtract(poGST).subtract(billRoundOff);
 
         // ── Cash-received basis (matching ProjectDashboardService formula) ──────
         // amountReceived = SUM of all receipts from client (advances + invoice payments)

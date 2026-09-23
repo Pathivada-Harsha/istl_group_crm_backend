@@ -34,6 +34,8 @@ public class QuotationMapper {
                 .status(entity.getStatus())
                 .validTill(entity.getValidTill())
                 .totalValue(entity.getTotalValue())
+                .exactTotal(entity.getExactTotal())
+                .roundOff(entity.getRoundOff())
                 .preparedBy(entity.getPreparedBy())
                 .groupName(entity.getGroupName())
                 .subGroupName(entity.getSubGroupName())

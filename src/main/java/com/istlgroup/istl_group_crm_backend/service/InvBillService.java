@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import com.istlgroup.istl_group_crm_backend.entity.*;
 import com.istlgroup.istl_group_crm_backend.repo.*;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.*;
@@ -74,11 +75,36 @@ public class InvBillService {
 
     // ── Create ────────────────────────────────────────────────────────────────
 
+    /** What one inventory-bill line comes to, including its tax. */
+    private BigDecimal lineTotal(BigDecimal qty, BigDecimal rate, BigDecimal taxPct) {
+        BigDecimal sub = MoneyRounding.money(
+                (qty == null ? BigDecimal.ZERO : qty).multiply(rate == null ? BigDecimal.ZERO : rate));
+        return sub.add(MoneyRounding.percentOf(sub, taxPct));
+    }
+
+    /**
+     * The only writer of an inventory bill's three money values.
+     *
+     * Incoming document, so the round-off is pre-filled automatically and the user
+     * may nudge it within a rupee; MoneyRounding rejects anything further out.
+     */
+    private void applyTotals(InvBillEntity bill, BigDecimal exactTotal, BigDecimal requestedRoundOff) {
+        MoneyRounding.RoundedTotal totals = MoneyRounding.withOverride(exactTotal, requestedRoundOff);
+        bill.setExactTotal(totals.exactTotal());
+        bill.setRoundOff(totals.roundOff());
+        bill.setTotalAmount(totals.finalTotal());
+    }
+
     @Transactional
     public InvBillWrapper create(InvBillWrapper req, Long createdBy) {
         if (req.getVendorName() == null || req.getVendorName().isBlank())
             throw new IllegalArgumentException("Vendor name is required");
-        if (req.getTotalAmount() == null || req.getTotalAmount().compareTo(BigDecimal.ZERO) <= 0)
+        // A bill with line items derives its own total, so the client need not send
+        // one — and if it does, it is ignored. Only a standalone bill, which has no
+        // lines to derive from, still requires the amount to be supplied.
+        boolean hasItems = req.getItems() != null && !req.getItems().isEmpty();
+        if (!hasItems && (req.getTotalAmount() == null
+                || req.getTotalAmount().compareTo(BigDecimal.ZERO) <= 0))
             throw new IllegalArgumentException("Total amount must be positive");
 
         // If linked to a PO, inherit scope fields from it when not explicitly provided
@@ -102,7 +128,9 @@ public class InvBillService {
             : (linkedPo != null ? linkedPo.getProjectId() : null));
         entity.setBillDate(req.getBillDate() != null ? req.getBillDate() : LocalDate.now());
         entity.setDueDate(req.getDueDate());
-        entity.setTotalAmount(req.getTotalAmount());
+        // The total is set once the items are built, below — this used to store
+        // req.getTotalAmount() verbatim and never look at the line items at all,
+        // so an inventory bill's total was whatever the browser happened to post.
         entity.setPaidAmount(BigDecimal.ZERO);
         entity.setStatus("UNPAID");
         entity.setNotes(req.getNotes());
@@ -126,6 +154,16 @@ public class InvBillService {
                 }).collect(Collectors.toList());
             entity.setItems(itemEntities);
         }
+
+        // Derive the total from the line items when there are any, exactly as the
+        // update path does. A standalone bill has no lines, so there the figure
+        // the user typed is the exact total and only the round-off goes on top.
+        BigDecimal exactTotal = hasItems
+                ? entity.getItems().stream()
+                        .map(ie -> lineTotal(ie.getQty(), ie.getRate(), ie.getTaxPct()))
+                        .reduce(BigDecimal.ZERO, BigDecimal::add)
+                : req.getTotalAmount();
+        applyTotals(entity, exactTotal, req.getRoundOff());
 
         InvBillEntity saved = billRepository.saveAndFlush(entity);
         String billNo = String.format("INV-BILL-%d-%05d", LocalDate.now().getYear(), saved.getId());
@@ -309,14 +347,12 @@ public class InvBillService {
                 item.setNotes(iw.getNotes());
                 e.getItems().add(item);
 
-                BigDecimal sub = qty.multiply(rate);
-                BigDecimal tax = sub.multiply(taxPct).divide(new BigDecimal("100"));
-                computedTotal = computedTotal.add(sub).add(tax);
+                computedTotal = computedTotal.add(lineTotal(qty, rate, taxPct));
             }
 
             // Update total from computed items (don't trust client-supplied total when items exist)
             if (computedTotal.compareTo(BigDecimal.ZERO) > 0) {
-                e.setTotalAmount(computedTotal);
+                applyTotals(e, computedTotal, req.getRoundOff());
             }
 
             // ── Adjust PO item receivedQty for the delta ──────────────────────
@@ -399,8 +435,10 @@ public class InvBillService {
             }
 
         } else if (!isPaid && req.getTotalAmount() != null && req.getTotalAmount().compareTo(BigDecimal.ZERO) > 0) {
-            // Standalone bill (no items) — allow amount change
-            e.setTotalAmount(req.getTotalAmount());
+            // Standalone bill (no items) — allow amount change. With no lines to
+            // derive from, the figure the user typed IS the exact total, and the
+            // round-off applies on top of it.
+            applyTotals(e, req.getTotalAmount(), req.getRoundOff());
         }
 
         e.recalculateStatus();

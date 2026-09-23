@@ -1,5 +1,6 @@
 package com.istlgroup.istl_group_crm_backend.service;
 
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import com.istlgroup.istl_group_crm_backend.entity.OrderBookEntity;
 import com.istlgroup.istl_group_crm_backend.entity.OrderBookItemEntity;
 import com.istlgroup.istl_group_crm_backend.entity.QuotationEntity;
@@ -201,7 +202,13 @@ public class QuotationService {
         List<Violation> bomWarnings = new ArrayList<>();
         try {
             log.info("Creating quotation for user: {}", userId);
-            
+
+            // The controller binds QuotationEntity straight from the body, so the
+            // user's round-off arrives ON the entity. Capture it before anything
+            // else touches the money fields. The total itself is always recomputed
+            // from the items, so whatever arrived there is discarded.
+            BigDecimal requestedRoundOff = quotation.getRoundOff();
+
             // Set metadata
             quotation.setPreparedBy(userId);
             quotation.setUploadedAt(LocalDateTime.now());
@@ -242,27 +249,9 @@ public class QuotationService {
             // Clear items from quotation to prevent cascade save
             quotation.setItems(new ArrayList<>());
             
-            // Calculate total value from items
-            BigDecimal totalValue = BigDecimal.ZERO;
-            if (!itemsToSave.isEmpty()) {
-                for (QuotationItemEntity item : itemsToSave) {
-                    // Ensure BigDecimal values are not null
-                    BigDecimal quantity = item.getQuantity() != null ? item.getQuantity() : BigDecimal.ONE;
-                    BigDecimal unitPrice = item.getUnitPrice() != null ? item.getUnitPrice() : BigDecimal.ZERO;
-                    BigDecimal taxPercent = item.getTaxPercent() != null ? item.getTaxPercent() : BigDecimal.ZERO;
-                    
-                    // Calculate line subtotal
-                    BigDecimal lineSubtotal = quantity.multiply(unitPrice);
-                    
-                    // Calculate tax amount
-                    BigDecimal taxAmount = lineSubtotal.multiply(taxPercent)
-                        .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-                    
-                    // Add to total
-                    totalValue = totalValue.add(lineSubtotal).add(taxAmount);
-                }
-            }
-            quotation.setTotalValue(totalValue.setScale(2, RoundingMode.HALF_UP));
+            // Calculate total value from items. This used to be a second, inline
+            // copy of calculateTotalValue's arithmetic; there is now one formula.
+            applyTotals(quotation, calculateTotalValue(itemsToSave), requestedRoundOff);
             
             // Save quotation FIRST — DB assigns auto-increment id
             QuotationEntity savedQuotation = quotationRepository.save(quotation);
@@ -381,7 +370,15 @@ public class QuotationService {
 
     List<Violation> bomWarnings = new ArrayList<>();
     QuotationEntity existing = getQuotationById(id);
-    
+
+    // Body-bound entity again — the user's round-off rides in on it.
+    //
+    // When the client omits it, this deliberately re-derives the automatic value
+    // rather than preserving whatever override is stored. Carrying a stale
+    // +/- 1.00 onto a different exact total would quietly change the total by an
+    // amount nobody asked for; the edit screen always round-trips the field.
+    BigDecimal requestedRoundOff = updatedQuotation.getRoundOff();
+
     // Update basic fields
     existing.setVendorId(updatedQuotation.getVendorId());
     existing.setVendorName(updatedQuotation.getVendorName());
@@ -471,9 +468,9 @@ public class QuotationService {
         }
         
         // Step 4: Recalculate total value
-        BigDecimal totalValue = calculateTotalValue(newItems);
-        existing.setTotalValue(totalValue);
-        log.info("💰 Recalculated total value: {}", totalValue);
+        applyTotals(existing, calculateTotalValue(newItems), requestedRoundOff);
+        log.info("💰 Recalculated total value: {} (round off {})",
+                existing.getTotalValue(), existing.getRoundOff());
     }
     
     // Save the updated quotation
@@ -757,6 +754,26 @@ public QuotationStats getStatistics(String groupName, String subGroupName, Strin
     }
 
     
+    /**
+     * The only writer of a vendor quotation's three money values.
+     *
+     * A quotation received from a vendor is an INCOMING document, so the round-off
+     * is pre-filled with the automatic value and the user may nudge it within a
+     * rupee to match the vendor's own figure. MoneyRounding rejects the rest.
+     *
+     * Note neither quotation path applies an item discount, while all the purchase
+     * order paths do. That asymmetry predates this change and is left alone here —
+     * consolidating the duplicated arithmetic just makes it visible in one place.
+     */
+    private void applyTotals(QuotationEntity quotation, BigDecimal exactTotal,
+                             BigDecimal requestedRoundOff) {
+        MoneyRounding.RoundedTotal totals =
+                MoneyRounding.withOverride(exactTotal, requestedRoundOff);
+        quotation.setExactTotal(totals.exactTotal());
+        quotation.setRoundOff(totals.roundOff());
+        quotation.setTotalValue(totals.finalTotal());
+    }
+
     private BigDecimal calculateTotalValue(List<QuotationItemEntity> items) {
     BigDecimal total = BigDecimal.ZERO;
     
@@ -765,10 +782,9 @@ public QuotationStats getStatistics(String groupName, String subGroupName, Strin
         BigDecimal unitPrice = item.getUnitPrice() != null ? item.getUnitPrice() : BigDecimal.ZERO;
         BigDecimal taxPercent = item.getTaxPercent() != null ? item.getTaxPercent() : BigDecimal.ZERO;
         
-        BigDecimal lineSubtotal = quantity.multiply(unitPrice);
-        BigDecimal taxAmount = lineSubtotal.multiply(taxPercent)
-            .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-        
+        BigDecimal lineSubtotal = MoneyRounding.money(quantity.multiply(unitPrice));
+        BigDecimal taxAmount = MoneyRounding.percentOf(lineSubtotal, taxPercent);
+
         total = total.add(lineSubtotal).add(taxAmount);
     }
     

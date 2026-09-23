@@ -4,6 +4,7 @@ import com.istlgroup.istl_group_crm_backend.entity.InvoiceEntity;
 import com.istlgroup.istl_group_crm_backend.entity.InvoiceItemEntity;
 import com.istlgroup.istl_group_crm_backend.entity.CustomersEntity;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
+import com.istlgroup.istl_group_crm_backend.util.MoneyRounding;
 import com.itextpdf.kernel.colors.ColorConstants;
 import com.itextpdf.kernel.colors.DeviceRgb;
 import com.itextpdf.kernel.font.PdfFont;
@@ -37,6 +38,15 @@ public class InvoicePdfService {
 
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("dd-MMM-yyyy");
     
+    // invoice_items has no hsn_code column, so every line prints the same HSN.
+    // Giving items their own HSN is a schema change and a separate piece of work;
+    // this at least names the assumption instead of leaving the literal buried in
+    // two different tables.
+    private static final String DEFAULT_HSN = "90283090";
+
+    /** Unit shown when a line carries none. */
+    private static final String DEFAULT_UNIT_TYPE = "Nos";
+
     // ISTL Company details
     private static final String ISTL_NAME = "ISCIENTIFIC TECHSOLUTIONS LABS PVT LTD";
     private static final String ISTL_ADDRESS = "133/1/B, 1st Floor, Phase II, IDA Cherlapally";
@@ -94,11 +104,17 @@ public class InvoicePdfService {
             // Add company and customer info
             addCompanyAndCustomerInfo(document, invoice, customer, bold, normal);
             
+            // The invoice's money, computed ONCE and shared by both sections below.
+            // ofStored() takes the three totals from the stored columns and rounds
+            // nothing, so this PDF cannot print a total the database disagrees
+            // with. Both sections used to derive their own, independently.
+            InvoiceTotals.Totals totals = InvoiceTotals.ofStored(invoice.getItems(), invoice);
+
             // Add items table (EXACT FORMAT FROM SAMPLE)
-            addItemsTableExact(document, invoice, bold, normal);
-            
+            addItemsTableExact(document, invoice, totals, bold, normal);
+
             // Add tax summary
-            addTaxSummaryExact(document, invoice, bold, normal);
+            addTaxSummaryExact(document, totals, bold, normal);
             
             // Add footer
             addFooter(document, invoice, bold, normal);
@@ -290,7 +306,8 @@ public class InvoicePdfService {
     /**
      * EXACT ITEMS TABLE FORMAT FROM SAMPLE
      */
-    private void addItemsTableExact(Document document, InvoiceEntity invoice, 
+    private void addItemsTableExact(Document document, InvoiceEntity invoice,
+                                    InvoiceTotals.Totals totals,
                                     PdfFont bold, PdfFont normal) {
         
         // Table with exact column structure from sample
@@ -307,75 +324,90 @@ public class InvoicePdfService {
         addTableHeader(itemsTable, "per", bold, TextAlignment.CENTER);
         addTableHeader(itemsTable, "Amount", bold, TextAlignment.CENTER);
 
-        // Calculate totals
-        BigDecimal subtotal = BigDecimal.ZERO;
-        BigDecimal totalQuantity = BigDecimal.ZERO;
-        
         int slNo = 1;
-        for (InvoiceItemEntity item : invoice.getItems()) {
+        for (InvoiceItemEntity item : safeItems(invoice)) {
             BigDecimal quantity = item.getQuantity() != null ? item.getQuantity() : BigDecimal.ONE;
             BigDecimal unitPrice = item.getUnitPrice() != null ? item.getUnitPrice() : BigDecimal.ZERO;
-            String unitType = item.getUnitType() != null ? item.getUnitType() : "Nos";
+            String unitType = item.getUnitType() != null ? item.getUnitType() : DEFAULT_UNIT_TYPE;
             BigDecimal lineAmount = quantity.multiply(unitPrice);
-            
-            subtotal = subtotal.add(lineAmount);
-            totalQuantity = totalQuantity.add(quantity);
 
             // Row data - exact format
             itemsTable.addCell(createDataCell(String.valueOf(slNo++), normal, TextAlignment.CENTER));
             itemsTable.addCell(createDataCell(item.getDescription() != null ? item.getDescription() : "", normal, TextAlignment.LEFT));
-            itemsTable.addCell(createDataCell("90283090", normal, TextAlignment.CENTER));
+            itemsTable.addCell(createDataCell(DEFAULT_HSN, normal, TextAlignment.CENTER));
             itemsTable.addCell(createDataCell(formatQuantity(quantity), normal, TextAlignment.RIGHT));
             itemsTable.addCell(createDataCell(formatAmount(unitPrice), normal, TextAlignment.RIGHT));
             itemsTable.addCell(createDataCell(unitType, normal, TextAlignment.CENTER));
             itemsTable.addCell(createDataCell(formatAmount(lineAmount), normal, TextAlignment.RIGHT));
         }
 
-        // Tax rows - exactly like sample
-        BigDecimal taxPercent = invoice.getItems().get(0).getTaxPercent() != null ? 
-                invoice.getItems().get(0).getTaxPercent() : BigDecimal.valueOf(18);
-        
-        BigDecimal cgstRate = taxPercent.divide(BigDecimal.valueOf(2), 2, RoundingMode.HALF_UP);
-        BigDecimal sgstRate = taxPercent.divide(BigDecimal.valueOf(2), 2, RoundingMode.HALF_UP);
-        
-        BigDecimal cgstAmount = subtotal.multiply(cgstRate).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-        BigDecimal sgstAmount = subtotal.multiply(sgstRate).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+        // Tax rows — one CGST row and one SGST row PER RATE.
+        //
+        // This used to read the rate off items.get(0) and apply it to the whole
+        // subtotal, so an invoice mixing 5% and 18% lines was taxed entirely at
+        // whichever rate happened to be first, and an invoice with no items threw
+        // IndexOutOfBoundsException. The rates and amounts now come from the same
+        // breakdown the stored total was built from.
+        for (InvoiceTotals.RateLine line : totals.byRate()) {
+            BigDecimal halfRate = line.halfRatePercent();
 
-        // CGST Row - with spacing exactly like sample
-        itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
-        
-        Cell cgstDescCell = new Cell(1, 2)
-                .add(new Paragraph("TG-CGST Output @ " + cgstRate.toPlainString() + "%").setFont(normal).setFontSize(8))
-                .setTextAlignment(TextAlignment.RIGHT)
-                .setVerticalAlignment(VerticalAlignment.MIDDLE)
-                .setPadding(5)
-                .setBorder(new SolidBorder(ColorConstants.BLACK, 0.5f));
-        itemsTable.addCell(cgstDescCell);
-        
-        itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
-        itemsTable.addCell(createDataCell(cgstRate.toPlainString() + " %", normal, TextAlignment.RIGHT));
-        itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
-        itemsTable.addCell(createDataCell(formatAmount(cgstAmount), normal, TextAlignment.RIGHT));
+            // CGST Row - with spacing exactly like sample
+            itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
 
-        // SGST Row
-        itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
-        
-        Cell sgstDescCell = new Cell(1, 2)
-                .add(new Paragraph("TG-SGST Output @ " + sgstRate.toPlainString() + "%").setFont(normal).setFontSize(8))
-                .setTextAlignment(TextAlignment.RIGHT)
-                .setVerticalAlignment(VerticalAlignment.MIDDLE)
-                .setPadding(5)
-                .setBorder(new SolidBorder(ColorConstants.BLACK, 0.5f));
-        itemsTable.addCell(sgstDescCell);
-        
-        itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
-        itemsTable.addCell(createDataCell(sgstRate.toPlainString() + " %", normal, TextAlignment.RIGHT));
-        itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
-        itemsTable.addCell(createDataCell(formatAmount(sgstAmount), normal, TextAlignment.RIGHT));
+            Cell cgstDescCell = new Cell(1, 2)
+                    .add(new Paragraph("TG-CGST Output @ " + halfRate.toPlainString() + "%").setFont(normal).setFontSize(8))
+                    .setTextAlignment(TextAlignment.RIGHT)
+                    .setVerticalAlignment(VerticalAlignment.MIDDLE)
+                    .setPadding(5)
+                    .setBorder(new SolidBorder(ColorConstants.BLACK, 0.5f));
+            itemsTable.addCell(cgstDescCell);
 
-        // Total Row - exact format
-        BigDecimal grandTotal = subtotal.add(cgstAmount).add(sgstAmount);
-        
+            itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
+            itemsTable.addCell(createDataCell(halfRate.toPlainString() + " %", normal, TextAlignment.RIGHT));
+            itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
+            itemsTable.addCell(createDataCell(formatAmount(line.cgst()), normal, TextAlignment.RIGHT));
+
+            // SGST Row
+            itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
+
+            Cell sgstDescCell = new Cell(1, 2)
+                    .add(new Paragraph("TG-SGST Output @ " + halfRate.toPlainString() + "%").setFont(normal).setFontSize(8))
+                    .setTextAlignment(TextAlignment.RIGHT)
+                    .setVerticalAlignment(VerticalAlignment.MIDDLE)
+                    .setPadding(5)
+                    .setBorder(new SolidBorder(ColorConstants.BLACK, 0.5f));
+            itemsTable.addCell(sgstDescCell);
+
+            itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
+            itemsTable.addCell(createDataCell(halfRate.toPlainString() + " %", normal, TextAlignment.RIGHT));
+            itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
+            itemsTable.addCell(createDataCell(formatAmount(line.sgst()), normal, TextAlignment.RIGHT));
+        }
+
+        // Round Off row. Suppressed when there is nothing to show, so an invoice
+        // that lands on a whole rupee by itself — and every invoice predating the
+        // feature — does not print a meaningless "0.00" line.
+        if (totals.roundOff().signum() != 0) {
+            itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
+
+            Cell roundOffDescCell = new Cell(1, 2)
+                    .add(new Paragraph("Round Off").setFont(normal).setFontSize(8))
+                    .setTextAlignment(TextAlignment.RIGHT)
+                    .setVerticalAlignment(VerticalAlignment.MIDDLE)
+                    .setPadding(5)
+                    .setBorder(new SolidBorder(ColorConstants.BLACK, 0.5f));
+            itemsTable.addCell(roundOffDescCell);
+
+            itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
+            itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
+            itemsTable.addCell(createDataCell("", normal, TextAlignment.CENTER));
+            itemsTable.addCell(createDataCell(formatSignedAmount(totals.roundOff()), normal, TextAlignment.RIGHT));
+        }
+
+        // Total Row - exact format. The STORED total, never a recomputed one.
+        BigDecimal grandTotal = totals.finalTotal();
+        BigDecimal totalQuantity = totals.totalQuantity();
+
         Cell totalLabelCell = new Cell(1, 3)
                 .add(new Paragraph("Total").setFont(bold).setFontSize(9))
                 .setTextAlignment(TextAlignment.RIGHT)
@@ -384,7 +416,7 @@ public class InvoicePdfService {
                 .setBorder(new SolidBorder(ColorConstants.BLACK, 1));
         itemsTable.addCell(totalLabelCell);
 
-        String unitType = invoice.getItems().get(0).getUnitType() != null ? invoice.getItems().get(0).getUnitType() : "Nos";
+        String unitType = totals.unitType();
         itemsTable.addCell(createDataCell(formatQuantity(totalQuantity), bold, TextAlignment.RIGHT));
         itemsTable.addCell(createDataCell("", bold, TextAlignment.CENTER));
         itemsTable.addCell(createDataCell(unitType, bold, TextAlignment.CENTER));
@@ -420,25 +452,17 @@ public class InvoicePdfService {
     /**
      * EXACT TAX SUMMARY FROM SAMPLE
      */
-    private void addTaxSummaryExact(Document document, InvoiceEntity invoice, 
+    private void addTaxSummaryExact(Document document, InvoiceTotals.Totals totals,
                                    PdfFont bold, PdfFont normal) {
-        
-        BigDecimal subtotal = BigDecimal.ZERO;
-        for (InvoiceItemEntity item : invoice.getItems()) {
-            BigDecimal quantity = item.getQuantity() != null ? item.getQuantity() : BigDecimal.ONE;
-            BigDecimal unitPrice = item.getUnitPrice() != null ? item.getUnitPrice() : BigDecimal.ZERO;
-            subtotal = subtotal.add(quantity.multiply(unitPrice));
-        }
 
-        BigDecimal taxPercent = invoice.getItems().get(0).getTaxPercent() != null ? 
-                invoice.getItems().get(0).getTaxPercent() : BigDecimal.valueOf(18);
-        
-        BigDecimal cgstRate = taxPercent.divide(BigDecimal.valueOf(2), 2, RoundingMode.HALF_UP);
-        BigDecimal sgstRate = taxPercent.divide(BigDecimal.valueOf(2), 2, RoundingMode.HALF_UP);
-        
-        BigDecimal cgstAmount = subtotal.multiply(cgstRate).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-        BigDecimal sgstAmount = subtotal.multiply(sgstRate).divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
-        BigDecimal totalTax = cgstAmount.add(sgstAmount);
+        // This section used to re-derive the subtotal and the tax from the line
+        // items all over again — a second, independently drifting copy of the
+        // items table's own arithmetic. It now shares one breakdown with it.
+        //
+        // Round-off is deliberately absent from this table: it is part of the
+        // invoice total but not of taxable value or GST, so it must never reach a
+        // tax return. See the footnote printed under the table.
+        BigDecimal totalTax = totals.taxTotal();
 
         // Tax table - exact structure
         Table taxTable = new Table(new float[]{2f, 2f, 0.8f, 1.5f, 0.8f, 1.5f, 2f})
@@ -480,31 +504,55 @@ public class InvoicePdfService {
         addTaxSubHeader(taxTable, "Amount", bold);
         taxTable.addCell(createBlankCell()); // Total
 
-        // Data row
-        taxTable.addCell(createTaxCell("90283090", normal, TextAlignment.CENTER));
-        taxTable.addCell(createTaxCell(formatAmount(subtotal), normal, TextAlignment.RIGHT));
-        taxTable.addCell(createTaxCell(cgstRate.toPlainString() + "%", normal, TextAlignment.CENTER));
-        taxTable.addCell(createTaxCell(formatAmount(cgstAmount), normal, TextAlignment.RIGHT));
-        taxTable.addCell(createTaxCell(sgstRate.toPlainString() + "%", normal, TextAlignment.CENTER));
-        taxTable.addCell(createTaxCell(formatAmount(sgstAmount), normal, TextAlignment.RIGHT));
-        taxTable.addCell(createTaxCell(formatAmount(totalTax), normal, TextAlignment.RIGHT));
+        // One data row per GST rate on the invoice.
+        BigDecimal sumCgst = BigDecimal.ZERO.setScale(2);
+        BigDecimal sumSgst = BigDecimal.ZERO.setScale(2);
+        for (InvoiceTotals.RateLine line : totals.byRate()) {
+            BigDecimal halfRate = line.halfRatePercent();
+            taxTable.addCell(createTaxCell(DEFAULT_HSN, normal, TextAlignment.CENTER));
+            taxTable.addCell(createTaxCell(formatAmount(line.taxableValue()), normal, TextAlignment.RIGHT));
+            taxTable.addCell(createTaxCell(halfRate.toPlainString() + "%", normal, TextAlignment.CENTER));
+            taxTable.addCell(createTaxCell(formatAmount(line.cgst()), normal, TextAlignment.RIGHT));
+            taxTable.addCell(createTaxCell(halfRate.toPlainString() + "%", normal, TextAlignment.CENTER));
+            taxTable.addCell(createTaxCell(formatAmount(line.sgst()), normal, TextAlignment.RIGHT));
+            taxTable.addCell(createTaxCell(formatAmount(line.tax()), normal, TextAlignment.RIGHT));
 
-        // Total row
-        Cell totalLabelCell = new Cell(1, 2)
+            sumCgst = sumCgst.add(line.cgst());
+            sumSgst = sumSgst.add(line.sgst());
+        }
+
+        // Total row — genuine column sums.
+        //
+        // The label used to span the HSN and Taxable Value columns, which left the
+        // taxable total with nowhere to print, and the CGST/SGST cells reprinted
+        // the single rate's amounts rather than summing anything. With more than
+        // one rate on the invoice that footer would not have added up.
+        Cell totalLabelCell = new Cell()
                 .add(new Paragraph("Total").setFont(bold).setFontSize(8))
                 .setTextAlignment(TextAlignment.RIGHT)
                 .setVerticalAlignment(VerticalAlignment.MIDDLE)
                 .setPadding(3)
                 .setBorder(new SolidBorder(ColorConstants.BLACK, 0.5f));
         taxTable.addCell(totalLabelCell);
-        
+
+        taxTable.addCell(createTaxCell(formatAmount(totals.taxableSubtotal()), bold, TextAlignment.RIGHT));
         taxTable.addCell(createTaxCell("", bold, TextAlignment.CENTER));
-        taxTable.addCell(createTaxCell(formatAmount(cgstAmount), bold, TextAlignment.RIGHT));
+        taxTable.addCell(createTaxCell(formatAmount(sumCgst), bold, TextAlignment.RIGHT));
         taxTable.addCell(createTaxCell("", bold, TextAlignment.CENTER));
-        taxTable.addCell(createTaxCell(formatAmount(sgstAmount), bold, TextAlignment.RIGHT));
+        taxTable.addCell(createTaxCell(formatAmount(sumSgst), bold, TextAlignment.RIGHT));
         taxTable.addCell(createTaxCell(formatAmount(totalTax), bold, TextAlignment.RIGHT));
 
         document.add(taxTable);
+
+        // Why the numbers above do not add up to the invoice total.
+        if (totals.roundOff().signum() != 0) {
+            document.add(new Paragraph("Round Off of " + formatSignedAmount(totals.roundOff())
+                            + " is included in the invoice total and excluded from taxable value and GST.")
+                    .setFont(normal)
+                    .setFontSize(7)
+                    .setItalic()
+                    .setMarginTop(2));
+        }
 
         // Tax amount in words
         Paragraph taxInWords = new Paragraph("Tax Amount (in words): " + convertToWords(totalTax))
@@ -636,6 +684,23 @@ public class InvoicePdfService {
         return amount.setScale(2, RoundingMode.HALF_UP).toPlainString();
     }
 
+    /** Round-off is signed, and a bare "-0.49" reads as a typo without the sign. */
+    private String formatSignedAmount(BigDecimal amount) {
+        if (amount == null || amount.signum() == 0) return "0.00";
+        BigDecimal scaled = amount.setScale(2, RoundingMode.HALF_UP);
+        return (scaled.signum() > 0 ? "+" : "-") + scaled.abs().toPlainString();
+    }
+
+    /**
+     * Items, never null — an invoice with none must still render.
+     *
+     * java.util.List is spelled out because the unqualified List in this file is
+     * iText's com.itextpdf.layout.element.List.
+     */
+    private java.util.List<InvoiceItemEntity> safeItems(InvoiceEntity invoice) {
+        return invoice.getItems() != null ? invoice.getItems() : java.util.Collections.emptyList();
+    }
+
     private String formatQuantity(BigDecimal quantity) {
         if (quantity == null) return "0";
         return quantity.stripTrailingZeros().toPlainString();
@@ -643,13 +708,19 @@ public class InvoicePdfService {
 
     private String convertToWords(BigDecimal amount) {
         if (amount == null) return "Zero Rupees Only";
-        
-        long rupees = amount.longValue();
-        int paise = amount.remainder(BigDecimal.ONE)
+
+        // Normalise to the paisa before splitting. longValue() and
+        // remainder().intValue() both truncate, so an input carrying more than two
+        // decimals (or a negative) would lose or mis-state the paise.
+        BigDecimal normalised = MoneyRounding.money(amount).abs();
+        boolean negative = amount.signum() < 0;
+
+        long rupees = normalised.longValue();
+        int paise = normalised.remainder(BigDecimal.ONE)
                 .multiply(BigDecimal.valueOf(100))
                 .intValue();
-        
-        String result = convertNumberToWords(rupees) + " Rupees";
+
+        String result = (negative ? "Minus " : "") + convertNumberToWords(rupees) + " Rupees";
         if (paise > 0) {
             result += " and " + convertNumberToWords(paise) + " Paise";
         }
