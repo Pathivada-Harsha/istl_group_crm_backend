@@ -58,6 +58,12 @@ public class ProposalsService {
     @Autowired
     private LeadAccessRepo leadAccessRepo;
 
+    @Autowired
+    private com.istlgroup.istl_group_crm_backend.repo.UserPagePermissionRepo userPagePermissionRepo;
+
+    /** Row in {@code permissions.name} behind the admin screen's Proposals → Edit box. */
+    private static final String PERM_PROPOSALS_EDIT = "proposals.edit";
+
     private static final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
 
     // ── Visibility helper (same level logic as LeadsService) ─────────────────
@@ -292,18 +298,34 @@ public class ProposalsService {
         return false;
     }
 
+    /** Whether the admin permissions screen has granted this user Proposals → Edit. */
+    private boolean hasProposalEditPermission(Long userId) {
+        return userId != null
+            && userPagePermissionRepo.countPagePermission(userId, PERM_PROPOSALS_EDIT) > 0;
+    }
+
     /**
      * Whether this user may write to this proposal.
      *
-     * This used to ignore its {@code proposal} argument entirely and answer purely
-     * from the global edit permission, which meant anyone holding that permission
-     * could write to any proposal id — including overwriting the offline PDF of a
-     * lead they have nothing to do with. The permission is now the gate on *may
-     * you edit proposals at all*; the clauses below are the gate on *which one*.
+     * <p>Holding the "Proposals → Edit" page permission is sufficient, on any
+     * proposal — that is what the checkbox in the admin permissions screen says,
+     * so it is what it does. The permission had previously been dropped from this
+     * check in favour of the ownership clauses alone, which meant a user could be
+     * granted Edit in the admin screen and still be refused on every proposal that
+     * was not their own. Be aware of the reach that gives it: {@code proposals.edit}
+     * allows overwriting the title, value, status and offline PDF of any proposal,
+     * including ones belonging to leads the user cannot otherwise see. Grant it as
+     * "may edit everything", not "may edit their own".
+     *
+     * <p>The remaining clauses are the ownership paths, which stand on their own for
+     * users who hold no page permission at all.
      */
     private boolean canEditProposal(ProposalsEntity proposal, Long userId, String userRole) {
         if ("SUPERADMIN".equalsIgnoreCase(userRole)) return true;
         if (roleHierarchyService.getLevelOrder(userRole) <= 2) return true;
+        // Granted "Proposals → Edit" in the admin permissions screen. Read from
+        // user_page_permissions — the table that screen actually writes.
+        if (hasProposalEditPermission(userId)) return true;
         // The person who prepared it.
         if (userId != null && userId.equals(proposal.getPreparedBy())) return true;
         // Anyone who owns, or was granted access to, the lead it belongs to.
