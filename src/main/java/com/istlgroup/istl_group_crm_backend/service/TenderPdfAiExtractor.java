@@ -31,7 +31,8 @@ import com.istlgroup.istl_group_crm_backend.util.GroqClient;
  * cannot smuggle in a value the parser would have rejected.
  *
  * <p>The returned map matches the regex extractor's contract: scalar field keys
- * plus optional {@code boqItems} / {@code eligibilityCriteria} arrays. Any
+ * plus an optional {@code boqItems} array. Eligibility criteria come from
+ * {@link #extractEligibility}, which reads a different part of the document. Any
  * failure (Groq unavailable, non-JSON reply) throws, and the caller keeps the
  * regex result.
  */
@@ -65,16 +66,13 @@ public class TenderPdfAiExtractor {
         if (text == null || text.isBlank()) return Map.of();
         String clipped = text.length() > MAX_CHARS ? text.substring(0, MAX_CHARS) : text;
 
-        // Primary: headline scalars + best-effort BOQ / eligibility arrays.
-        Map<String, Object> out = runExtraction(SYSTEM_PROMPT, clipped, 4000);
-        if (out != null && !out.isEmpty()) return out;
-
-        // The reply wasn't usable JSON — almost always a response truncated
-        // mid-array on a content-heavy tender. Retry once for the scalars only:
-        // a small, bounded payload that can't overflow the token budget.
-        log.warn("AI tender parse: unusable JSON — retrying scalars-only");
-        out = runExtraction(SCALARS_ONLY_PROMPT, clipped, 1200);
-        if (out != null && !out.isEmpty()) return out;
+        // Headline scalars only. Eligibility, documents and the BOQ are read
+        // separately, each from its own located section.
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            Map<String, Object> out = runExtraction(SYSTEM_PROMPT, clipped, 2000);
+            if (out != null && !out.isEmpty()) return out;
+            log.warn("AI tender parse: unusable JSON (attempt {})", attempt);
+        }
 
         throw new IllegalStateException("the AI did not return usable JSON for this document");
     }
@@ -95,14 +93,77 @@ public class TenderPdfAiExtractor {
             putText(out, key, root.get(key));
         }
 
-        List<Map<String, Object>> boq = readBoq(root.get("boqItems"));
-        if (!boq.isEmpty()) out.put("boqItems", boq);
-
-        List<Map<String, Object>> elig = readEligibility(root.get("eligibilityCriteria"));
-        if (!elig.isEmpty()) out.put("eligibilityCriteria", elig);
-
         log.info("AI tender parse extracted {} field(s)", out.size());
         return out;
+    }
+
+    /**
+     * Read the qualifying requirements out of the located eligibility section.
+     *
+     * <p>A call of its own, for two reasons. The summary block the scalar call
+     * reads never contains these clauses — on a 205-page KPTCL NIT they sit on
+     * pages 17–20 — and a full set of criteria is too long to share a token
+     * budget with the scalars without one of them being truncated.
+     *
+     * <p>The reply is unverified: every row goes through
+     * {@code TenderEligibilityValidator} against the same section text before
+     * anyone sees it. Returns an empty list when the section is empty; throws
+     * when the AI is unreachable or twice fails to produce JSON.
+     */
+    public List<Map<String, Object>> extractEligibility(String sectionText) {
+        return readSection("eligibility", ELIGIBILITY_PROMPT, ELIGIBILITY_PREFIX, sectionText,
+                "eligibilityCriteria", List.of("category", "criterionName", "requiredValue", "operator",
+                        "altGroup", "sourceStart", "sourceEnd"),
+                "criterionName", MAX_ELIGIBILITY_ROWS);
+    }
+
+    /**
+     * Read the documents the bidder must upload, from the located checklist /
+     * "documents in support of…" section. Verified by
+     * {@code TenderDocumentsValidator} against the same text.
+     */
+    public List<Map<String, Object>> extractDocuments(String sectionText) {
+        return readSection("documents", DOCUMENTS_PROMPT, DOCUMENTS_PREFIX, sectionText,
+                "documents", List.of("documentName", "sourceStart", "sourceEnd"),
+                "documentName", MAX_DOCUMENT_ROWS);
+    }
+
+    /**
+     * Read the bill of quantities from the located schedule pages. The AI's job
+     * here is mostly the descriptions, which wrap around their rows; its
+     * numbers are checked line by line by {@code TenderBoqValidator}.
+     */
+    public List<Map<String, Object>> extractBoq(String sectionText) {
+        return readSection("BOQ", BOQ_PROMPT, BOQ_PREFIX, sectionText,
+                "boqItems", List.of("itemNo", "scope", "description", "unit", "quantity"),
+                "description", MAX_BOQ_ROWS);
+    }
+
+    /**
+     * One located section → one array of rows. A call of its own per section:
+     * each reads a different part of the document, and a full set of rows is
+     * too long to share a token budget without one of them being truncated.
+     * Empty section → empty list; unreachable AI or two non-JSON replies → throws.
+     */
+    private List<Map<String, Object>> readSection(String what, String prompt, String prefix, String sectionText,
+                                                  String arrayKey, List<String> keys, String requiredKey, int maxRows) {
+        if (sectionText == null || sectionText.isBlank()) return List.of();
+        String clipped = sectionText.length() > MAX_SECTION_CHARS
+                ? sectionText.substring(0, MAX_SECTION_CHARS) : sectionText;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            // Sized so input + answer + the client's reasoning headroom stays under
+            // a free-tier Groq limit of 8,000 tokens per minute: a request larger
+            // than that is refused outright, however long it waits.
+            String raw = groqClient.complete(prompt, prefix + clipped, SECTION_ANSWER_TOKENS, 0.0);
+            JsonNode root = parseJson(raw);
+            if (root != null && root.isObject()) {
+                List<Map<String, Object>> rows = readRows(root.get(arrayKey), keys, requiredKey, maxRows);
+                log.info("AI {} read: {} row(s)", what, rows.size());
+                return rows;
+            }
+            log.warn("AI {} read: non-JSON reply (attempt {})", what, attempt);
+        }
+        throw new IllegalStateException("the AI did not return usable JSON for the " + what + " section");
     }
 
     // ── JSON helpers ──────────────────────────────────────────────────────────
@@ -120,36 +181,15 @@ public class TenderPdfAiExtractor {
         }
     }
 
-    private static List<Map<String, Object>> readBoq(JsonNode arr) {
+    private static List<Map<String, Object>> readRows(JsonNode arr, List<String> keys, String requiredKey, int maxRows) {
         List<Map<String, Object>> rows = new ArrayList<>();
         if (arr == null || !arr.isArray()) return rows;
         for (JsonNode n : arr) {
             if (!n.isObject()) continue;
             Map<String, Object> r = new LinkedHashMap<>();
-            putText(r, "itemNo", n.get("itemNo"));
-            putText(r, "scope", n.get("scope"));
-            putText(r, "description", n.get("description"));
-            putText(r, "unit", n.get("unit"));
-            putText(r, "quantity", n.get("quantity"));
-            if (r.containsKey("description")) rows.add(r);
-            if (rows.size() >= 200) break;
-        }
-        return rows;
-    }
-
-    private static List<Map<String, Object>> readEligibility(JsonNode arr) {
-        List<Map<String, Object>> rows = new ArrayList<>();
-        if (arr == null || !arr.isArray()) return rows;
-        for (JsonNode n : arr) {
-            if (!n.isObject()) continue;
-            Map<String, Object> r = new LinkedHashMap<>();
-            putText(r, "category", n.get("category"));
-            putText(r, "criterionName", n.get("criterionName"));
-            putText(r, "requiredValue", n.get("requiredValue"));
-            r.put("ourValue", "");
-            putText(r, "operator", n.get("operator"));
-            if (r.containsKey("criterionName")) rows.add(r);
-            if (rows.size() >= 50) break;
+            for (String k : keys) putText(r, k, n.get(k));
+            if (r.containsKey(requiredKey)) rows.add(r);
+            if (rows.size() >= maxRows) break;
         }
         return rows;
     }
@@ -223,7 +263,7 @@ public class TenderPdfAiExtractor {
           + "text: stop at the tender/DNIT reference number, and never include the issuing "
           + "agency's name, postal address, phone/fax, email, website URL, or footer lines such "
           + "as \"SIGNATURE OF THE BIDDER WITH SEAL & DATE\". Those belong in issuingAuthority, "
-          + "clientAddress, clientContactPhone and clientContactEmail. Keep it under 300 "
+          + "clientAddress, clientContactPhone and clientContactEmail. Keep it under 600 "
           + "characters; if the description is longer, stop at a clause boundary.\n\n"
           + "Fields (all optional strings unless noted): tenderNumber, tenderName, issuingAuthority, "
           + "clientCompany, clientType, clientGstin, clientPan, clientCin, clientContactPerson, "
@@ -232,19 +272,114 @@ public class TenderPdfAiExtractor {
           + "emdAmount, performanceSecurityPct, submissionDeadline, technicalOpeningDate, "
           + "financialOpeningDate.\n\n";
 
-    private static final String SYSTEM_PROMPT = RULES
-          + "Also, best-effort, ONLY if clearly present. Keep these SHORT — the JSON must always be "
-          + "complete and valid, never truncated mid-array:\n"
-          + "- boqItems: AT MOST 15 items, array of { itemNo, scope, description, unit, quantity } — "
-          + "the main Bill of Quantities / scope-of-work lines. Keep description under 120 chars.\n"
-          + "- eligibilityCriteria: AT MOST 10 items, array of "
-          + "{ category, criterionName, requiredValue, operator }, where category is one of "
-          + "Financial/Technical/Legal and operator is one of gte, lte, contains, boolean, eq.\n\n"
+    private static final String SYSTEM_PROMPT = RULES + "Return the complete JSON object only.";
+
+    // ── section prompts ───────────────────────────────────────────────────────
+
+    // Each call must fit a free-tier Groq limit of 8,000 tokens per minute on its
+    // own: input (~3,800) + answer (3,000) + GroqClient's reasoning headroom
+    // (1,024). A re-read makes up to four such calls; on the free tier they take
+    // turns through the per-minute window (GroqClient waits as Groq instructs),
+    // so the re-read is slow but complete. On a paid tier they run side by side.
+    private static final int MAX_SECTION_CHARS = 18500;       // ~3,800 input tokens
+    private static final int SECTION_ANSWER_TOKENS = 3000;    // live replies used 1,200–1,800
+    private static final int MAX_ELIGIBILITY_ROWS = 30;
+    private static final int MAX_DOCUMENT_ROWS = 40;
+    private static final int MAX_BOQ_ROWS = 150;
+
+    private static final String DOCUMENTS_PREFIX =
+            "Section of the tender listing what the bidder must submit / upload:\n\n";
+
+    private static final String DOCUMENTS_PROMPT =
+            "You extract the DOCUMENTS A BIDDER MUST SUBMIT OR UPLOAD WITH THE BID from a section of an "
+          + "Indian government tender. Return ONLY one JSON object: {\"documents\": [ ... ]} — no prose, "
+          + "no markdown, no code fences.\n\n"
+          + "Each item: { documentName, sourceStart, sourceEnd }.\n\n"
+          + "Rules:\n"
+          + "- One item per distinct document the bidder must provide with the bid: EMD / bid security "
+          + "instrument, tender fee receipt, registration and incorporation certificates, GST, PAN, "
+          + "audited balance sheets, CA / turnover certificates, work orders and completion or "
+          + "performance certificates, licences, self-declarations, undertakings, affidavits, filled "
+          + "formats / annexures, power of attorney, technical data sheets, and similar.\n"
+          + "- documentName: a short, specific checklist label under 120 characters that keeps what "
+          + "matters — who issues or signs it, the period it covers, the format number. E.g. \"Audited "
+          + "financial statements — last 5 years (Lead bidder & consortium partner)\", \"Self-declaration "
+          + "on litigation / risk & cost / land-border (Annexure XVI & XVII)\", \"Banker's certificate "
+          + "for liquid assets / credit lines\".\n"
+          + "- Do NOT list documents the successful bidder or contractor provides after award "
+          + "(performance security, drawings, as-built, insurance), and do not list instructions that "
+          + "are not documents.\n"
+          + "- sourceStart: the FIRST 8 to 12 words of the passage that asks for the document, copied "
+          + "EXACTLY from the text including its own spelling. sourceEnd: the LAST 6 to 10 words of that "
+          + "same passage, copied exactly. An item whose words cannot be found is thrown away.\n"
+          + "- At most " + MAX_DOCUMENT_ROWS + " items. The JSON must be complete and valid.\n\n"
           + "Return the complete JSON object only.";
 
-    /** Fallback when the full reply came back truncated or unparseable: scalars only. */
-    private static final String SCALARS_ONLY_PROMPT = RULES
-          + "Do NOT include boqItems or eligibilityCriteria. Return the scalar fields only, so the "
-          + "JSON stays short and complete.\n\n"
+    private static final String BOQ_PREFIX = "Bill of quantities / price schedule pages of the tender:\n\n";
+
+    private static final String BOQ_PROMPT =
+            "You extract the BILL OF QUANTITIES (price schedule) rows from pages of an Indian government "
+          + "tender. The text was extracted from a PDF table: an item's description is often wrapped "
+          + "onto lines ABOVE and BELOW the line that carries its item number, quantity and unit, and "
+          + "the rate columns are empty placeholders (\"0 0.00 0.00 INR Zero Only\"). Return ONLY one JSON "
+          + "object: {\"boqItems\": [ ... ]} — no prose, no markdown, no code fences.\n\n"
+          + "Each item: { itemNo, scope, description, unit, quantity }.\n\n"
+          + "Rules:\n"
+          + "- One item per priced line — every line that has its own quantity. A heading line with no "
+          + "quantity (e.g. \"Wiring for circuit with following sizes …:-\") is not an item: fold its "
+          + "wording into the description of each sub-item under it, e.g. \"Wiring for circuit/sub-main "
+          + "in PVC casing & capping — 2 x 2.5 sq. mm\".\n"
+          + "- itemNo and quantity EXACTLY as printed (\"3.1\", \"130500\"); unit as printed (\"Nos\", "
+          + "\"Meters\"). Never compute, round or guess a quantity.\n"
+          + "- description: the item's full wording, re-joined from its wrapped lines, using the "
+          + "document's own words; under 300 characters. Drop the rate placeholders and item codes "
+          + "like \"ITEM3.1\".\n"
+          + "- scope: the part / section heading the item sits under if the schedule has one "
+          + "(e.g. \"Part A: Supply\"), else empty.\n"
+          + "- Stop at \"Total\". At most " + MAX_BOQ_ROWS + " items. The JSON must be complete and valid.\n\n"
+          + "Return the complete JSON object only.";
+
+    // ── eligibility prompt ────────────────────────────────────────────────────
+
+    private static final String ELIGIBILITY_PREFIX =
+            "Eligibility / qualifying-requirements section of the tender:\n\n";
+
+    private static final String ELIGIBILITY_PROMPT =
+            "You extract the bidder QUALIFYING REQUIREMENTS from the eligibility section of an Indian "
+          + "government tender. Return ONLY one JSON object: {\"eligibilityCriteria\": [ ... ]} — "
+          + "no prose, no markdown, no code fences.\n\n"
+          + "Each item: { category, criterionName, requiredValue, operator, altGroup, sourceStart, "
+          + "sourceEnd }.\n\n"
+          + "Rules:\n"
+          + "- One item per requirement the BIDDER must meet: experience of completed works, "
+          + "turnover, liquid assets / credit facility, net worth, solvency, licences and "
+          + "registrations, not blacklisted/debarred, bid capacity, and similar.\n"
+          + "- Skip clauses marked \"Void\" or \"Deleted\", notes that explain how a requirement is "
+          + "evaluated, lists of documents to upload, and requirements on sub-vendors or equipment "
+          + "manufacturers who are not the bidder.\n"
+          + "- ALTERNATIVES: when a clause offers options joined by \"OR\" / \"either of the "
+          + "following\", emit ONE item per option and give every option of that clause the SAME "
+          + "altGroup — the clause number if it has one (e.g. \"3.2(b)(i)\"), otherwise a short "
+          + "label. Items that are not alternatives omit altGroup.\n"
+          + "- category: Technical (work experience, capacity, licences for the work), Financial "
+          + "(turnover, net worth, liquid assets, solvency, bid capacity), Legal (blacklisting, "
+          + "registrations, statutory compliance), General (anything else).\n"
+          + "- criterionName: specific and under 90 characters, keeping what distinguishes the "
+          + "requirement — voltage class, work type, lookback period. E.g. \"AIS sub-station, 66kV "
+          + "or above — nos. completed in last 10 yrs\", \"Transmission line 33kV or above — km "
+          + "completed in last 10 yrs\", \"Annual turnover in 2 of last 5 FYs\".\n"
+          + "- requiredValue: the ONE governing quantity, as written in the clause: a count (\"1\", "
+          + "\"5\"), a length (\"1.82\"), a percentage, a number of years, or money in plain rupees "
+          + "(1 Lakh = 100000, 1 Crore = 10000000; \"Rs.26.90Crore\" -> 269000000). Never invent a "
+          + "number that is not written in the clause. For a yes/no condition leave it empty.\n"
+          + "- operator: gte for \"at least / not less than / minimum\", lte for \"not more than / "
+          + "maximum\", eq for an exact value, contains for a named class or grade (e.g. a licence "
+          + "class — then requiredValue is that class as written), boolean for a yes/no condition.\n"
+          + "- sourceStart: the FIRST 8 to 12 words of the clause or option, copied EXACTLY from the "
+          + "text, character for character, including the document's own spelling (\"atleast\"). "
+          + "sourceEnd: the LAST 6 to 10 words of the same clause or option, copied exactly. These "
+          + "are used to find the clause in the document; an item whose words cannot be found is "
+          + "thrown away.\n"
+          + "- At most " + MAX_ELIGIBILITY_ROWS + " items. The JSON must be complete and valid.\n\n"
           + "Return the complete JSON object only.";
 }

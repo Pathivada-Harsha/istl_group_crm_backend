@@ -19,6 +19,9 @@ import java.util.Map;
  * @param pageCount  pages in the source document
  * @param summaryFromPage where the summary block starts, or null if none was found
  * @param summaryToPage   where it ends
+ * @param documents  the documents checklist (AI read only), each with its page and clause in notes
+ * @param sectionNotes one line per child section: where it was read from, or why it is empty
+ * @param eligibilitySections the pages read for qualifying requirements, empty if none
  */
 public record TenderParseResult(boolean complete,
                                 String message,
@@ -26,10 +29,13 @@ public record TenderParseResult(boolean complete,
                                 List<ExtractedField> fields,
                                 List<Map<String, Object>> boqItems,
                                 List<Map<String, Object>> eligibilityCriteria,
+                                List<Map<String, Object>> documents,
+                                List<String> sectionNotes,
                                 List<Discarded> discarded,
                                 int pageCount,
                                 Integer summaryFromPage,
-                                Integer summaryToPage) {
+                                Integer summaryToPage,
+                                List<TenderSectionLocator.Section> eligibilitySections) {
 
     /** A value the extractor produced and validation rejected. */
     public record Discarded(String field, String value, String reason) {}

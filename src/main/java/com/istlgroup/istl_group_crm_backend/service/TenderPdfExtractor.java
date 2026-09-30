@@ -14,6 +14,9 @@ import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
 
 import com.istlgroup.istl_group_crm_backend.service.tender.ExtractedField;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderBoqLocator;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderBoqValidator;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderSectionLocator;
 import com.istlgroup.istl_group_crm_backend.service.tender.TenderFieldValidator;
 import com.istlgroup.istl_group_crm_backend.service.tender.TenderLabels;
 import com.istlgroup.istl_group_crm_backend.service.tender.TenderRecords;
@@ -58,11 +61,29 @@ public class TenderPdfExtractor {
                              List<Map<String, Object>> boqItems,
                              List<Map<String, Object>> eligibilityCriteria,
                              TenderText cleaned,
-                             TenderSummaryLocator.Block summary) {
+                             TenderSummaryLocator.Block summary,
+                             List<TenderSectionLocator.Section> eligibilitySections,
+                             List<TenderSectionLocator.Section> documentSections,
+                             TenderBoqLocator.Result boq) {
 
         /** The block the LLM should be given, when it is asked to have a go. */
         public TenderText summaryText() {
             return summary == null ? cleaned : cleaned.slice(summary.fromPage(), summary.toPage());
+        }
+
+        /** The qualifying-requirements pages — empty when none were found. */
+        public TenderText eligibilityText() {
+            return TenderSectionLocator.text(cleaned, eligibilitySections);
+        }
+
+        /** The documents-to-submit pages — empty when none were found. */
+        public TenderText documentsText() {
+            return TenderSectionLocator.text(cleaned, documentSections);
+        }
+
+        /** The schedule pages — empty when the PDF carries no BOQ. */
+        public TenderText boqText() {
+            return TenderBoqLocator.text(cleaned, boq);
         }
     }
 
@@ -153,10 +174,16 @@ public class TenderPdfExtractor {
             financials();
             dates();
             derived();
+            // The child arrays each come from their own located section, never
+            // from a whole-document scan — see TenderSectionLocator / TenderBoqLocator.
+            List<TenderSectionLocator.Section> sections = TenderSectionLocator.locate(cleaned);
+            List<TenderSectionLocator.Section> documents =
+                    TenderSectionLocator.locate(cleaned, TenderSectionLocator.DOCUMENTS);
+            TenderBoqLocator.Result boq = TenderBoqLocator.locate(cleaned);
             return new Extraction(fields,
-                    TenderBoqScanner.boq(cleaned),
-                    TenderBoqScanner.eligibility(cleaned.flat()),
-                    cleaned, summary);
+                    TenderBoqValidator.fromLayout(boq.rows()),
+                    TenderEligibilityScanner.eligibility(TenderSectionLocator.text(cleaned, sections)),
+                    cleaned, summary, sections, documents, boq);
         }
 
         // ── identification ───────────────────────────────────────────────────
@@ -299,6 +326,18 @@ public class TenderPdfExtractor {
                                 firstGroup(summaryFlat, PORTAL_URL),
                                 firstGroup(summaryFlat, GOV_URL))), 0, null, false);
             }
+            if (portal == null) {
+                // The summary names the portal but not its address ("KPP Portal");
+                // the invitation that follows gives it in brackets or after
+                // "website". An address the document itself calls the portal is
+                // better evidence than any guess from the host name.
+                String opening = cleaned.slice(1, Math.min(cleaned.pageCount(), NAMED_PORTAL_PAGES)).flat();
+                Matcher named = NAMED_PORTAL.matcher(opening);
+                if (named.find()) {
+                    portal = field("portalLink", "named as the portal", trimUrl(named.group(1)),
+                            0, null, false);
+                }
+            }
             put(portal);
 
             put(field("source", "from the portal",
@@ -351,7 +390,14 @@ public class TenderPdfExtractor {
             String flat = cleaned.flat();
             Matcher m = PCT_OF.matcher(flat);
             while (m.find()) {
-                String before = flat.substring(Math.max(0, m.start() - 120), m.start());
+                // The phrase and its rate must share a sentence. KPTCL spends 500
+                // characters on bond formats between "Security Deposit / Contract
+                // Performance Guarantee" and "equivalent to 5% of Amount Put to
+                // tender", so a fixed short window misses it; a sentence break
+                // is what actually separates one clause's figure from another's.
+                String before = flat.substring(Math.max(0, m.start() - SECURITY_SENTENCE_MAX), m.start());
+                int sentence = before.lastIndexOf(". ");
+                if (sentence >= 0) before = before.substring(sentence + 2);
                 if (!SECURITY_ANCHOR.matcher(before).find()) continue;
                 String immediately = before.length() > 40
                         ? before.substring(before.length() - 40) : before;
@@ -520,6 +566,12 @@ public class TenderPdfExtractor {
     private static final Pattern PORTAL_URL = Pattern.compile(
             "((?:https?://|www\\.)[A-Za-z0-9.\\-]*(?:tender|procure|ireps|gem\\.gov|bid)"
           + "[A-Za-z0-9./\\-]*)", Pattern.CASE_INSENSITIVE);
+    /** "…Procurement Portal (https://…)", "KPP Portal: https://…" — the document naming its portal. */
+    private static final Pattern NAMED_PORTAL = Pattern.compile(
+            "\\bPortal\\s*[:(\\-]?\\s*((?:https?://|www\\.)[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}[A-Za-z0-9./\\-]*)",
+            Pattern.CASE_INSENSITIVE);
+    /** The invitation and instructions — past this, a URL is a spec or a vendor-registration link. */
+    private static final int NAMED_PORTAL_PAGES = 30;
     private static final Pattern GOV_URL = Pattern.compile(
             "((?:https?://|www\\.)[A-Za-z0-9.\\-]+\\.(?:gov\\.in|nic\\.in)[A-Za-z0-9./\\-]*)",
             Pattern.CASE_INSENSITIVE);
@@ -544,6 +596,8 @@ public class TenderPdfExtractor {
     private static final Pattern SECURITY_ANCHOR = Pattern.compile(
             "Performance\\s+Security|Performance\\s+Bank\\s+Guarantee|\\bPBG\\b|Security\\s+Deposit",
             Pattern.CASE_INSENSITIVE);
+    /** The longest sentence a security phrase and its rate are looked for in. */
+    private static final int SECURITY_SENTENCE_MAX = 700;
     private static final Pattern PCT_OF = Pattern.compile(
             "(\\d{1,2}(?:\\.\\d+)?)\\s*%\\s*(?:\\([^)]{0,25}\\)\\s*)?of\\s+(?:the\\s+)?(?:total\\s+)?"
           + "(?:Amount\\s+Put\\s+[Tt]o\\s+[Tt]ender|Contract\\s+(?:Price|Value|Amount)"
@@ -608,7 +662,10 @@ public class TenderPdfExtractor {
     }
 
     /** Longest work description kept; beyond this the title stops being a title. */
-    private static final int TITLE_MAX = 300;
+    // tender_name is VARCHAR(1000). A work description is the one field people
+    // read in full, and KPTCL's runs to ~440 characters; cutting at 300 dropped
+    // the district, the turnkey basis and the scope.
+    private static final int TITLE_MAX = 600;
 
     /**
      * Where a cover-page title stops being the work and starts being paperwork:

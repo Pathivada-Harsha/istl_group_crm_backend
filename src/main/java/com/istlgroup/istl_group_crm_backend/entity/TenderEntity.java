@@ -198,6 +198,60 @@ public class TenderEntity {
     @Column(name = "agreement_date")
     private LocalDate agreementDate;
 
+    // ── EMD / bid security: what we actually paid, and whether it came back ──
+    // emd_amount above is what the tender DEMANDS; these track the money.
+    @Column(name = "emd_status", length = 40)
+    private String emdStatus;
+
+    @Column(name = "emd_paid_amount", precision = 18, scale = 2)
+    private BigDecimal emdPaidAmount;
+
+    @Column(name = "emd_paid_date")
+    private LocalDate emdPaidDate;
+
+    @Column(name = "emd_payment_mode", length = 60)
+    private String emdPaymentMode;
+
+    /** UTR / DD number / BG or surety-bond number. */
+    @Column(name = "emd_reference", length = 120)
+    private String emdReference;
+
+    /** Our account the money left from. */
+    @Column(name = "emd_paid_from_account", length = 200)
+    private String emdPaidFromAccount;
+
+    @Column(name = "emd_beneficiary_name", length = 200)
+    private String emdBeneficiaryName;
+
+    @Column(name = "emd_beneficiary_bank", length = 200)
+    private String emdBeneficiaryBank;
+
+    @Column(name = "emd_beneficiary_account", length = 60)
+    private String emdBeneficiaryAccount;
+
+    @Column(name = "emd_beneficiary_ifsc", length = 20)
+    private String emdBeneficiaryIfsc;
+
+    /** Validity of a bank guarantee / surety bond — it must be extended or returned. */
+    @Column(name = "emd_valid_till")
+    private LocalDate emdValidTill;
+
+    @Column(name = "emd_refund_amount", precision = 18, scale = 2)
+    private BigDecimal emdRefundAmount;
+
+    @Column(name = "emd_refund_date")
+    private LocalDate emdRefundDate;
+
+    @Column(name = "emd_refund_reference", length = 120)
+    private String emdRefundReference;
+
+    /** Our account the refund was credited to. */
+    @Column(name = "emd_refund_account", length = 200)
+    private String emdRefundAccount;
+
+    @Column(name = "emd_notes", columnDefinition = "TEXT")
+    private String emdNotes;
+
     // linked project (UI indicator only for now; String to match the frontend)
     @Column(name = "project_id")
     private String projectId;

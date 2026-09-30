@@ -67,7 +67,16 @@ public interface FollowupsRepo extends JpaRepository<FollowupsEntity, Long> {
            "  LOWER(f.notes) LIKE :searchTerm OR " +
            "  LOWER(f.outcome) LIKE :searchTerm OR " +
            "  LOWER(f.followupType) LIKE :searchTerm OR " +
-           "  LOWER(f.groupName) LIKE :searchTerm)")
+           "  LOWER(f.groupName) LIKE :searchTerm OR " +
+           "  CAST(f.leadId AS string) LIKE :searchTerm OR " +
+           // Lead code / name / phone and assignee live in other tables — match via EXISTS
+           // so paging and totalCount stay one row per follow-up.
+           "  EXISTS (SELECT 1 FROM LeadsEntity l WHERE l.id = f.leadId AND (" +
+           "      LOWER(l.leadCode) LIKE :searchTerm OR LOWER(l.name) LIKE :searchTerm OR l.phone LIKE :searchTerm)) OR " +
+           "  EXISTS (SELECT 1 FROM UsersEntity u WHERE u.id = f.assignedTo AND LOWER(u.name) LIKE :searchTerm) OR " +
+           "  EXISTS (SELECT 1 FROM CustomersEntity c WHERE c.id = f.customerId AND (" +
+           "      LOWER(c.customerCode) LIKE :searchTerm OR LOWER(c.name) LIKE :searchTerm OR " +
+           "      LOWER(c.companyName) LIKE :searchTerm OR c.phone LIKE :searchTerm)))")
     Page<FollowupsEntity> findPagedByFilters(
         @Param("userId") Long userId,
         @Param("groupName") String groupName,

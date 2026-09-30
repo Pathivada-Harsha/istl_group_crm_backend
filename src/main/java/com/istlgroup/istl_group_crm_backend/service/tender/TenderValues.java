@@ -252,6 +252,20 @@ public final class TenderValues {
         return v.length() <= max ? v : v.substring(0, max).strip();
     }
 
+    /**
+     * A value from the AI's JSON, as text: null for missing, blank or "null",
+     * with the typography folded the same way as the document text — the model
+     * writes narrow and thin no-break spaces ("10202fkWp") that no pattern
+     * or anchor would otherwise match.
+     */
+    public static String aiText(Object o) {
+        if (o == null) return null;
+        String s = TenderText.normalize(o.toString())
+                .replaceAll("[\\u00A0\\u2007\\u2009\\u202F]", " ")
+                .replaceAll("\\s+", " ").strip();
+        return s.isEmpty() || s.equalsIgnoreCase("null") ? null : s;
+    }
+
     public static String tidy(String v) {
         if (v == null) return null;
         String s = v.replaceAll("\\s+", " ")

@@ -147,9 +147,12 @@ public class LeadAnalyticsService {
         // Headline KPIs
         out.put("leadsGenerated", generated);
         out.put("leadsWon", won);
-        // Conversion ratio: won over everything generated in the window.
+        // Conversion ratio: won in the window (by win date, any creation date) over
+        // generated in the window. A flow ratio, so it can exceed 100% in a period
+        // where many older leads close. Per-priority / per-group rates behave alike.
         out.put("conversionRate", pct(won, generated));
-        // Close rate: won over leads that actually reached a closed state.
+        // Close rate: won over leads closed (won or lost) in the window, both by
+        // closure date — always within 0–100%.
         out.put("closeRate", pct(won, closed));
 
         // Status distribution

@@ -22,8 +22,24 @@ public class GroqClient {
 
     private static final Logger log = LoggerFactory.getLogger(GroqClient.class);
 
-    private static final int  MAX_RETRIES    = 3;
+    // Enough attempts for several tender section reads, launched together, to
+    // take turns through a free-tier tokens-per-minute window.
+    private static final int  MAX_RETRIES    = 6;
     private static final long BASE_DELAY_MS  = 2000L; // 2 seconds
+    private static final long MAX_WAIT_MS    = 65_000L;
+
+    private static final java.util.regex.Pattern TRY_AGAIN = java.util.regex.Pattern.compile(
+            "try again in (?:(\\d+)m)?(\\d+(?:\\.\\d+)?)(ms|s)");
+
+    /** "Please try again in 1m2.5s" / "in 7.66s" / "in 450ms" → milliseconds (+ a small margin), or 0. */
+    static long retryAfterMs(String msg) {
+        java.util.regex.Matcher m = TRY_AGAIN.matcher(msg);
+        if (!m.find()) return 0;
+        double n = Double.parseDouble(m.group(2));
+        long ms = "ms".equals(m.group(3)) ? (long) n : (long) (n * 1000);
+        if (m.group(1) != null) ms += Long.parseLong(m.group(1)) * 60_000L;
+        return Math.min(MAX_WAIT_MS, ms + 500);
+    }
 
     @Autowired
     private WebClient groqWebClient;
@@ -89,6 +105,11 @@ public class GroqClient {
                 lastException = e;
                 String msg = e.getMessage() != null ? e.getMessage() : "";
 
+                // A single request larger than the per-minute token limit (Groq
+                // answers 413 "Request too large") can never succeed; waiting
+                // only delays the same refusal.
+                if (msg.contains("Request too large")) throw e;
+
                 // Retry on over-capacity or server errors, not on auth/bad-request errors
                 boolean shouldRetry = msg.contains("over capacity")
                         || msg.contains("rate_limit")
@@ -100,9 +121,13 @@ public class GroqClient {
                     throw e;
                 }
 
-                long delayMs = BASE_DELAY_MS * (1L << (attempt - 1)); // 2s, 4s, 8s
-                log.warn("Groq over capacity (attempt {}/{}), retrying in {}ms: {}",
-                        attempt, MAX_RETRIES, delayMs, msg);
+                // Groq says how long the per-minute window needs ("Please try again
+                // in 7.66s"); a fixed 2-4-8s backoff gives up long before a
+                // tokens-per-minute limit resets. Fall back to the backoff otherwise.
+                long delayMs = retryAfterMs(msg);
+                if (delayMs <= 0) delayMs = BASE_DELAY_MS * (1L << (attempt - 1)); // 2s, 4s, 8s…
+                log.warn("Groq rate-limited / over capacity (attempt {}/{}), retrying in {}ms",
+                        attempt, MAX_RETRIES, delayMs);
                 try {
                     Thread.sleep(delayMs);
                 } catch (InterruptedException ie) {
@@ -122,8 +147,17 @@ public class GroqClient {
         Map<String, Object> requestBody = new LinkedHashMap<>();
         requestBody.put("model",       model);
         requestBody.put("messages",    messages);
-        requestBody.put("max_tokens",  maxTokens);
         requestBody.put("temperature", temperature);
+        if (isReasoningModel(model)) {
+            // Callers size maxTokens for the ANSWER (the assistant asks for 60–300).
+            // A reasoning model spends tokens thinking first and, left at the
+            // caller's figure, returns an empty reply. Keep the thinking short and
+            // give it its own headroom on top of the answer budget.
+            requestBody.put("reasoning_effort", "low");
+            requestBody.put("max_tokens", maxTokens + REASONING_HEADROOM);
+        } else {
+            requestBody.put("max_tokens", maxTokens);
+        }
 
         @SuppressWarnings("unchecked")
         Map<String, Object> response = groqWebClient.post()
@@ -138,6 +172,13 @@ public class GroqClient {
                 .block();
 
         return extractText(response);
+    }
+
+    /** Tokens allowed for a reasoning model's thinking, beyond the caller's answer budget. */
+    private static final int REASONING_HEADROOM = 1024;
+
+    private static boolean isReasoningModel(String model) {
+        return model != null && model.startsWith("openai/gpt-oss");
     }
 
     // ─── Extract text from response ───────────────────────────────────────────

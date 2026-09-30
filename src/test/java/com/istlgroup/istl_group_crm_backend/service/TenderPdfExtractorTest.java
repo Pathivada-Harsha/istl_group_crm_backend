@@ -69,8 +69,11 @@ class TenderPdfExtractorTest {
         assertTrue(name.startsWith("Establishing 2x20MVA, 110/11kV Sub-Station at Gholanoor "
                 + "and construction of 110kV LILO line using Lynx conductor"), name);
         assertTrue(name.contains("Afzalpur Taluk"), name);
-        // Longer than the old column allowed, but capped to stay a title.
-        assertTrue(name.length() > 255 && name.length() <= 300, "length=" + name.length());
+        // The whole description, through to its last clause: cutting at 300
+        // characters used to drop the district, the turnkey basis and the scope.
+        assertTrue(name.contains("Kalaburagi District"), name);
+        assertTrue(name.endsWith("Testing and Commissioning"), name);
+        assertTrue(name.length() > 300 && name.length() <= 600, "length=" + name.length());
     }
 
     // ── the rest of the KPTCL summary ────────────────────────────────────────
@@ -102,15 +105,37 @@ class TenderPdfExtractorTest {
         assertEquals("5", f.get("performanceSecurityPct"));
     }
 
+    /**
+     * Figures stated on a cover page are not eligibility criteria: without a
+     * located qualifying-requirements section, nothing is proposed. The old
+     * whole-document scan emitted rows from anywhere, canned ones included.
+     */
+    @Test
+    void proposesNoEligibilityOutsideAnEligibilitySection() {
+        assertNull(extractor.extractFromText(KPTCL).get("eligibilityCriteria"));
+    }
+
     @Test
     void readsKptclEligibilityWithScaledAmounts() {
+        String section = String.join("\n",
+            "3.0 Qualification of the Tenderer:",
+            "3.2 To qualify for award of this contract, Tenderer in its name should have the following:",
+            "a) Achieved in atleast two financial years in the last five years i.e. FY 2020-2021 to 2024-",
+            "2025 a minimum financial turnover of Rs.26.90Crore *.",
+            "b) Liquid Assets and/or availability of credit facilities of not less than",
+            "Rs.5.04Crore (Credit lines/ Letter of credit/ certificates from banks for meeting the fund",
+            "requirement etc).");
         @SuppressWarnings("unchecked")
         var criteria = (java.util.List<Map<String, Object>>)
-                extractor.extractFromText(KPTCL).get("eligibilityCriteria");
+                extractor.extractFromText(section).get("eligibilityCriteria");
         assertTrue(criteria.stream().anyMatch(c ->
                 "269000000".equals(c.get("requiredValue"))), "turnover Rs.26.90Crore");
         assertTrue(criteria.stream().anyMatch(c ->
                 "50400000".equals(c.get("requiredValue"))), "liquid assets Rs.5.04Crore");
+        // Each row quotes the sentence it was read from.
+        assertTrue(criteria.stream().allMatch(c -> String.valueOf(c.get("clauseText")).contains("Rs.")));
+        // The canned "Similar Work Experience: As per NIT" row is gone for good.
+        assertTrue(criteria.stream().noneMatch(c -> String.valueOf(c.get("requiredValue")).startsWith("As per NIT")));
     }
 
     // ── the previously-supported template must keep working ──────────────────
@@ -242,8 +267,11 @@ class TenderPdfExtractorTest {
 
     @Test
     void capsTheTitleOnAClauseBoundary() {
-        String t = TenderPdfExtractor.tidyTenderName(TRIPURA_COVER);
-        assertTrue(t.length() <= 300, "length=" + t.length());
+        // Longer than any real work description, so the 600-character cap bites.
+        String scope = "supply, erection, testing and commissioning of 33kV switchgear, "
+                     + "11kV feeders, control and relay panels, earthing and lightning protection, ";
+        String t = TenderPdfExtractor.tidyTenderName("Design, " + scope.repeat(6) + "and civil works");
+        assertTrue(t.length() <= 600 && t.length() > 450, "length=" + t.length());
         // Cut cleanly, not mid-word and not on dangling punctuation.
         assertFalse(t.endsWith(","), t);
         assertFalse(t.endsWith("-"), t);
@@ -267,10 +295,10 @@ class TenderPdfExtractorTest {
     @Test
     void tidiesTheKptclTitleItAlreadyHandled() {
         // The KPTCL title is pure work description — it must survive untouched
-        // apart from being capped.
+        // and whole.
         String t = (String) extractor.extractFromText(KPTCL).get("tenderName");
         assertTrue(t.startsWith("Establishing 2x20MVA, 110/11kV Sub-Station at Gholanoor"), t);
-        assertTrue(t.length() <= 300, "length=" + t.length());
+        assertTrue(t.length() <= 600, "length=" + t.length());
         assertFalse(t.contains("Tender Reference"), t);
     }
 

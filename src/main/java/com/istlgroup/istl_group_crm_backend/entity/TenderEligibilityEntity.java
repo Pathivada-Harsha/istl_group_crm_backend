@@ -51,4 +51,15 @@ public class TenderEligibilityEntity {
 
     @Column(name = "override_at")
     private LocalDate overrideAt;
+
+    /** Rows sharing a group are OR-alternatives: the group passes if any member does. */
+    @Column(name = "alt_group", length = 40)
+    private String altGroup;
+
+    /** The clause as the tender words it, verbatim — what the row was read from. */
+    @Column(name = "clause_text", columnDefinition = "TEXT")
+    private String clauseText;
+
+    @Column(name = "source_page")
+    private Integer sourcePage;
 }

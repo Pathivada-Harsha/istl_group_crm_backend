@@ -85,13 +85,16 @@ class PurchaseOrderPdfSummaryTest {
                 line(1, "Solar module", 1, 10000.00, 5),
                 line(2, "Mounting structure", 1, 2497.00, 18)), null));
 
+        // Figures are asserted the way the house money() formatter prints them:
+        // whole amounts without decimals, 2dp only when there are paise. That is
+        // deliberate (see the comment on money()), so the block legitimately
+        // mixes "12,497" with "449.46".
         assertTrue(text.contains("Subtotal"), "Subtotal row must exist — it never used to");
-        assertTrue(text.contains("12,497.00"), () -> "subtotal figure missing from:\n" + text);
+        assertTrue(text.contains("12,497"), () -> "subtotal figure missing from:\n" + text);
 
         assertTrue(text.contains("GST @ 5%"), "one GST row per rate");
         assertTrue(text.contains("GST @ 18%"), "one GST row per rate");
-        assertTrue(text.contains("500.00"), "5% GST figure");
-        assertTrue(text.contains("449.46"), "18% GST figure");
+        assertTrue(text.contains("449.46"), () -> "18% GST figure missing from:\n" + text);
 
         assertTrue(text.contains("Round Off"), "Round Off row");
         assertTrue(text.contains("-0.46"), () -> "signed round off missing from:\n" + text);

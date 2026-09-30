@@ -91,6 +91,24 @@ public class TenderWrapper {
     private String loaNumber;
     private String loaDate;
     private String agreementDate;
+
+    // EMD / bid security tracking (money paid and refunded; emdAmount is the demand)
+    private String emdStatus;
+    private String emdPaidAmount;
+    private String emdPaidDate;
+    private String emdPaymentMode;
+    private String emdReference;
+    private String emdPaidFromAccount;
+    private String emdBeneficiaryName;
+    private String emdBeneficiaryBank;
+    private String emdBeneficiaryAccount;
+    private String emdBeneficiaryIfsc;
+    private String emdValidTill;
+    private String emdRefundAmount;
+    private String emdRefundDate;
+    private String emdRefundReference;
+    private String emdRefundAccount;
+    private String emdNotes;
     private String projectId;
 
     // response-only

@@ -23,7 +23,16 @@ import org.springframework.web.multipart.MultipartFile;
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.*;
 import com.istlgroup.istl_group_crm_backend.repo.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 import com.istlgroup.istl_group_crm_backend.service.tender.ExtractedField;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderBoqLocator;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderBoqValidator;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderDocumentsValidator;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderSectionLocator;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderEligibilityValidator;
 import com.istlgroup.istl_group_crm_backend.service.tender.TenderFieldValidator;
 import com.istlgroup.istl_group_crm_backend.service.tender.TenderParseGate;
 import com.istlgroup.istl_group_crm_backend.service.tender.TenderParseResult;
@@ -138,27 +147,71 @@ public class TenderService {
 
         List<Map<String, Object>> boqItems = extraction.boqItems();
         List<Map<String, Object>> eligibility = extraction.eligibilityCriteria();
+        List<Map<String, Object>> documents = List.of();   // only the AI reads the checklist
+        List<String> notes = new ArrayList<>();
 
         String origin = ExtractedField.REGEX;
         String aiError = null;
         if (useAi) {
+            // Four independent reads of four different parts of the document,
+            // run side by side: one failing never costs the others, and the
+            // click waits for the slowest call rather than the sum of them.
+            TenderText eligibilitySection = extraction.eligibilityText();
+            TenderText documentsSection = extraction.documentsText();
+            TenderText boqSection = extraction.boqText();
+            CompletableFuture<Map<String, Object>> scalarCall = ai(() ->
+                    pdfAiExtractor.extractFromText(extraction.summaryText().asText()));
+            CompletableFuture<List<Map<String, Object>>> eligibilityCall = eligibilitySection.isEmpty()
+                    ? CompletableFuture.completedFuture(List.of())
+                    : ai(() -> pdfAiExtractor.extractEligibility(eligibilitySection.asText()));
+            CompletableFuture<List<Map<String, Object>>> documentsCall = documentsSection.isEmpty()
+                    ? CompletableFuture.completedFuture(List.of())
+                    : ai(() -> pdfAiExtractor.extractDocuments(documentsSection.asText()));
+            CompletableFuture<List<Map<String, Object>>> boqCall = boqSection.isEmpty()
+                    ? CompletableFuture.completedFuture(List.of())
+                    : ai(() -> pdfAiExtractor.extractBoq(boqSection.asText()));
+
             try {
                 // The merged map is revalidated from scratch, so the first pass's
                 // rejections are superseded rather than reported twice.
                 List<TenderParseResult.Discarded> fromAi = new ArrayList<>();
-                Merged merged = mergeAi(fields, extraction, fromAi);
-                fields = merged.fields();
+                fields = mergeAi(fields, scalarCall.join(), extraction, fromAi);
                 discarded = fromAi;
-                // The line scanner has no idea how this template lays a schedule
-                // out; if it found nothing, the AI's rows are all there is.
-                if (boqItems.isEmpty()) boqItems = merged.boqItems();
-                if (eligibility.isEmpty()) eligibility = merged.eligibilityCriteria();
                 origin = "regex+ai";
             } catch (Exception e) {
-                aiError = e.getMessage();
-                log.warn("AI tender parse failed: {}", e.getMessage());
+                aiError = cause(e);
+                log.warn("AI tender parse failed: {}", aiError);
+            }
+
+            // Each section's rows are checked against that section's text.
+            // When they survive they replace the layout-only rows outright.
+            try {
+                TenderEligibilityValidator.Result read =
+                        TenderEligibilityValidator.validate(eligibilityCall.join(), eligibilitySection);
+                if (!read.criteria().isEmpty()) eligibility = read.criteria();
+                discarded.addAll(read.discarded());
+            } catch (Exception e) {
+                notes.add("The eligibility read failed (" + cause(e) + ").");
+            }
+            try {
+                TenderDocumentsValidator.Result read =
+                        TenderDocumentsValidator.validate(documentsCall.join(), documentsSection);
+                documents = read.documents();
+                discarded.addAll(read.discarded());
+            } catch (Exception e) {
+                notes.add("The documents read failed (" + cause(e) + ").");
+            }
+            try {
+                TenderBoqValidator.Result read = TenderBoqValidator.validate(
+                        boqCall.join(), extraction.boq().rows(), boqSection);
+                if (!read.rows().isEmpty()) boqItems = read.rows();
+                discarded.addAll(read.discarded());
+            } catch (Exception e) {
+                notes.add("The BOQ read failed (" + cause(e) + ") — quantities are from the schedule "
+                        + "lines, descriptions are best-effort.");
             }
         }
+        notes.addAll(sectionNotes(extraction, useAi, eligibility, documents, boqItems));
 
         // Supporting dates exist only so the ordering check has something to
         // order against; they are not fields the CRM stores, so neither their
@@ -167,8 +220,10 @@ public class TenderService {
         discarded.removeIf(d -> TenderPdfExtractor.SUPPORTING_DATES.contains(d.field()));
 
         boolean complete = TenderParseGate.isComplete(fields.keySet());
-        log.info("Tender parse ({}): {} field(s) kept, {} discarded, complete={}",
-                origin, fields.size(), discarded.size(), complete);
+        log.info("Tender parse ({}): {} field(s) kept, {} discarded, complete={}; "
+                        + "{} eligibility, {} documents, {} BOQ row(s)",
+                origin, fields.size(), discarded.size(), complete,
+                eligibility.size(), documents.size(), boqItems.size());
 
         return new TenderParseResult(complete,
                 message(complete, fields, useAi, aiError),
@@ -176,10 +231,81 @@ public class TenderService {
                 new ArrayList<>(fields.values()),
                 boqItems,
                 eligibility,
+                documents,
+                notes,
                 discarded,
                 document.pageCount(),
                 extraction.summary() == null ? null : extraction.summary().fromPage(),
-                extraction.summary() == null ? null : extraction.summary().toPage());
+                extraction.summary() == null ? null : extraction.summary().toPage(),
+                extraction.eligibilitySections());
+    }
+
+    /** AI calls block on HTTP for seconds; they get their own threads, not the common pool. */
+    private static final ExecutorService AI_POOL = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "tender-ai");
+        t.setDaemon(true);
+        return t;
+    });
+
+    private static <T> CompletableFuture<T> ai(java.util.function.Supplier<T> call) {
+        return CompletableFuture.supplyAsync(call, AI_POOL);
+    }
+
+    private static String cause(Throwable e) {
+        Throwable c = e instanceof java.util.concurrent.CompletionException && e.getCause() != null ? e.getCause() : e;
+        return c.getMessage();
+    }
+
+    /**
+     * One line per child section: where it was read from, and what to do when
+     * nothing could be. An empty section should read as "the document doesn't
+     * have one" or "try the AI", never as a silent blank.
+     */
+    private static List<String> sectionNotes(TenderPdfExtractor.Extraction x, boolean usedAi,
+                                             List<Map<String, Object>> eligibility,
+                                             List<Map<String, Object>> documents,
+                                             List<Map<String, Object>> boq) {
+        List<String> out = new ArrayList<>();
+        String elig = pages(x.eligibilitySections());
+        if (elig == null) {
+            out.add("Eligibility: no qualifying-requirements section was recognised — enter them by hand.");
+        } else if (!usedAi) {
+            out.add("Eligibility (" + elig + "): only stated figures were read — the AI re-read extracts every clause.");
+        } else {
+            out.add("Eligibility: " + eligibility.size() + " criteria read from " + elig + ".");
+        }
+
+        String docs = pages(x.documentSections());
+        if (docs == null) {
+            out.add("Documents: no list of documents to submit was recognised.");
+        } else if (!usedAi) {
+            out.add("Documents (" + docs + "): the AI re-read builds the checklist from this section.");
+        } else {
+            out.add("Documents: " + documents.size() + " read from " + docs + ".");
+        }
+
+        TenderBoqLocator.Result b = x.boq();
+        if (b.found()) {
+            String where = b.fromPage().equals(b.toPage()) ? "p." + b.fromPage() : "pp." + b.fromPage() + "–" + b.toPage();
+            out.add("BOQ: " + boq.size() + " rows from " + where + (usedAi
+                    ? "."
+                    : " — quantities are exact; the AI re-read writes full descriptions."));
+        } else if (b.elsewhere() != null) {
+            out.add("BOQ: not in this PDF — " + b.elsewhere() + ". Import it on the Rate Analysis tab from Excel.");
+        } else {
+            out.add("BOQ: no bill of quantities was found in this PDF.");
+        }
+        return out;
+    }
+
+    private static String pages(List<TenderSectionLocator.Section> sections) {
+        if (sections.isEmpty()) return null;
+        StringBuilder sb = new StringBuilder();
+        for (TenderSectionLocator.Section s : sections) {
+            if (sb.length() > 0) sb.append(", ");
+            sb.append(s.fromPage() == s.toPage() ? "p." + s.fromPage() : "pp." + s.fromPage() + "–" + s.toPage());
+        }
+        return sb.toString();
     }
 
     /**
@@ -212,22 +338,17 @@ public class TenderService {
     }
 
     /** What an AI re-read produced, once it has been through the same rules. */
-    private record Merged(Map<String, ExtractedField> fields,
-                          List<Map<String, Object>> boqItems,
-                          List<Map<String, Object>> eligibilityCriteria) {}
-
     /**
-     * Re-read the summary block with the LLM and fold the result in. The AI wins
-     * a disagreement, but a value it changes is handed over <em>unticked</em>:
-     * the two extractors disagreeing is the clearest signal there is that a
-     * human should look at that row.
+     * Fold the AI's read of the summary block in. The AI wins a disagreement,
+     * but a value it changes is handed over <em>unticked</em>: the two
+     * extractors disagreeing is the clearest signal there is that a human
+     * should look at that row.
      */
-    @SuppressWarnings("unchecked")
-    private Merged mergeAi(Map<String, ExtractedField> regexFields,
-                           TenderPdfExtractor.Extraction extraction,
-                           List<TenderParseResult.Discarded> discarded) throws CustomException {
+    private Map<String, ExtractedField> mergeAi(Map<String, ExtractedField> regexFields,
+                                                Map<String, Object> ai,
+                                                TenderPdfExtractor.Extraction extraction,
+                                                List<TenderParseResult.Discarded> discarded) throws CustomException {
         TenderText block = extraction.summaryText();
-        Map<String, Object> ai = pdfAiExtractor.extractFromText(block.asText());
         if (ai == null || ai.isEmpty()) {
             throw new CustomException("the AI returned no recognisable fields");
         }
@@ -239,9 +360,7 @@ public class TenderService {
             boolean changes = existing != null && !existing.value().equals(value.strip());
             merged.put(e.getKey(), locate(block, e.getKey(), value.strip(), !changes));
         }
-        return new Merged(validate(merged, extraction, discarded),
-                (List<Map<String, Object>>) ai.getOrDefault("boqItems", List.of()),
-                (List<Map<String, Object>>) ai.getOrDefault("eligibilityCriteria", List.of()));
+        return validate(merged, extraction, discarded);
     }
 
     /** Give an AI value a page and a source line by finding it in the block. */
@@ -362,6 +481,9 @@ public class TenderService {
                 e.setOverrideReason(c.getOverrideReason());
                 e.setOverrideBy(c.getOverrideBy());
                 e.setOverrideAt(dt(c.getOverrideAt()));
+                e.setAltGroup(clip(c.getAltGroup(), 40));
+                e.setClauseText(c.getClauseText());
+                e.setSourcePage(integer(c.getSourcePage()));
                 eligibilityRepo.save(e);
             }
         }
@@ -466,6 +588,22 @@ public class TenderService {
         t.setLoaNumber(w.getLoaNumber());
         t.setLoaDate(dt(w.getLoaDate()));
         t.setAgreementDate(dt(w.getAgreementDate()));
+        t.setEmdStatus(clip(w.getEmdStatus(), 40));
+        t.setEmdPaidAmount(bd(w.getEmdPaidAmount()));
+        t.setEmdPaidDate(dt(w.getEmdPaidDate()));
+        t.setEmdPaymentMode(clip(w.getEmdPaymentMode(), 60));
+        t.setEmdReference(clip(w.getEmdReference(), 120));
+        t.setEmdPaidFromAccount(clip(w.getEmdPaidFromAccount(), 200));
+        t.setEmdBeneficiaryName(clip(w.getEmdBeneficiaryName(), 200));
+        t.setEmdBeneficiaryBank(clip(w.getEmdBeneficiaryBank(), 200));
+        t.setEmdBeneficiaryAccount(clip(w.getEmdBeneficiaryAccount(), 60));
+        t.setEmdBeneficiaryIfsc(clip(w.getEmdBeneficiaryIfsc(), 20));
+        t.setEmdValidTill(dt(w.getEmdValidTill()));
+        t.setEmdRefundAmount(bd(w.getEmdRefundAmount()));
+        t.setEmdRefundDate(dt(w.getEmdRefundDate()));
+        t.setEmdRefundReference(clip(w.getEmdRefundReference(), 120));
+        t.setEmdRefundAccount(clip(w.getEmdRefundAccount(), 200));
+        t.setEmdNotes(w.getEmdNotes());
         t.setProjectId(w.getProjectId());
     }
 
@@ -526,6 +664,22 @@ public class TenderService {
         w.setLoaNumber(t.getLoaNumber());
         w.setLoaDate(s(t.getLoaDate()));
         w.setAgreementDate(s(t.getAgreementDate()));
+        w.setEmdStatus(t.getEmdStatus());
+        w.setEmdPaidAmount(s(t.getEmdPaidAmount()));
+        w.setEmdPaidDate(s(t.getEmdPaidDate()));
+        w.setEmdPaymentMode(t.getEmdPaymentMode());
+        w.setEmdReference(t.getEmdReference());
+        w.setEmdPaidFromAccount(t.getEmdPaidFromAccount());
+        w.setEmdBeneficiaryName(t.getEmdBeneficiaryName());
+        w.setEmdBeneficiaryBank(t.getEmdBeneficiaryBank());
+        w.setEmdBeneficiaryAccount(t.getEmdBeneficiaryAccount());
+        w.setEmdBeneficiaryIfsc(t.getEmdBeneficiaryIfsc());
+        w.setEmdValidTill(s(t.getEmdValidTill()));
+        w.setEmdRefundAmount(s(t.getEmdRefundAmount()));
+        w.setEmdRefundDate(s(t.getEmdRefundDate()));
+        w.setEmdRefundReference(t.getEmdRefundReference());
+        w.setEmdRefundAccount(t.getEmdRefundAccount());
+        w.setEmdNotes(t.getEmdNotes());
         w.setProjectId(t.getProjectId());
         w.setCreatedAt(s(t.getCreatedAt()));
         w.setSourcePdfName(t.getSourcePdfName());
@@ -564,6 +718,9 @@ public class TenderService {
                 c.setOverrideReason(e.getOverrideReason());
                 c.setOverrideBy(e.getOverrideBy());
                 c.setOverrideAt(s(e.getOverrideAt()));
+                c.setAltGroup(e.getAltGroup());
+                c.setClauseText(e.getClauseText());
+                c.setSourcePage(e.getSourcePage() == null ? null : e.getSourcePage().toString());
                 elig.add(c);
             }
             w.setEligibilityCriteria(elig);
@@ -615,6 +772,13 @@ public class TenderService {
         String t = v.trim();
         if (t.isEmpty()) return null;
         try { return new BigDecimal(t); } catch (Exception e) { return null; }
+    }
+
+    private Integer integer(String v) {
+        if (v == null) return null;
+        String t = v.trim();
+        if (t.isEmpty()) return null;
+        try { return Integer.valueOf(t); } catch (Exception e) { return null; }
     }
 
     private LocalDate dt(String v) {

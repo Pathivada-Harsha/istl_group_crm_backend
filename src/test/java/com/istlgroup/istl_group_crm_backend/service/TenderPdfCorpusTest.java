@@ -27,6 +27,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import com.istlgroup.istl_group_crm_backend.service.tender.ExtractedField;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderBoqLocator;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderSectionLocator;
 import com.istlgroup.istl_group_crm_backend.service.tender.TenderFieldValidator;
 import com.istlgroup.istl_group_crm_backend.service.tender.TenderParseGate;
 import com.istlgroup.istl_group_crm_backend.service.tender.TenderText;
@@ -53,6 +55,12 @@ import com.istlgroup.istl_group_crm_backend.service.tender.TenderText;
  *   field.page       = 1-based page the value must be sourced from
  *   field            =            (empty: the field must be absent)
  *   pages / complete / summary.from / summary.to    document-level expectations
+ *   eligibility.pages  = located qualifying-requirements pages, e.g. 11-12,15,17-20
+ *   eligibility.values = required values the regex path reads there, in order
+ *   documents.pages    = located documents-to-submit pages
+ *   boq                = "from-to:rows" for the schedule, "elsewhere" when the PDF points
+ *                        to the portal, empty when there is none
+ *   boq.rows           = every schedule row as item=qty unit, in order
  * </pre>
  */
 class TenderPdfCorpusTest {
@@ -81,6 +89,11 @@ class TenderPdfCorpusTest {
         expectValue(expected, "complete", String.valueOf(sample.complete), pdfName);
         expectValue(expected, "summary.from", str(sample.summaryFrom), pdfName);
         expectValue(expected, "summary.to", str(sample.summaryTo), pdfName);
+        expectValue(expected, "eligibility.pages", sample.eligibilityPages(), pdfName);
+        expectValue(expected, "eligibility.values", sample.eligibilityValues(), pdfName);
+        expectValue(expected, "documents.pages", sample.documentPages(), pdfName);
+        expectValue(expected, "boq", sample.boqSummary(), pdfName);
+        expectValue(expected, "boq.rows", sample.boqRows(), pdfName);
 
         List<String> failures = new ArrayList<>();
         for (String key : expected.stringPropertyNames()) {
@@ -186,6 +199,25 @@ class TenderPdfCorpusTest {
         }
     }
 
+    /**
+     * An eligibility row must quote the clause it was read from, cite a page
+     * inside the located section, and carry a value the document states —
+     * never a placeholder like "As per NIT".
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("samples")
+    void everyEligibilityRowQuotesItsClause(String pdfName) throws IOException {
+        Sample sample = parse(pdfName);
+        for (Map<String, Object> row : sample.eligibility) {
+            String name = pdfName + " / " + row.get("criterionName");
+            assertFalse(String.valueOf(row.get("clauseText")).isBlank(), name + " has no clause text");
+            int page = (Integer) row.get("sourcePage");
+            assertTrue(sample.sections.stream().anyMatch(s -> page >= s.fromPage() && page <= s.toPage()),
+                    name + " cites page " + page + ", outside the eligibility section");
+            assertFalse(String.valueOf(row.get("requiredValue")).startsWith("As per"), name + " is a placeholder");
+        }
+    }
+
     /** Every fixture must bring its expected-value file, or it silently proves nothing. */
     @Test
     void everySampleHasExpectations() throws IOException {
@@ -198,7 +230,49 @@ class TenderPdfCorpusTest {
     // ── running one sample ───────────────────────────────────────────────────
 
     private record Sample(Map<String, ExtractedField> fields, boolean complete,
-                          int pageCount, Integer summaryFrom, Integer summaryTo) {}
+                          int pageCount, Integer summaryFrom, Integer summaryTo,
+                          List<TenderSectionLocator.Section> sections,
+                          List<Map<String, Object>> eligibility,
+                          List<TenderSectionLocator.Section> documentSections,
+                          TenderBoqLocator.Result boq) {
+
+        /** "17-20" or "11-12,15,17-20"; empty when no section was found. */
+        String eligibilityPages() {
+            return pagesOf(sections);
+        }
+
+        String documentPages() {
+            return pagesOf(documentSections);
+        }
+
+        /** "102-105:27" — schedule pages and row count; "elsewhere" when the PDF points to the portal. */
+        String boqSummary() {
+            if (boq.found()) return boq.fromPage() + "-" + boq.toPage() + ":" + boq.rows().size();
+            return boq.elsewhere() != null ? "elsewhere" : "";
+        }
+
+        /** Every schedule row as "item=qty unit", in order. */
+        String boqRows() {
+            List<String> out = new ArrayList<>();
+            for (TenderBoqLocator.Row r : boq.rows()) out.add(r.itemNo() + "=" + r.quantity() + " " + r.unit());
+            return String.join(",", out);
+        }
+
+        private static String pagesOf(List<TenderSectionLocator.Section> list) {
+            List<String> out = new ArrayList<>();
+            for (TenderSectionLocator.Section s : list) {
+                out.add(s.fromPage() == s.toPage() ? "" + s.fromPage() : s.fromPage() + "-" + s.toPage());
+            }
+            return String.join(",", out);
+        }
+
+        /** The regex path's required values, in order: "269000000,50400000,…". */
+        String eligibilityValues() {
+            List<String> out = new ArrayList<>();
+            for (Map<String, Object> r : eligibility) out.add(String.valueOf(r.get("requiredValue")));
+            return String.join(",", out);
+        }
+    }
 
     /**
      * Stages 1–5 exactly as the service runs them, minus Spring and minus the
@@ -220,7 +294,9 @@ class TenderPdfCorpusTest {
 
         return new Sample(kept, TenderParseGate.isComplete(kept.keySet()), document.pageCount(),
                 extraction.summary() == null ? null : extraction.summary().fromPage(),
-                extraction.summary() == null ? null : extraction.summary().toPage());
+                extraction.summary() == null ? null : extraction.summary().toPage(),
+                extraction.eligibilitySections(), extraction.eligibilityCriteria(),
+                extraction.documentSections(), extraction.boq());
     }
 
     private static Properties expectations(String pdfName) {
@@ -246,7 +322,8 @@ class TenderPdfCorpusTest {
     }
 
     private static final List<String> DOCUMENT_KEYS =
-            List.of("pages", "complete", "summary.from", "summary.to");
+            List.of("pages", "complete", "summary.from", "summary.to",
+                    "eligibility.pages", "eligibility.values", "documents.pages", "boq", "boq.rows");
     private static final List<String> SUFFIXES =
             List.of("startsWith", "contains", "page");
 }
