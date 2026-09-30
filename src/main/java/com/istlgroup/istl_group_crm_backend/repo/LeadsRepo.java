@@ -203,13 +203,6 @@ public interface LeadsRepo extends JpaRepository<LeadsEntity, Long> {
         @Param("endDate") LocalDateTime endDate
     );
 
-    @Query("SELECT l FROM LeadsEntity l " +
-            "WHERE l.deletedAt IS NULL " +
-            "AND UPPER(l.telecallerStatus) = 'NOT_RESPONDED' " +
-            "AND l.telecallerStatusUpdatedAt <= :cutoff")
-     List<LeadsEntity> findNotRespondedLeadsOlderThan(
-             @Param("cutoff") LocalDateTime cutoff);
-
      /**
       * Used by LeadsImportService — count existing emails to detect duplicates.
       */
