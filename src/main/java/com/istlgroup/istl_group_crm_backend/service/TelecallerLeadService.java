@@ -530,7 +530,7 @@ public class TelecallerLeadService {
         String description = switch (newStatus) {
             case "INTERESTED"     -> buildInterestedHistoryNote(req, lead);
             case "NOT_INTERESTED" -> "Telecaller marked as Not Interested. Reason: " + req.getReason();
-            case "NOT_RESPONDED"  -> "Telecaller marked Not Responded — resurfaces in 7 days";
+            case "NOT_RESPONDED"  -> "Telecaller marked Not Responded — resurfaces from next day";
             case "KEEP_IN_VIEW"   -> "Telecaller marked Keep in View. Conversation: " + req.getReason()
                     + (req.getKivReminderDate() != null && !req.getKivReminderDate().isBlank()
                         ? ". Callback date: " + req.getKivReminderDate() : "");
