@@ -109,6 +109,15 @@ public class TenderWrapper {
     private String emdRefundReference;
     private String emdRefundAccount;
     private String emdNotes;
+
+    // tender / processing fee (separate from EMD)
+    private String feeAmount;
+    private String feeRefundable;
+    private String feeBeneficiaryName;
+    private String feeBeneficiaryBank;
+    private String feeBeneficiaryAccount;
+    private String feeBeneficiaryIfsc;
+
     private String projectId;
 
     // response-only
@@ -119,6 +128,19 @@ public class TenderWrapper {
     private String sourcePdfName;
     private String sourcePdfMimeType;
     private Boolean hasSourcePdf;
+
+    // Request-only, never stored as columns: set when this save applies an Excel
+    // import, so the service can record it in the tender's history.
+    private String importSource;
+    private String importFileName;
+    private String importSummary;
+    /**
+     * One entry per table whose unverified rows were confirmed with the bulk tick: {table, rows}.
+     * Write-only: never sent back, so a client that echoes the tender on its next
+     * save (and turns nulls into "") cannot send a string where a list belongs.
+     */
+    @com.fasterxml.jackson.annotation.JsonProperty(access = com.fasterxml.jackson.annotation.JsonProperty.Access.WRITE_ONLY)
+    private List<java.util.Map<String, Object>> importBulkAcks;
 
     // child collections
     private List<TenderBoqItemWrapper> boqItems;

@@ -56,6 +56,14 @@ public class TenderEligibilityEntity {
     @Column(name = "alt_group", length = 40)
     private String altGroup;
 
+    /**
+     * Bidder class for tiered (empanelment / EOI) tenders — "Category A" etc.
+     * A bidder qualifies by meeting every row of ANY one tier, plus every row
+     * with no tier. Blank on ordinary tenders, where every row is required.
+     */
+    @Column(name = "tier", length = 60)
+    private String tier;
+
     /** The clause as the tender words it, verbatim — what the row was read from. */
     @Column(name = "clause_text", columnDefinition = "TEXT")
     private String clauseText;

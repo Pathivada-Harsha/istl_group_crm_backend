@@ -38,6 +38,9 @@ public final class TenderClauseFinder {
     private final String flat;
     private final String norm;
     private final List<Integer> origin = new ArrayList<>();
+    /** The shadow with no separators at all — "proj- ect" and "Rs.59,000" vs "Rs. 59,000" meet here. */
+    private final String squeezed;
+    private final List<Integer> squeezedOrigin = new ArrayList<>();
 
     public TenderClauseFinder(TenderText section) {
         this.section = section;
@@ -57,6 +60,11 @@ public final class TenderClauseFinder {
             }
         }
         this.norm = sb.toString();
+        StringBuilder sq = new StringBuilder();
+        for (int i = 0; i < norm.length(); i++) {
+            if (norm.charAt(i) != ' ') { sq.append(norm.charAt(i)); squeezedOrigin.add(origin.get(i)); }
+        }
+        this.squeezed = sq.toString();
         int start = 0;
         for (int i = 0; i <= norm.length(); i++) {
             if (i == norm.length() || norm.charAt(i) == ' ') {
@@ -89,6 +97,72 @@ public final class TenderClauseFinder {
         String padded = " " + norm + " ";
         long hit = ws.stream().filter(w -> padded.contains(" " + w + " ")).count();
         return (double) hit / ws.size();
+    }
+
+    /**
+     * Where a quoted phrase is printed, or null. The quote must be the
+     * document's own words, in order — this is the check that a value pasted
+     * into a spreadsheet by an LLM really came from the PDF, so unlike
+     * {@link #find} nothing may be paraphrased or skipped.
+     *
+     * <p>Tolerated, because they are how text extraction and copying differ,
+     * not what the words say: case, spacing, line breaks, punctuation, a word
+     * hyphenated across a line ("proj- ect"), and words that the PDF's table
+     * columns interleave (each next word within {@link #MAX_GAP} words).
+     */
+    public Clause locate(String phrase) {
+        List<String> ws = words(phrase);
+        if (ws.isEmpty()) return null;
+
+        // 1. The words, contiguous, on word boundaries.
+        String needle = String.join(" ", ws);
+        for (int at = norm.indexOf(needle); at >= 0; at = norm.indexOf(needle, at + 1)) {
+            int end = at + needle.length();
+            boolean startOk = at == 0 || norm.charAt(at - 1) == ' ';
+            boolean endOk = end == norm.length() || norm.charAt(end) == ' ';
+            if (startOk && endOk) return clause(origin.get(at), origin.get(end - 1) + 1);
+        }
+
+        // 2. With every separator dropped: hyphenation and split figures. The
+        //    match must still begin and end on a word boundary of the document.
+        String sq = String.join("", ws);
+        if (sq.length() >= 4) {
+            for (int at = squeezed.indexOf(sq); at >= 0; at = squeezed.indexOf(sq, at + 1)) {
+                int from = squeezedOrigin.get(at);
+                int to = squeezedOrigin.get(at + sq.length() - 1) + 1;
+                boolean startOk = from == 0 || !Character.isLetterOrDigit(flat.charAt(from - 1));
+                boolean endOk = to >= flat.length() || !Character.isLetterOrDigit(flat.charAt(to));
+                if (startOk && endOk) return clause(from, to);
+            }
+        }
+
+        // 3. Every word, in order, with another table column's words between them.
+        //    One interleaved column at most doubles the span, so the words skipped
+        //    may not outnumber the words quoted — otherwise a common phrase
+        //    ("Average Turnover greater or equal to Rs. 50 Cr") strings itself
+        //    together out of a neighbouring row.
+        if (ws.size() >= MIN_ANCHOR_WORDS) {
+            for (int i = 0; i < tokens.size(); i++) {
+                if (!tokens.get(i).equals(ws.get(0))) continue;
+                int pos = i;
+                boolean all = true;
+                for (int w = 1; w < ws.size() && all; w++) {
+                    all = false;
+                    for (int j = pos + 1; j <= Math.min(tokens.size() - 1, pos + MAX_GAP); j++) {
+                        if (tokens.get(j).equals(ws.get(w))) { pos = j; all = true; break; }
+                    }
+                }
+                if (all && (pos - i + 1) - ws.size() <= ws.size()) {
+                    int last = tokenStart.get(pos) + tokens.get(pos).length() - 1;
+                    return clause(origin.get(tokenStart.get(i)), origin.get(last) + 1);
+                }
+            }
+        }
+        return null;
+    }
+
+    private Clause clause(int from, int to) {
+        return new Clause(flat.substring(from, to).replaceAll("\\s+", " ").strip(), section.pageAtFlatOffset(from));
     }
 
     public Clause find(String start, String end) {

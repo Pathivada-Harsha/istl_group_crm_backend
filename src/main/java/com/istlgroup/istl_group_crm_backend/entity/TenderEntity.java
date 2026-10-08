@@ -252,6 +252,27 @@ public class TenderEntity {
     @Column(name = "emd_notes", columnDefinition = "TEXT")
     private String emdNotes;
 
+    // ── tender / processing fee: a separate charge from the EMD. A tender can
+    //    ask for a fee, an EMD, both or neither. ──
+    @Column(name = "fee_amount", precision = 18, scale = 2)
+    private BigDecimal feeAmount;
+
+    /** "Yes" / "No" as the tender states it; blank when it does not say. */
+    @Column(name = "fee_refundable", length = 10)
+    private String feeRefundable;
+
+    @Column(name = "fee_beneficiary_name", length = 200)
+    private String feeBeneficiaryName;
+
+    @Column(name = "fee_beneficiary_bank", length = 200)
+    private String feeBeneficiaryBank;
+
+    @Column(name = "fee_beneficiary_account", length = 60)
+    private String feeBeneficiaryAccount;
+
+    @Column(name = "fee_beneficiary_ifsc", length = 20)
+    private String feeBeneficiaryIfsc;
+
     // linked project (UI indicator only for now; String to match the frontend)
     @Column(name = "project_id")
     private String projectId;

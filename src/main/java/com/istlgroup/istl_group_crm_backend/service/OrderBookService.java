@@ -177,10 +177,6 @@ public class OrderBookService {
         return (ids == null || ids.isEmpty()) ? java.util.Collections.singletonList(userId) : ids;
     }
 
-    private boolean hasTeamAccess(OrderBookEntity o, List<Long> memberIds) {
-        return memberIds.contains(o.getCreatedBy());
-    }
-
     /**
      * Any role starting with "ACCOUNTS_" gets full data visibility like L1/L2.
      * UI buttons are still individually gated by pagePermissions.
@@ -204,15 +200,17 @@ public class OrderBookService {
 
         // projectId filter — apply on top of scoped data (all levels)
         if (projectId != null && !projectId.isEmpty()) {
-            List<OrderBookEntity> projectBooks =
-                orderBookRepo.findByProjectIdAndDeletedAtIsNull(projectId);
-            // further filter by user scope for non-admin, non-accounts users
-            if (level > 2 && !isAccountsRole(userRole)) {
-                final List<Long> memberIds = level == 3 ? resolveTeamMemberIds(userId) : null;
-                projectBooks = projectBooks.stream().filter(o -> {
-                    if (level == 3) return hasTeamAccess(o, memberIds);
-                    return o.getCreatedBy() != null && o.getCreatedBy().equals(userId);
-                }).collect(java.util.stream.Collectors.toList());
+            // Same visibility as the Order Book list (searchOrderBooks*): a
+            // createdBy-only filter here hid order books the list showed — e.g.
+            // one whose lead the user closed — and the invoice screen then said
+            // "No Order Book Found".
+            List<OrderBookEntity> projectBooks;
+            if (level <= 2 || isAccountsRole(userRole)) {
+                projectBooks = orderBookRepo.findByProjectIdAndDeletedAtIsNull(projectId);
+            } else if (level == 3) {
+                projectBooks = orderBookRepo.findByProjectIdVisibleToTeam(projectId, resolveTeamMemberIds(userId));
+            } else {
+                projectBooks = orderBookRepo.findByProjectIdVisibleToUser(projectId, userId);
             }
             int start = (int) pageable.getOffset();
             int end   = Math.min(start + pageable.getPageSize(), projectBooks.size());

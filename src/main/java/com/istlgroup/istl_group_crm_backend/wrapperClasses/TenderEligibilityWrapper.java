@@ -24,6 +24,7 @@ public class TenderEligibilityWrapper {
     private String overrideAt;
 
     private String altGroup;
+    private String tier;
     private String clauseText;
     private String sourcePage;
 }
