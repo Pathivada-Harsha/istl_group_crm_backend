@@ -53,6 +53,32 @@ public interface OrderBookRepo extends JpaRepository<OrderBookEntity, Long> {
 
 	List<OrderBookEntity> findByProjectIdAndDeletedAtIsNull(String projectId);
 
+    // ── by project, with the SAME visibility as the Order Book list ───────────
+    // The invoice / PO screens look an order book up by project. They must see
+    // exactly what the list shows the user: own order books, plus those whose
+    // customer the user (or team) created, is assigned to, or closed the lead
+    // for. A createdBy-only check here hid order books the list displayed.
+
+    /** L4: a project's order books visible to this user. */
+    @Query("SELECT DISTINCT o FROM OrderBookEntity o WHERE o.deletedAt IS NULL AND o.projectId = :projectId AND (" +
+           "  o.createdBy = :userId OR " +
+           "  EXISTS (SELECT c FROM CustomersEntity c WHERE c.id = o.customerId AND " +
+           "    (c.createdBy = :userId OR c.assignedTo = :userId OR " +
+           "     EXISTS (SELECT l FROM LeadsEntity l WHERE l.customerId = c.id AND l.closedByUserId = :userId)))" +
+           ") ORDER BY o.createdAt DESC")
+    List<OrderBookEntity> findByProjectIdVisibleToUser(
+        @Param("projectId") String projectId, @Param("userId") Long userId);
+
+    /** L3: a project's order books visible to this team. */
+    @Query("SELECT DISTINCT o FROM OrderBookEntity o WHERE o.deletedAt IS NULL AND o.projectId = :projectId AND (" +
+           "  o.createdBy IN :memberIds OR " +
+           "  EXISTS (SELECT c FROM CustomersEntity c WHERE c.id = o.customerId AND " +
+           "    (c.createdBy IN :memberIds OR c.assignedTo IN :memberIds OR " +
+           "     EXISTS (SELECT l FROM LeadsEntity l WHERE l.customerId = c.id AND l.closedByUserId IN :memberIds)))" +
+           ") ORDER BY o.createdAt DESC")
+    List<OrderBookEntity> findByProjectIdVisibleToTeam(
+        @Param("projectId") String projectId, @Param("memberIds") List<Long> memberIds);
+
     // ── L4: user-scoped ───────────────────────────────────────────────────────
 
     /** All order books created by this user OR whose customer was created by / assigned to this user. */

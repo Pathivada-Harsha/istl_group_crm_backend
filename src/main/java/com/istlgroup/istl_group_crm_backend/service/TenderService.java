@@ -82,17 +82,18 @@ public class TenderService {
 
     // ── writes ───────────────────────────────────────────────────────────
     @Transactional
-    public TenderWrapper create(TenderWrapper w, Long userId) throws CustomException {
+    public TenderWrapper create(TenderWrapper w, Long userId, String actorName) throws CustomException {
         TenderEntity t = new TenderEntity();
         applyScalars(t, w);
         t.setCreatedBy(userId);
         TenderEntity saved = tenderRepo.save(t);
         saveChildren(saved.getId(), w);
+        recordImport(saved.getId(), w, actorName);
         return toWrapper(tenderRepo.findById(saved.getId()).orElse(saved), true);
     }
 
     @Transactional
-    public TenderWrapper update(Long id, TenderWrapper w, Long userId) throws CustomException {
+    public TenderWrapper update(Long id, TenderWrapper w, Long userId, String actorName) throws CustomException {
         TenderEntity t = tenderRepo.findByIdAndDeletedAtIsNull(id)
                 .orElseThrow(() -> new CustomException("Tender not found"));
         applyScalars(t, w);
@@ -100,6 +101,7 @@ public class TenderService {
         // whole-object save: replace all child collections
         deleteChildren(id);
         saveChildren(id, w);
+        recordImport(id, w, actorName);
         return toWrapper(tenderRepo.findById(id).orElse(t), true);
     }
 
@@ -135,7 +137,7 @@ public class TenderService {
         }
         // A PDF with no text layer (a scan/photocopy) yields nothing for either
         // parser — say so plainly instead of reporting "no fields recognised".
-        if (document.charCount() < 200) {
+        if (document.charCount() < MIN_TEXT_LAYER_CHARS) {
             throw new CustomException(
                     "This PDF has no readable text layer (it looks like a scan), so fields "
                   + "can't be extracted automatically. Please enter them manually.");
@@ -430,13 +432,55 @@ public class TenderService {
         return t;
     }
 
-    private void validatePdf(MultipartFile file) throws CustomException {
+    /** Fewer extracted characters than this and the PDF is a scan with no text layer. */
+    public static final int MIN_TEXT_LAYER_CHARS = 200;
+
+    public static void validatePdf(MultipartFile file) throws CustomException {
         if (file == null || file.isEmpty()) throw new CustomException("No file provided");
         if (file.getSize() > MAX_PDF_BYTES) throw new CustomException("File exceeds the 50 MB limit");
         String mime = file.getContentType();
         String name = file.getOriginalFilename() != null ? file.getOriginalFilename().toLowerCase() : "";
         boolean isPdf = (mime != null && mime.toLowerCase().contains("pdf")) || name.endsWith(".pdf");
         if (!isPdf) throw new CustomException("Only PDF files are supported");
+    }
+
+    /**
+     * When this save applies an Excel import, say so in the tender's history:
+     * which file, what it carried, and who imported it. The name comes from the
+     * session, not the request.
+     */
+    private void recordImport(Long tenderId, TenderWrapper w, String actorName) {
+        if (!"excel".equalsIgnoreCase(w.getImportSource())) return;
+        TenderApprovalLogEntity e = new TenderApprovalLogEntity();
+        e.setTenderId(tenderId);
+        e.setStage("Import");
+        e.setAction("Imported from Excel");
+        e.setActionBy(actorName);
+        String file = w.getImportFileName() == null || w.getImportFileName().isBlank()
+                ? "(unnamed file)" : w.getImportFileName().strip();
+        String summary = w.getImportSummary() == null ? "" : w.getImportSummary().strip();
+        e.setRemarks(clip("File: " + file + (summary.isEmpty() ? "" : " · " + summary), 2000));
+        e.setCreatedAt(LocalDateTime.now());
+        approvalLogRepo.save(e);
+
+        // A bulk tick confirms rows nobody could match to the PDF, so who used it,
+        // on which table and for how many rows is kept on the record.
+        if (w.getImportBulkAcks() == null) return;
+        for (Map<String, Object> ack : w.getImportBulkAcks()) {
+            if (ack == null) continue;
+            Object table = ack.get("table");
+            Object rows = ack.get("rows");
+            if (table == null || rows == null) continue;
+            TenderApprovalLogEntity b = new TenderApprovalLogEntity();
+            b.setTenderId(tenderId);
+            b.setStage("Import");
+            b.setAction("Bulk-confirmed unverified rows");
+            b.setActionBy(actorName);
+            b.setRemarks(clip("Table: " + table + " · " + rows + " row" + ("1".equals(rows.toString()) ? "" : "s")
+                    + " not found in the PDF, confirmed with one tick · File: " + file, 2000));
+            b.setCreatedAt(LocalDateTime.now());
+            approvalLogRepo.save(b);
+        }
     }
 
     // ── child persistence ─────────────────────────────────────────────────
@@ -482,6 +526,7 @@ public class TenderService {
                 e.setOverrideBy(c.getOverrideBy());
                 e.setOverrideAt(dt(c.getOverrideAt()));
                 e.setAltGroup(clip(c.getAltGroup(), 40));
+                e.setTier(clip(c.getTier(), 60));
                 e.setClauseText(c.getClauseText());
                 e.setSourcePage(integer(c.getSourcePage()));
                 eligibilityRepo.save(e);
@@ -604,6 +649,12 @@ public class TenderService {
         t.setEmdRefundReference(clip(w.getEmdRefundReference(), 120));
         t.setEmdRefundAccount(clip(w.getEmdRefundAccount(), 200));
         t.setEmdNotes(w.getEmdNotes());
+        t.setFeeAmount(bd(w.getFeeAmount()));
+        t.setFeeRefundable(clip(w.getFeeRefundable(), 10));
+        t.setFeeBeneficiaryName(clip(w.getFeeBeneficiaryName(), 200));
+        t.setFeeBeneficiaryBank(clip(w.getFeeBeneficiaryBank(), 200));
+        t.setFeeBeneficiaryAccount(clip(w.getFeeBeneficiaryAccount(), 60));
+        t.setFeeBeneficiaryIfsc(clip(w.getFeeBeneficiaryIfsc(), 20));
         t.setProjectId(w.getProjectId());
     }
 
@@ -680,6 +731,12 @@ public class TenderService {
         w.setEmdRefundReference(t.getEmdRefundReference());
         w.setEmdRefundAccount(t.getEmdRefundAccount());
         w.setEmdNotes(t.getEmdNotes());
+        w.setFeeAmount(s(t.getFeeAmount()));
+        w.setFeeRefundable(t.getFeeRefundable());
+        w.setFeeBeneficiaryName(t.getFeeBeneficiaryName());
+        w.setFeeBeneficiaryBank(t.getFeeBeneficiaryBank());
+        w.setFeeBeneficiaryAccount(t.getFeeBeneficiaryAccount());
+        w.setFeeBeneficiaryIfsc(t.getFeeBeneficiaryIfsc());
         w.setProjectId(t.getProjectId());
         w.setCreatedAt(s(t.getCreatedAt()));
         w.setSourcePdfName(t.getSourcePdfName());
@@ -719,6 +776,7 @@ public class TenderService {
                 c.setOverrideBy(e.getOverrideBy());
                 c.setOverrideAt(s(e.getOverrideAt()));
                 c.setAltGroup(e.getAltGroup());
+                c.setTier(e.getTier());
                 c.setClauseText(e.getClauseText());
                 c.setSourcePage(e.getSourcePage() == null ? null : e.getSourcePage().toString());
                 elig.add(c);

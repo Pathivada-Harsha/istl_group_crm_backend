@@ -1,6 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
 import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserName;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -15,8 +16,13 @@ import org.springframework.web.multipart.MultipartFile;
 
 import com.istlgroup.istl_group_crm_backend.customException.CustomException;
 import com.istlgroup.istl_group_crm_backend.entity.TenderEntity;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.istlgroup.istl_group_crm_backend.service.TenderExcelService;
 import com.istlgroup.istl_group_crm_backend.service.TenderService;
+import com.istlgroup.istl_group_crm_backend.service.tender.TenderExcelOptions;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.TenderWrapper;
+
+import jakarta.servlet.http.HttpSession;
 
 /**
  * Tenders REST API. Mirrors the OrderBook controller conventions: a
@@ -30,6 +36,12 @@ public class TenderController {
 
     @Autowired
     private TenderService tenderService;
+
+    @Autowired
+    private TenderExcelService tenderExcelService;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @GetMapping("/getAll")
     public ResponseEntity<Map<String, Object>> getAll() {
@@ -62,9 +74,10 @@ public class TenderController {
     @PostMapping("/create")
     public ResponseEntity<Map<String, Object>> create(
             @RequestBody TenderWrapper request,
-            @ActingUserId Long userId) {
+            @ActingUserId Long userId,
+            @ActingUserName String userName) {
         try {
-            TenderWrapper created = tenderService.create(request, userId);
+            TenderWrapper created = tenderService.create(request, userId, userName);
             Map<String, Object> res = new HashMap<>();
             res.put("success", true);
             res.put("message", "Tender created successfully");
@@ -81,9 +94,10 @@ public class TenderController {
     public ResponseEntity<Map<String, Object>> update(
             @PathVariable Long id,
             @RequestBody TenderWrapper request,
-            @ActingUserId Long userId) {
+            @ActingUserId Long userId,
+            @ActingUserName String userName) {
         try {
-            TenderWrapper updated = tenderService.update(id, request, userId);
+            TenderWrapper updated = tenderService.update(id, request, userId, userName);
             Map<String, Object> res = new HashMap<>();
             res.put("success", true);
             res.put("message", "Tender updated successfully");
@@ -175,6 +189,86 @@ public class TenderController {
             return ResponseEntity.notFound().build();
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    // ── Excel template: download (blank or pre-filled) / import (stateless) / re-check ──
+
+    /** {@code options} are the app's dropdown vocabularies; {@code tender} pre-fills the template. */
+    public record ExcelTemplateRequest(TenderExcelOptions options, TenderWrapper tender) {}
+
+    /**
+     * Values as edited in the review, to be re-checked by the import's own rules
+     * — and against the import's PDF, which the session holds under {@code importId}.
+     */
+    public record ExcelValidateRequest(TenderExcelOptions options,
+                                       Map<String, String> fields,
+                                       Map<String, String> fieldSources,
+                                       List<Map<String, String>> eligibilityCriteria,
+                                       List<Map<String, String>> documents,
+                                       List<Map<String, String>> boqItems,
+                                       String version,
+                                       String importId) {}
+
+    @PostMapping("/excel/template")
+    public ResponseEntity<byte[]> excelTemplate(@RequestBody(required = false) ExcelTemplateRequest request) {
+        try {
+            TenderWrapper prefill = request == null ? null : request.tender();
+            byte[] bytes = tenderExcelService.template(prefill, request == null ? null : request.options());
+            String ref = prefill != null && prefill.getTenderNumber() != null && !prefill.getTenderNumber().isBlank()
+                    ? "-" + prefill.getTenderNumber().replaceAll("[^A-Za-z0-9._-]+", "_") : "";
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"Tender-Template" + ref + ".xlsx\"")
+                    .contentType(MediaType.parseMediaType(
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                    .body(bytes);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    /**
+     * Reads the filled template into a review, checking every value against the
+     * tender PDF: the one uploaded with it, or — for an existing tender, when
+     * none is uploaded — the one stored on the tender. Nothing is saved.
+     */
+    @PostMapping(value = "/excel/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<Map<String, Object>> excelImport(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "pdf", required = false) MultipartFile pdf,
+            @RequestParam(value = "tenderId", required = false) Long tenderId,
+            @RequestParam(value = "options", required = false) String optionsJson,
+            HttpSession session) {
+        try {
+            TenderExcelOptions options = optionsJson == null || optionsJson.isBlank()
+                    ? TenderExcelOptions.empty()
+                    : objectMapper.readValue(optionsJson, TenderExcelOptions.class);
+            Map<String, Object> res = new HashMap<>();
+            res.put("success", true);
+            res.put("data", tenderExcelService.importFile(file, pdf, tenderId, options, session));
+            return ResponseEntity.ok(res);
+        } catch (CustomException e) {
+            return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return error("Failed to read the Excel file: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    @PostMapping("/excel/validate")
+    public ResponseEntity<Map<String, Object>> excelValidate(@RequestBody ExcelValidateRequest request,
+                                                             HttpSession session) {
+        try {
+            Map<String, List<Map<String, String>>> tables = new HashMap<>();
+            tables.put("eligibilityCriteria", request.eligibilityCriteria());
+            tables.put("documents", request.documents());
+            tables.put("boqItems", request.boqItems());
+            Map<String, Object> res = new HashMap<>();
+            res.put("success", true);
+            res.put("data", tenderExcelService.validate(request.fields(), request.fieldSources(), tables,
+                    request.options(), request.version(), request.importId(), session));
+            return ResponseEntity.ok(res);
+        } catch (Exception e) {
+            return error("Failed to check the values: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
 
