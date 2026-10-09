@@ -89,6 +89,7 @@ public interface LeadsRepo extends JpaRepository<LeadsEntity, Long> {
            "AND (:groupName IS NULL OR l.groupName = :groupName) " +
            "AND (:subGroupName IS NULL OR l.subGroupName = :subGroupName) " +
            "AND (:assignedTo IS NULL OR l.assignedTo = :assignedTo) " +
+           "AND (:handlerUserId IS NULL OR l.assignedTo = :handlerUserId OR l.bdAssignedTo = :handlerUserId) " +
            "AND (:fromDate IS NULL OR l.createdAt >= :fromDate) " +
            "AND (:toDate IS NULL OR l.createdAt <= :toDate)",
            countQuery = "SELECT COUNT(l) FROM LeadsEntity l WHERE l.deletedAt IS NULL " +
@@ -102,6 +103,7 @@ public interface LeadsRepo extends JpaRepository<LeadsEntity, Long> {
            "AND (:groupName IS NULL OR l.groupName = :groupName) " +
            "AND (:subGroupName IS NULL OR l.subGroupName = :subGroupName) " +
            "AND (:assignedTo IS NULL OR l.assignedTo = :assignedTo) " +
+           "AND (:handlerUserId IS NULL OR l.assignedTo = :handlerUserId OR l.bdAssignedTo = :handlerUserId) " +
            "AND (:fromDate IS NULL OR l.createdAt >= :fromDate) " +
            "AND (:toDate IS NULL OR l.createdAt <= :toDate)")
     Page<LeadsEntity> searchLeadsPaged(
@@ -112,6 +114,7 @@ public interface LeadsRepo extends JpaRepository<LeadsEntity, Long> {
         @Param("groupName") String groupName,
         @Param("subGroupName") String subGroupName,
         @Param("assignedTo") Long assignedTo,
+        @Param("handlerUserId") Long handlerUserId,
         @Param("fromDate") LocalDateTime fromDate,
         @Param("toDate") LocalDateTime toDate,
         Pageable pageable
@@ -246,6 +249,7 @@ public interface LeadsRepo extends JpaRepository<LeadsEntity, Long> {
              "AND (:groupName    IS NULL OR l.groupName    = :groupName) " +
              "AND (:subGroupName IS NULL OR l.subGroupName = :subGroupName) " +
              "AND (:assignedTo   IS NULL OR l.assignedTo   = :assignedTo) " +
+             "AND (:handlerUserId IS NULL OR l.assignedTo = :handlerUserId OR l.bdAssignedTo = :handlerUserId) " +
              "AND (:fromDate     IS NULL OR l.createdAt   >= :fromDate) " +
              "AND (:toDate       IS NULL OR l.createdAt   <= :toDate)",
              countQuery =
@@ -266,6 +270,7 @@ public interface LeadsRepo extends JpaRepository<LeadsEntity, Long> {
              "AND (:groupName    IS NULL OR l.groupName    = :groupName) " +
              "AND (:subGroupName IS NULL OR l.subGroupName = :subGroupName) " +
              "AND (:assignedTo   IS NULL OR l.assignedTo   = :assignedTo) " +
+             "AND (:handlerUserId IS NULL OR l.assignedTo = :handlerUserId OR l.bdAssignedTo = :handlerUserId) " +
              "AND (:fromDate     IS NULL OR l.createdAt   >= :fromDate) " +
              "AND (:toDate       IS NULL OR l.createdAt   <= :toDate)")
       Page<LeadsEntity> searchAccessibleByUserPaged(
@@ -277,6 +282,7 @@ public interface LeadsRepo extends JpaRepository<LeadsEntity, Long> {
           @Param("groupName")    String groupName,
           @Param("subGroupName") String subGroupName,
           @Param("assignedTo")   Long assignedTo,
+          @Param("handlerUserId") Long handlerUserId,
           @Param("fromDate")     LocalDateTime fromDate,
           @Param("toDate")       LocalDateTime toDate,
           Pageable pageable
@@ -319,6 +325,7 @@ public interface LeadsRepo extends JpaRepository<LeadsEntity, Long> {
            "AND (:groupName    IS NULL OR l.groupName    = :groupName) " +
            "AND (:subGroupName IS NULL OR l.subGroupName = :subGroupName) " +
            "AND (:assignedTo   IS NULL OR l.assignedTo   = :assignedTo) " +
+           "AND (:handlerUserId IS NULL OR l.assignedTo = :handlerUserId OR l.bdAssignedTo = :handlerUserId) " +
            "AND (:fromDate     IS NULL OR l.createdAt   >= :fromDate) " +
            "AND (:toDate       IS NULL OR l.createdAt   <= :toDate)",
            countQuery =
@@ -336,6 +343,7 @@ public interface LeadsRepo extends JpaRepository<LeadsEntity, Long> {
            "AND (:groupName    IS NULL OR l.groupName    = :groupName) " +
            "AND (:subGroupName IS NULL OR l.subGroupName = :subGroupName) " +
            "AND (:assignedTo   IS NULL OR l.assignedTo   = :assignedTo) " +
+           "AND (:handlerUserId IS NULL OR l.assignedTo = :handlerUserId OR l.bdAssignedTo = :handlerUserId) " +
            "AND (:fromDate     IS NULL OR l.createdAt   >= :fromDate) " +
            "AND (:toDate       IS NULL OR l.createdAt   <= :toDate)")
     Page<LeadsEntity> searchLeadsForTeamPaged(
@@ -347,6 +355,7 @@ public interface LeadsRepo extends JpaRepository<LeadsEntity, Long> {
         @Param("groupName")    String groupName,
         @Param("subGroupName") String subGroupName,
         @Param("assignedTo")   Long assignedTo,
+        @Param("handlerUserId") Long handlerUserId,
         @Param("fromDate")     LocalDateTime fromDate,
         @Param("toDate")       LocalDateTime toDate,
         Pageable pageable
@@ -370,4 +379,28 @@ public interface LeadsRepo extends JpaRepository<LeadsEntity, Long> {
     @Query("SELECT l FROM LeadsEntity l WHERE l.customerId = :customerId AND l.closedByUserId IS NOT NULL ORDER BY l.updatedAt DESC")
     java.util.Optional<LeadsEntity> findFirstByCustomerIdAndClosedByUserIdIsNotNull(
         @Param("customerId") Long customerId);
+
+    // ── Assigned-user filter: lead counts per handler ──────────────────────────
+    // A user is a handler of a lead when they sit in assigned_to OR bd_assigned_to.
+    // COUNT(DISTINCT l.id) means a lead naming the same user in both slots counts once.
+    // created_by and lead_access are deliberately NOT considered. Rows: [id, name, count].
+
+    /** L1/L2 — every non-deleted lead. */
+    @Query(value = "SELECT u.id, u.name, COUNT(DISTINCT l.id) AS cnt " +
+           "FROM leads l JOIN users u ON (u.id = l.assigned_to OR u.id = l.bd_assigned_to) " +
+           "WHERE l.deleted_at IS NULL AND u.is_active = 1 " +
+           "GROUP BY u.id, u.name ORDER BY cnt DESC, u.name ASC", nativeQuery = true)
+    List<Object[]> countLeadsByHandler();
+
+    /**
+     * L3 — only the leads the team scope shows (same created_by / assigned_to IN
+     * rule as searchLeadsForTeamPaged), and only handlers who are team members.
+     */
+    @Query(value = "SELECT u.id, u.name, COUNT(DISTINCT l.id) AS cnt " +
+           "FROM leads l JOIN users u ON (u.id = l.assigned_to OR u.id = l.bd_assigned_to) " +
+           "WHERE l.deleted_at IS NULL AND u.is_active = 1 " +
+           "AND (l.created_by IN (:memberIds) OR l.assigned_to IN (:memberIds)) " +
+           "AND u.id IN (:memberIds) " +
+           "GROUP BY u.id, u.name ORDER BY cnt DESC, u.name ASC", nativeQuery = true)
+    List<Object[]> countLeadsByHandlerForTeam(@Param("memberIds") List<Long> memberIds);
 }

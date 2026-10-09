@@ -318,7 +318,7 @@ public class LeadsService {
                 null, null, null, null,
                 blankToNull(groupName),
                 blankToNull(subGroupName),
-                null, null, null,
+                null, null, null, null,
                 pageable
             ).map(this::convertToWrapper);
 
@@ -330,7 +330,7 @@ public class LeadsService {
                 null, null, null, null,
                 blankToNull(groupName),
                 blankToNull(subGroupName),
-                null, null, null,
+                null, null, null, null,
                 pageable
             ).map(this::convertToWrapper);
 
@@ -373,12 +373,20 @@ public class LeadsService {
 
         int level = roleHierarchyService.getLevelOrder(userRole);
 
+        // The Assigned User filter is a management tool for levels 1-3. Anyone below
+        // is refused outright rather than silently ignored.
+        Long handlerUserId = filterRequest.getHandlerUserId();
+        if (handlerUserId != null && level > 3) {
+            throw new NotPermittedException("The Assigned User filter is not available for your role.");
+        }
+
         Page<LeadWrapper> result;
         if (level <= 2) {
             result = leadsRepo.searchLeadsPaged(
                 search, status, priority, source,
                 groupName, subGroup,
                 filterRequest.getAssignedTo(),
+                handlerUserId,
                 fromDate, toDate,
                 pageable
             ).map(this::convertToWrapper);
@@ -390,6 +398,7 @@ public class LeadsService {
                 search, status, priority, source,
                 groupName, subGroup,
                 filterRequest.getAssignedTo(),
+                handlerUserId,
                 fromDate, toDate,
                 pageable
             ).map(this::convertToWrapper);
@@ -400,12 +409,42 @@ public class LeadsService {
                 search, status, priority, source,
                 groupName, subGroup,
                 filterRequest.getAssignedTo(),
+                null,   // handlerUserId — never reaches level 4+ (rejected above)
                 fromDate, toDate,
                 pageable
             ).map(this::convertToWrapper);
         }
 
         return result;
+    }
+
+    /**
+     * Per-user lead counts for the Assigned User filter (levels 1-3 only).
+     *
+     * A lead counts for a user when that user is in assigned_to or bd_assigned_to,
+     * once per lead. Counts honour the caller's existing lead visibility:
+     *   L1/L2 — all non-deleted leads, every active handler;
+     *   L3    — only leads the team scope shows, and only team-member handlers.
+     * Returns [{id, name, count}] ordered by count desc, then name.
+     */
+    public List<Map<String, Object>> getHandlerCounts(Long userId, String userRole) {
+        int level = roleHierarchyService.getLevelOrder(userRole);
+        if (level > 3) {
+            throw new NotPermittedException("The Assigned User filter is not available for your role.");
+        }
+        List<Object[]> rows = (level <= 2)
+                ? leadsRepo.countLeadsByHandler()
+                : leadsRepo.countLeadsByHandlerForTeam(resolveTeamMemberIds(userId));
+
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Object[] r : rows) {
+            Map<String, Object> m = new HashMap<>();
+            m.put("id", ((Number) r[0]).longValue());
+            m.put("name", r[1] == null ? "" : String.valueOf(r[1]));
+            m.put("count", ((Number) r[2]).longValue());
+            out.add(m);
+        }
+        return out;
     }
 
     // ─────────────────────────────────────────────────────────────────────────

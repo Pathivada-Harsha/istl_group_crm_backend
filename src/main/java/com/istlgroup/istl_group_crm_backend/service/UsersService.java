@@ -337,6 +337,10 @@ public class UsersService {
 	
 	
 	public UsersResponseWrapper SearchUsers(Long userId, String searchTerm, String role, int page, int size) throws CustomException {
+	    return SearchUsers(userId, searchTerm, role, page, size, null);
+	}
+
+	public UsersResponseWrapper SearchUsers(Long userId, String searchTerm, String role, int page, int size, Long reportingToUserId) throws CustomException {
 	    
 	    // Validate logged-in user
 	    UsersEntity loggedInUser = usersRepo.findById(userId)
@@ -350,6 +354,19 @@ public class UsersService {
 	    // Clean up search term
 	    String cleanSearchTerm = (searchTerm == null || searchTerm.trim().isEmpty()) ? null : searchTerm.trim();
 	    
+	    // "Reporting To" filter: everyone under one user (direct and indirect, via
+	    // manager_id), inside the same scope the branches below apply (SUPERADMIN =
+	    // everyone, others = users they created), combined with the optional search
+	    // term and role. Done in SQL, so paging and the total are exact. The branches
+	    // below are untouched.
+	    if (reportingToUserId != null) {
+	        boolean superAdmin = "SUPERADMIN".equalsIgnoreCase(loggedInUser.getRole());
+	        int scoped = superAdmin ? 0 : 1;
+	        String roleArg = (role == null || role.isBlank()) ? "all" : role;
+	        String termArg = cleanSearchTerm == null ? "" : cleanSearchTerm;
+	        users = usersRepo.findByReportingTo(reportingToUserId, scoped, userId, roleArg, termArg, size, offset);
+	        totalUsers = usersRepo.countByReportingTo(reportingToUserId, scoped, userId, roleArg, termArg);
+	    } else
 	    // SUPERADMIN - can see ALL users
 	    if ("SUPERADMIN".equalsIgnoreCase(loggedInUser.getRole())) {
 	        
@@ -473,6 +490,28 @@ public class UsersService {
 	    return response;
 	}
 
+
+
+	/**
+	 * Options for the User Management "Reporting To" filter: the active users inside
+	 * the caller's scope (SUPERADMIN = all users; everyone else = themselves plus the
+	 * users they created). Read-only. Rows: id, name.
+	 */
+	public List<Map<String, Object>> getReportingManagers(Long userId) throws CustomException {
+	    UsersEntity loggedInUser = usersRepo.findById(userId)
+	            .orElseThrow(() -> new CustomException("Invalid User"));
+	    List<Object[]> rows = "SUPERADMIN".equalsIgnoreCase(loggedInUser.getRole())
+	            ? usersRepo.findReportingToOptions()
+	            : usersRepo.findReportingToOptionsCreatedBy(userId);
+	    List<Map<String, Object>> out = new ArrayList<>();
+	    for (Object[] r : rows) {
+	        Map<String, Object> m = new LinkedHashMap<>();
+	        m.put("id", ((Number) r[0]).longValue());
+	        m.put("name", r[1] == null ? "" : String.valueOf(r[1]));
+	        out.add(m);
+	    }
+	    return out;
+	}
 
     // Profile Image
 

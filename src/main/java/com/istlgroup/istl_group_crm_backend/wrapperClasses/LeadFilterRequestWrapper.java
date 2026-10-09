@@ -12,6 +12,9 @@ public class LeadFilterRequestWrapper {
     private String groupName;
     private String subGroupName;
     private Long assignedTo;
+    // "Assigned User" filter (levels 1-3 only): matches assigned_to OR bd_assigned_to.
+    // Separate from assignedTo, whose meaning other consumers rely on.
+    private Long handlerUserId;
     // Date range filter (yyyy-MM-dd)
     private String fromDate;
     private String toDate;
