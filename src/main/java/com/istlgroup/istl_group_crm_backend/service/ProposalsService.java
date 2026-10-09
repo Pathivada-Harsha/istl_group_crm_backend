@@ -199,11 +199,12 @@ public class ProposalsService {
             throws CustomException {
         LeadsEntity lead = leadsRepo.findById(leadId)
             .orElseThrow(() -> new CustomException("Lead not found"));
-        boolean canSeeLead = roleHierarchyService.getLevelOrder(userRole) <= 2
-                || (lead.getAssignedTo() != null && lead.getAssignedTo().equals(userId))
-                || (lead.getBdAssignedTo() != null && lead.getBdAssignedTo().equals(userId))
-                || (lead.getCreatedBy() != null && lead.getCreatedBy().equals(userId))
-                || leadAccessRepo.existsByLeadIdAndUserId(leadId, userId);
+        int level = roleHierarchyService.getLevelOrder(userRole);
+        boolean canSeeLead = level <= 2
+                || isLeadOwner(lead, userId)
+                || leadAccessRepo.existsByLeadIdAndUserId(leadId, userId)
+                // Level-3 managers see their team's leads, as /getAll already does for them.
+                || (level == 3 && isLeadOwnedByAny(lead, resolveTeamMemberIds(userId)));
         if (!canSeeLead)
             throw new CustomException("You don't have permission to view this lead");
 
@@ -303,6 +304,19 @@ public class ProposalsService {
     }
 
     // ── Access helpers ───────────────────────────────────────────────────────
+    /** The user created the lead or holds either assignment slot (handler / BD). */
+    private boolean isLeadOwner(LeadsEntity lead, Long userId) {
+        return userId != null && (userId.equals(lead.getCreatedBy())
+                || userId.equals(lead.getAssignedTo())
+                || userId.equals(lead.getBdAssignedTo()));
+    }
+
+    private boolean isLeadOwnedByAny(LeadsEntity lead, List<Long> userIds) {
+        return (lead.getCreatedBy() != null && userIds.contains(lead.getCreatedBy()))
+                || (lead.getAssignedTo() != null && userIds.contains(lead.getAssignedTo()))
+                || (lead.getBdAssignedTo() != null && userIds.contains(lead.getBdAssignedTo()));
+    }
+
     private boolean canAccessProposal(ProposalsEntity proposal, Long userId, String userRole) {
         int level = roleHierarchyService.getLevelOrder(userRole);
         // Admins and managers (level <= 2) always have access
@@ -316,6 +330,12 @@ public class ProposalsService {
         }
         // If user has access to the lead this proposal belongs to, they can view the proposal
         if (proposal.getLeadId() != null && leadAccessRepo.existsByLeadIdAndUserId(proposal.getLeadId(), userId)) {
+            return true;
+        }
+        // Owners of the lead (creator / handler / BD) see every proposal on it,
+        // whoever prepared it. This is the same rule the lead gate uses.
+        if (proposal.getLeadId() != null && leadsRepo.findById(proposal.getLeadId())
+                .map(l -> isLeadOwner(l, userId)).orElse(false)) {
             return true;
         }
         // Anyone with level <= 4 (e.g. sales, BD) can view offline/approved proposals
@@ -358,7 +378,8 @@ public class ProposalsService {
         if (proposal.getLeadId() != null) {
             if (leadAccessRepo.existsByLeadIdAndUserId(proposal.getLeadId(), userId)) return true;
             if (leadsRepo.findById(proposal.getLeadId())
-                    .map(l -> userId != null && userId.equals(l.getAssignedTo()))
+                    .map(l -> userId != null && (userId.equals(l.getAssignedTo())
+                            || userId.equals(l.getBdAssignedTo())))
                     .orElse(false)) return true;
         }
         return false;

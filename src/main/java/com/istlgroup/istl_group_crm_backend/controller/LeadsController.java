@@ -107,18 +107,28 @@ public class LeadsController {
                 return ResponseEntity.ok(response);
             }
 
+            // Out-of-range input is clamped rather than turned into a 500
+            // (PageRequest.of rejects page < 0 and size < 1). The UI only offers
+            // 10/20/50/100, so the cap never bites a real request.
+            page = Math.max(page, 0);
+            size = Math.min(Math.max(size, 1), 1000);
+
             Pageable pageable;
             if (filterRequest.getSortBy() != null && !filterRequest.getSortBy().isBlank()) {
                 Sort.Direction dir = "asc".equalsIgnoreCase(filterRequest.getSortDirection())
                         ? Sort.Direction.ASC : Sort.Direction.DESC;
-                pageable = PageRequest.of(page, size, Sort.by(dir, filterRequest.getSortBy()));
+                // id is the stable tie-break: many leads share a status/priority/date,
+                // and without it adjacent pages can repeat or skip rows.
+                pageable = PageRequest.of(page, size,
+                        Sort.by(dir, filterRequest.getSortBy()).and(Sort.by(dir, "id")));
             } else {
                 // Default: most recently updated first, so leads whose status/details just
                 // changed (e.g. just marked Interested) surface at the top instead of being
                 // buried by creation date. Ties fall back to newest-created.
                 pageable = PageRequest.of(page, size,
                         Sort.by(Sort.Direction.DESC, "updatedAt")
-                            .and(Sort.by(Sort.Direction.DESC, "createdAt")));
+                            .and(Sort.by(Sort.Direction.DESC, "createdAt"))
+                            .and(Sort.by(Sort.Direction.DESC, "id")));
             }
             Page<LeadWrapper> leadsPage = leadsService.getFilteredLeadsPaged(
                     userId, userRole, filterRequest, pageable);
@@ -132,11 +142,41 @@ public class LeadsController {
             response.put("pageSize", leadsPage.getSize());
 
             return ResponseEntity.ok(response);
+        } catch (NotPermittedException e) {
+            Map<String, Object> err = new HashMap<>();
+            err.put("success", false);
+            err.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(err);
         } catch (Exception e) {
             Map<String, Object> err = new HashMap<>();
             err.put("success", false);
             err.put("message", e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(err);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET /leads/handler-counts
+    //   Options + lead counts for the "Assigned User" filter. Levels 1-3 only;
+    //   everyone else gets 403. Counts honour the caller's lead visibility.
+    // ─────────────────────────────────────────────────────────────────────────
+    @GetMapping("/handler-counts")
+    public ResponseEntity<Map<String, Object>> getHandlerCounts(
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+        Map<String, Object> response = new HashMap<>();
+        try {
+            response.put("success", true);
+            response.put("data", leadsService.getHandlerCounts(userId, userRole));
+            return ResponseEntity.ok(response);
+        } catch (NotPermittedException e) {
+            response.put("success", false);
+            response.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(response);
+        } catch (Exception e) {
+            response.put("success", false);
+            response.put("message", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(response);
         }
     }
 

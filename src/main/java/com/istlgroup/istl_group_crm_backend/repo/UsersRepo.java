@@ -233,6 +233,65 @@ public interface UsersRepo extends JpaRepository<UsersEntity, Long> {
     """, nativeQuery = true)
     long countSearchByCreatedByAndRole(@Param("userId") Long userId, @Param("searchTerm") String searchTerm, @Param("role") String role);
 
+    // ── "Reporting To" filter (User Management) ──────────────────────────────
+    // Everyone under the selected user, directly or indirectly, following the same
+    // users.manager_id link the "Reports To" column reads. The selected user is
+    // excluded. The recursive CTE uses UNION (set semantics), so a mis-entered
+    // manager_id loop stops as soon as no new id appears — it cannot spin forever.
+    // :scoped = 0 → every user (SUPERADMIN scope); :scoped = 1 → only users created
+    // by :scopeUserId (everyone else's scope — identical to the existing list/search
+    // paths). The tree is walked over ALL users and the scope is applied afterwards.
+    // Search and role are optional ('' / 'all' mean "no filter").
+
+    @Query(value = """
+        WITH RECURSIVE sub (id) AS (
+            SELECT id FROM users WHERE manager_id = :managerId
+            UNION
+            SELECT u.id FROM users u JOIN sub s ON u.manager_id = s.id
+        )
+        SELECT * FROM users
+        WHERE id IN (SELECT id FROM sub) AND id <> :managerId
+          AND (:scoped = 0 OR created_by = :scopeUserId)
+          AND (:role = 'all' OR UPPER(role) = UPPER(:role))
+          AND (:searchTerm = ''
+               OR LOWER(name)    LIKE LOWER(CONCAT('%',:searchTerm,'%'))
+               OR LOWER(email)   LIKE LOWER(CONCAT('%',:searchTerm,'%'))
+               OR LOWER(phone)   LIKE LOWER(CONCAT('%',:searchTerm,'%'))
+               OR LOWER(user_id) LIKE LOWER(CONCAT('%',:searchTerm,'%')))
+        ORDER BY id LIMIT :size OFFSET :offset
+    """, nativeQuery = true)
+    List<UsersEntity> findByReportingTo(@Param("managerId") Long managerId, @Param("scoped") int scoped,
+        @Param("scopeUserId") Long scopeUserId, @Param("role") String role, @Param("searchTerm") String searchTerm,
+        @Param("size") int size, @Param("offset") int offset);
+
+    @Query(value = """
+        WITH RECURSIVE sub (id) AS (
+            SELECT id FROM users WHERE manager_id = :managerId
+            UNION
+            SELECT u.id FROM users u JOIN sub s ON u.manager_id = s.id
+        )
+        SELECT COUNT(*) FROM users
+        WHERE id IN (SELECT id FROM sub) AND id <> :managerId
+          AND (:scoped = 0 OR created_by = :scopeUserId)
+          AND (:role = 'all' OR UPPER(role) = UPPER(:role))
+          AND (:searchTerm = ''
+               OR LOWER(name)    LIKE LOWER(CONCAT('%',:searchTerm,'%'))
+               OR LOWER(email)   LIKE LOWER(CONCAT('%',:searchTerm,'%'))
+               OR LOWER(phone)   LIKE LOWER(CONCAT('%',:searchTerm,'%'))
+               OR LOWER(user_id) LIKE LOWER(CONCAT('%',:searchTerm,'%')))
+    """, nativeQuery = true)
+    long countByReportingTo(@Param("managerId") Long managerId, @Param("scoped") int scoped,
+        @Param("scopeUserId") Long scopeUserId, @Param("role") String role, @Param("searchTerm") String searchTerm);
+
+    /** Dropdown source, SUPERADMIN scope: every active user. [id, name] */
+    @Query(value = "SELECT id, name FROM users WHERE is_active = 1 ORDER BY name", nativeQuery = true)
+    List<Object[]> findReportingToOptions();
+
+    /** Dropdown source, normal scope: the caller plus the active users they created. */
+    @Query(value = "SELECT id, name FROM users WHERE is_active = 1 AND (created_by = :scopeUserId OR id = :scopeUserId) ORDER BY name", nativeQuery = true)
+    List<Object[]> findReportingToOptionsCreatedBy(@Param("scopeUserId") Long scopeUserId);
+
+
     // ── Misc ──────────────────────────────────────────────────────────────────
 
     Optional<UsersEntity> findByEmail(String email);

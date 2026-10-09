@@ -72,8 +72,15 @@ public class UsersController {
             @RequestParam(defaultValue = "") String searchTerm,
             @RequestParam(defaultValue = "all") String role,
             @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "5") int size) throws CustomException {
-        return ResponseEntity.ok(usersService.SearchUsers(userId, searchTerm, role, page, size));
+            @RequestParam(defaultValue = "5") int size,
+            @RequestParam(required = false) Long reportingToUserId) throws CustomException {
+        return ResponseEntity.ok(usersService.SearchUsers(userId, searchTerm, role, page, size, reportingToUserId));
+    }
+
+    /** Options for the User Management "Reporting To" filter (read-only, scoped like the list). */
+    @GetMapping("/reporting-managers/{userId}")
+    public ResponseEntity<?> GetReportingManagers(@PathVariable Long userId) throws CustomException {
+        return ResponseEntity.ok(usersService.getReportingManagers(userId));
     }
 
     // ── Profile Image Endpoints ──────────────────────────────────────────────
