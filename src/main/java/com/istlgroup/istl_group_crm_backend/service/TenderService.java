@@ -54,6 +54,10 @@ public class TenderService {
     @Autowired private TenderDocumentRepo documentRepo;
     @Autowired private TenderDocRequestRepo docRequestRepo;
     @Autowired private TenderApprovalLogRepo approvalLogRepo;
+    @Autowired private CustomersRepo customersRepo;
+    @Autowired private UsersRepo usersRepo;
+    @Autowired private RecordAccessPolicy accessPolicy;
+    @Autowired private UserScopeService userScopeService;
     @Autowired private TenderPdfExtractor pdfExtractor;
     @Autowired private TenderPdfAiExtractor pdfAiExtractor;
 
@@ -65,39 +69,69 @@ public class TenderService {
 
     // ── reads ────────────────────────────────────────────────────────────
     @Transactional(readOnly = true)
-    public List<TenderWrapper> getAll() {
+    public List<TenderWrapper> getAll(Long userId, String userRole) {
+        RecordAccessPolicy.Scope scope = accessPolicy.scopeFor(userId, userRole);
         List<TenderWrapper> out = new ArrayList<>();
         for (TenderEntity t : tenderRepo.findByDeletedAtIsNullOrderByCreatedAtDesc()) {
-            out.add(toWrapper(t, true));
+            if (scope.canSee(t.getCreatedBy(), t.getAssignedTo())) out.add(toWrapper(t, true));
         }
         return out;
     }
 
     @Transactional(readOnly = true)
-    public TenderWrapper getById(Long id) throws CustomException {
+    public TenderWrapper getById(Long id, Long userId, String userRole) throws CustomException {
+        return toWrapper(findVisible(id, userId, userRole), true);
+    }
+
+    // ── Visibility: the Clients rule, shared via RecordAccessPolicy ──────
+    private TenderEntity findVisible(Long id, Long userId, String userRole) throws CustomException {
         TenderEntity t = tenderRepo.findByIdAndDeletedAtIsNull(id)
                 .orElseThrow(() -> new CustomException("Tender not found"));
-        return toWrapper(t, true);
+        return requireVisible(t, userId, userRole);
+    }
+
+    /** As findVisible, but takes a row lock so concurrent Won / reassign requests serialise. */
+    private TenderEntity findVisibleForUpdate(Long id, Long userId, String userRole) throws CustomException {
+        TenderEntity t = tenderRepo.findByIdForUpdate(id)
+                .orElseThrow(() -> new CustomException("Tender not found"));
+        return requireVisible(t, userId, userRole);
+    }
+
+    private TenderEntity requireVisible(TenderEntity t, Long userId, String userRole) throws CustomException {
+        if (!accessPolicy.canAccess(t.getCreatedBy(), t.getAssignedTo(), userId, userRole)) {
+            throw new CustomException("Access denied to this tender");
+        }
+        return t;
     }
 
     // ── writes ───────────────────────────────────────────────────────────
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     public TenderWrapper create(TenderWrapper w, Long userId, String actorName) throws CustomException {
         TenderEntity t = new TenderEntity();
         applyScalars(t, w);
         t.setCreatedBy(userId);
+        if (w.getAssignedTo() != null) {
+            requireAssignable(userId, w.getAssignedTo());
+            t.setAssignedTo(w.getAssignedTo());
+        }
         TenderEntity saved = tenderRepo.save(t);
+        if ("Won".equals(saved.getStatus())) syncClientOnWin(saved);
         saveChildren(saved.getId(), w);
         recordImport(saved.getId(), w, actorName);
         return toWrapper(tenderRepo.findById(saved.getId()).orElse(saved), true);
     }
 
-    @Transactional
-    public TenderWrapper update(Long id, TenderWrapper w, Long userId, String actorName) throws CustomException {
-        TenderEntity t = tenderRepo.findByIdAndDeletedAtIsNull(id)
-                .orElseThrow(() -> new CustomException("Tender not found"));
+    @Transactional(rollbackFor = Exception.class)
+    public TenderWrapper update(Long id, TenderWrapper w, Long userId, String userRole, String actorName) throws CustomException {
+        TenderEntity t = findVisibleForUpdate(id, userId, userRole);
+        String prevStatus = t.getStatus();
+        // Assignment first: every check that can refuse the request runs before any write.
+        // A null assignedTo means "not supplied"; clearing is explicit (unassign = true) or goes through assign().
+        if (w.getAssignedTo() != null) applyAssignment(t, w.getAssignedTo(), userId, userRole);
+        else if (Boolean.TRUE.equals(w.getUnassign())) applyAssignment(t, null, userId, userRole);
         applyScalars(t, w);
         tenderRepo.save(t);
+        if ("Won".equals(t.getStatus()) && !"Won".equals(prevStatus)) syncClientOnWin(t);
         // whole-object save: replace all child collections
         deleteChildren(id);
         saveChildren(id, w);
@@ -105,10 +139,101 @@ public class TenderService {
         return toWrapper(tenderRepo.findById(id).orElse(t), true);
     }
 
+    /** Quick re-assign from the list row (assignedTo null = unassign). Same rules as any other edit. */
+    @Transactional(rollbackFor = Exception.class)
+    public TenderWrapper assign(Long id, Long assignedTo, Long userId, String userRole) throws CustomException {
+        TenderEntity t = findVisibleForUpdate(id, userId, userRole);
+        applyAssignment(t, assignedTo, userId, userRole);
+        return toWrapper(t, false);
+    }
+
+    // ── Assigned To: tender ⇄ its generated client ───────────────────────
+    /** The caller may only assign to users in their own reporting scope. */
+    private void requireAssignable(Long actingUserId, Long targetUserId) throws CustomException {
+        if (targetUserId != null && !userScopeService.canActOn(actingUserId, targetUserId)) {
+            throw new CustomException("You are not allowed to assign to " + userScopeService.displayName(targetUserId));
+        }
+    }
+
+    /**
+     * Change a tender's assignee and, in the same transaction, its generated client's.
+     * The link is customers.source_tender_id only, never inferred from names or contact
+     * details, so an independent client with the same details is never touched. Direct
+     * repository writes (no service callbacks) make a sync loop impossible. Every refusal
+     * is raised before the first write, and the transaction rolls back on any failure.
+     */
+    private void applyAssignment(TenderEntity t, Long newAssignee, Long userId, String userRole) throws CustomException {
+        if (java.util.Objects.equals(t.getAssignedTo(), newAssignee)) return;
+        requireAssignable(userId, newAssignee);
+        CustomersEntity client = customersRepo.findBySourceTenderId(t.getId())
+                .filter(c -> c.getDeletedAt() == null).orElse(null);
+        if (client != null && !accessPolicy.canAccess(client.getCreatedBy(), client.getAssignedTo(), userId, userRole)) {
+            throw new CustomException("You can edit this tender but not its linked client, so the assignment was not changed");
+        }
+        t.setAssignedTo(newAssignee);
+        tenderRepo.save(t);
+        if (client != null) {
+            client.setAssignedTo(newAssignee);
+            customersRepo.save(client);
+        }
+    }
+
+    // ── Won → client ─────────────────────────────────────────────────────
+    /**
+     * A tender moving to Won generates its client (shown on Clients Data), exactly once:
+     * the client carries source_tender_id (unique), and callers hold the tender's row lock,
+     * so repeated or concurrent Won requests reuse the existing client. Existing clients
+     * are never matched by company, email, GSTIN or phone: an independent client with the
+     * same details stays independent. A client that was deleted is not resurrected.
+     */
+    private void syncClientOnWin(TenderEntity t) {
+        CustomersEntity existing = customersRepo.findBySourceTenderId(t.getId()).orElse(null);
+        if (existing != null) {
+            if (existing.getDeletedAt() == null && t.getAssignedTo() != null
+                    && !java.util.Objects.equals(existing.getAssignedTo(), t.getAssignedTo())) {
+                existing.setAssignedTo(t.getAssignedTo());
+                customersRepo.save(existing);
+            }
+            return;
+        }
+        String company = firstNonBlank(t.getClientCompany(), t.getIssuingAuthority());
+        if (company == null) {
+            log.warn("Tender {} is Won but has no client company/authority; no customer created", t.getId());
+            return;
+        }
+        CustomersEntity c = new CustomersEntity();
+        c.setCustomerCode("TEMP-" + java.util.UUID.randomUUID().toString().substring(0, 8));
+        c.setName(clip(company, 255));
+        c.setCompanyName(clip(company, 255));
+        c.setContactPerson(clip(t.getClientContactPerson(), 200));
+        c.setEmail(clip(t.getClientContactEmail(), 255));
+        c.setPhone(clip(t.getClientContactPhone(), 50));
+        c.setGstNumber(clip(t.getClientGstin(), 50));
+        c.setPan(clip(t.getClientPan(), 20));
+        c.setAddress(t.getClientAddress());
+        c.setCity(clip(t.getClientCity(), 100));
+        c.setState(clip(firstNonBlank(t.getClientState(), t.getState()), 100));
+        c.setGroupName(clip(firstNonBlank(t.getGroupName(), "Others"), 100));
+        c.setSubGroupName(clip(t.getSubGroupName(), 100));
+        c.setStatus("Active");
+        // Assigned to the tender's assignee (falling back to its creator), so the client is
+        // visible to the same people as the tender.
+        c.setAssignedTo(t.getAssignedTo() != null ? t.getAssignedTo() : t.getCreatedBy());
+        c.setCreatedBy(t.getCreatedBy());
+        c.setSourceTenderId(t.getId());
+        CustomersEntity saved = customersRepo.save(c);
+        saved.setCustomerCode(String.format("CUST-%d-%06d", LocalDateTime.now().getYear(), saved.getId()));
+        customersRepo.save(saved);
+    }
+
+    private static String firstNonBlank(String a, String b) {
+        if (a != null && !a.isBlank()) return a.trim();
+        return (b != null && !b.isBlank()) ? b.trim() : null;
+    }
+
     @Transactional
-    public void delete(Long id) throws CustomException {
-        TenderEntity t = tenderRepo.findByIdAndDeletedAtIsNull(id)
-                .orElseThrow(() -> new CustomException("Tender not found"));
+    public void delete(Long id, Long userId, String userRole) throws CustomException {
+        TenderEntity t = findVisible(id, userId, userRole);
         t.setDeletedAt(LocalDateTime.now());
         tenderRepo.save(t);
     }
@@ -403,10 +528,9 @@ public class TenderService {
 
     /** Store the uploaded PDF bytes on the tender row (mirrors OrderBook PO). */
     @Transactional
-    public TenderWrapper uploadSourcePdf(Long id, MultipartFile file) throws CustomException {
+    public TenderWrapper uploadSourcePdf(Long id, MultipartFile file, Long userId, String userRole) throws CustomException {
         validatePdf(file);
-        TenderEntity t = tenderRepo.findByIdAndDeletedAtIsNull(id)
-                .orElseThrow(() -> new CustomException("Tender not found"));
+        TenderEntity t = findVisible(id, userId, userRole);
         try {
             String mime = (file.getContentType() != null && !file.getContentType().isBlank())
                     ? file.getContentType() : "application/pdf";
@@ -419,6 +543,13 @@ public class TenderService {
             throw new CustomException("Could not store the PDF: " + e.getMessage());
         }
         return toWrapper(t, false);
+    }
+
+    /** As {@link #getSourcePdfEntity(Long)}, but only for a tender the caller may see. */
+    @Transactional(readOnly = true)
+    public TenderEntity getSourcePdfEntity(Long id, Long userId, String userRole) throws CustomException {
+        findVisible(id, userId, userRole);
+        return getSourcePdfEntity(id);
     }
 
     /** Fetch a tender that has stored PDF bytes, for the streaming endpoint. */
@@ -594,6 +725,9 @@ public class TenderService {
         t.setClientCity(clip(w.getClientCity(), 255));
         t.setClientState(clip(w.getClientState(), 255));
         t.setSector(clip(w.getSector(), 255));
+        t.setGroupName(clip(w.getGroupName(), 255));
+        t.setSubGroupName(clip(w.getSubGroupName(), 255));
+        // assignedTo is not set here: create() and applyAssignment() own it (eligibility + client sync).
         t.setTenderType(clip(w.getTenderType(), 255));
         t.setSource(clip(w.getSource(), 255));
         t.setPortalLink(w.getPortalLink());         // TEXT
@@ -676,6 +810,12 @@ public class TenderService {
         w.setClientCity(t.getClientCity());
         w.setClientState(t.getClientState());
         w.setSector(t.getSector());
+        w.setGroupName(t.getGroupName());
+        w.setSubGroupName(t.getSubGroupName());
+        w.setAssignedTo(t.getAssignedTo());
+        if (t.getAssignedTo() != null) {
+            usersRepo.findById(t.getAssignedTo()).ifPresent(u -> w.setAssignedToName(u.getName()));
+        }
         w.setTenderType(t.getTenderType());
         w.setSource(t.getSource());
         w.setPortalLink(t.getPortalLink());

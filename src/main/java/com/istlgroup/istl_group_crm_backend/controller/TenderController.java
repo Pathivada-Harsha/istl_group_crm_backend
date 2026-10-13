@@ -1,6 +1,7 @@
 package com.istlgroup.istl_group_crm_backend.controller;
 
 import com.istlgroup.istl_group_crm_backend.security.ActingUserId;
+import com.istlgroup.istl_group_crm_backend.security.ActingUserRole;
 import com.istlgroup.istl_group_crm_backend.security.ActingUserName;
 import java.util.HashMap;
 import java.util.List;
@@ -44,9 +45,9 @@ public class TenderController {
     private ObjectMapper objectMapper;
 
     @GetMapping("/getAll")
-    public ResponseEntity<Map<String, Object>> getAll() {
+    public ResponseEntity<Map<String, Object>> getAll(@ActingUserId Long userId, @ActingUserRole String userRole) {
         try {
-            List<TenderWrapper> data = tenderService.getAll();
+            List<TenderWrapper> data = tenderService.getAll(userId, userRole);
             Map<String, Object> res = new HashMap<>();
             res.put("success", true);
             res.put("data", data);
@@ -57,9 +58,10 @@ public class TenderController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<Map<String, Object>> getById(@PathVariable Long id) {
+    public ResponseEntity<Map<String, Object>> getById(
+            @PathVariable Long id, @ActingUserId Long userId, @ActingUserRole String userRole) {
         try {
-            TenderWrapper data = tenderService.getById(id);
+            TenderWrapper data = tenderService.getById(id, userId, userRole);
             Map<String, Object> res = new HashMap<>();
             res.put("success", true);
             res.put("data", data);
@@ -95,9 +97,10 @@ public class TenderController {
             @PathVariable Long id,
             @RequestBody TenderWrapper request,
             @ActingUserId Long userId,
+            @ActingUserRole String userRole,
             @ActingUserName String userName) {
         try {
-            TenderWrapper updated = tenderService.update(id, request, userId, userName);
+            TenderWrapper updated = tenderService.update(id, request, userId, userRole, userName);
             Map<String, Object> res = new HashMap<>();
             res.put("success", true);
             res.put("message", "Tender updated successfully");
@@ -110,10 +113,32 @@ public class TenderController {
         }
     }
 
-    @DeleteMapping("/delete/{id}")
-    public ResponseEntity<Map<String, Object>> delete(@PathVariable Long id) {
+    /** Quick re-assign from the list; also moves the linked client's assignee. Body: {"assignedTo": 12} */
+    @PutMapping("/{id}/assign")
+    public ResponseEntity<Map<String, Object>> assign(
+            @PathVariable Long id,
+            @RequestBody Map<String, Object> body,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
-            tenderService.delete(id);
+            Object raw = body.get("assignedTo");
+            Long assignedTo = raw == null || raw.toString().isBlank() ? null : Long.valueOf(raw.toString());
+            Map<String, Object> res = new HashMap<>();
+            res.put("success", true);
+            res.put("data", tenderService.assign(id, assignedTo, userId, userRole));
+            return ResponseEntity.ok(res);
+        } catch (CustomException e) {
+            return error(e.getMessage(), HttpStatus.BAD_REQUEST);
+        } catch (Exception e) {
+            return error("Failed to assign tender: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    @DeleteMapping("/delete/{id}")
+    public ResponseEntity<Map<String, Object>> delete(
+            @PathVariable Long id, @ActingUserId Long userId, @ActingUserRole String userRole) {
+        try {
+            tenderService.delete(id, userId, userRole);
             Map<String, Object> res = new HashMap<>();
             res.put("success", true);
             res.put("message", "Tender deleted successfully");
@@ -155,9 +180,11 @@ public class TenderController {
     @PostMapping(value = "/{id}/upload-source-pdf", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<Map<String, Object>> uploadSourcePdf(
             @PathVariable Long id,
-            @RequestParam("file") MultipartFile file) {
+            @RequestParam("file") MultipartFile file,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
-            TenderWrapper data = tenderService.uploadSourcePdf(id, file);
+            TenderWrapper data = tenderService.uploadSourcePdf(id, file, userId, userRole);
             Map<String, Object> res = new HashMap<>();
             res.put("success", true);
             res.put("message", "PDF stored successfully");
@@ -173,9 +200,11 @@ public class TenderController {
     @GetMapping("/{id}/download-source-pdf")
     public ResponseEntity<byte[]> downloadSourcePdf(
             @PathVariable Long id,
-            @RequestParam(value = "forceDownload", defaultValue = "false") boolean forceDownload) {
+            @RequestParam(value = "forceDownload", defaultValue = "false") boolean forceDownload,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
         try {
-            TenderEntity t = tenderService.getSourcePdfEntity(id);
+            TenderEntity t = tenderService.getSourcePdfEntity(id, userId, userRole);
             String mime = t.getSourcePdfMimeType() != null ? t.getSourcePdfMimeType() : "application/pdf";
             String fileName = t.getSourcePdfName() != null ? t.getSourcePdfName() : "tender.pdf";
             boolean inline = !forceDownload && isInlineMimeType(mime);
