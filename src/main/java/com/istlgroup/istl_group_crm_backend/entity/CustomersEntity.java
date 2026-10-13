@@ -72,6 +72,11 @@ public class CustomersEntity {
     
     @Column(name = "created_by")
     private Long createdBy;
+
+    // Set only for a client generated from a Won tender (tenders.id). Unique, so a tender
+    // yields at most one client; NULL for every independently created client.
+    @Column(name = "source_tender_id", unique = true)
+    private Long sourceTenderId;
     
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;

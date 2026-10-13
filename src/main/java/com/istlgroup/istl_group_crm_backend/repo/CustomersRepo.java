@@ -24,6 +24,12 @@ public interface CustomersRepo extends JpaRepository<CustomersEntity, Long> {
      * Find customer by customer code
      */
     CustomersEntity findByCustomerCode(String customerCode);
+
+    /**
+     * The client generated from this exact tender, deleted or not (source_tender_id is
+     * unique, so there is at most one row).
+     */
+    Optional<CustomersEntity> findBySourceTenderId(Long sourceTenderId);
     
     // ==================== NON-PAGINATED METHODS ====================
     

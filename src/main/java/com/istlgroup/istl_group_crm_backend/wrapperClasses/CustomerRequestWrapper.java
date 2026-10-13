@@ -22,4 +22,6 @@ public class CustomerRequestWrapper {
     private String pincode;
     private String status;
     private Long assignedTo;
+    // true = clear the assignee (assignedTo null alone means "not supplied" and changes nothing)
+    private Boolean unassign;
 }

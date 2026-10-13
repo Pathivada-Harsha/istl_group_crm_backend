@@ -73,6 +73,14 @@ public class TenderEntity {
     @Column(name = "sector")
     private String sector;
 
+    @Column(name = "assigned_to")
+    private Long assignedTo;
+    @Column(name = "group_name")
+    private String groupName;
+
+    @Column(name = "sub_group_name")
+    private String subGroupName;
+
     @Column(name = "tender_type")
     private String tenderType;
 

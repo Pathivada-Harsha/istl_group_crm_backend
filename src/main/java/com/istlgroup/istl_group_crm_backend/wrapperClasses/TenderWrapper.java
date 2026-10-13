@@ -36,6 +36,12 @@ public class TenderWrapper {
 
     // classification / location
     private String sector;
+    private String groupName;
+    private String subGroupName;
+    private Long assignedTo;
+    // true = clear the assignee (assignedTo null alone means "not supplied" and changes nothing)
+    private Boolean unassign;
+    private String assignedToName;   // read-only, resolved from users
     private String tenderType;
     private String source;
     private String portalLink;

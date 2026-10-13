@@ -5,6 +5,8 @@ import com.istlgroup.istl_group_crm_backend.entity.CustomersEntity;
 import com.istlgroup.istl_group_crm_backend.entity.InvoiceEntity;
 import com.istlgroup.istl_group_crm_backend.entity.ReceiptEntity;
 import com.istlgroup.istl_group_crm_backend.entity.LeadsEntity;
+import com.istlgroup.istl_group_crm_backend.entity.TenderEntity;
+import com.istlgroup.istl_group_crm_backend.repo.TenderRepo;
 import com.istlgroup.istl_group_crm_backend.service.NotificationService;
 import com.istlgroup.istl_group_crm_backend.constants.NotificationConstants.Module;
 import com.istlgroup.istl_group_crm_backend.constants.NotificationConstants.Type;
@@ -44,6 +46,9 @@ public class CustomersService {
     @Autowired private InvoiceRepository invoiceRepository;
     @Autowired private ReceiptRepository receiptRepository;
     @Autowired private OrderBookRepo orderBookRepo;
+    @Autowired private TenderRepo tenderRepo;
+    @Autowired private RecordAccessPolicy accessPolicy;
+    @Autowired private UserScopeService userScopeService;
 
     private static final DateTimeFormatter DATE_FORMATTER      = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final DateTimeFormatter DATE_ONLY_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
@@ -215,11 +220,29 @@ public class CustomersService {
     }
 
     // ── UPDATE ───────────────────────────────────────────────────────────────
+    @Transactional(rollbackFor = Exception.class)
     public CustomerWrapper updateCustomer(Long customerId, CustomerRequestWrapper requestWrapper, Long userId, String userRole) throws CustomException {
         CustomersEntity customer = customersRepo.findById(customerId)
             .orElseThrow(() -> new CustomException("Customer not found with ID: " + customerId));
         if (customer.getDeletedAt() != null) throw new CustomException("Cannot update deleted customer");
         if (!hasAccessToCustomer(customer, userId, userRole)) throw new CustomException("Access denied to update this customer");
+        // A client generated from a Won tender shares its assignee with that exact tender
+        // (customers.source_tender_id). Checked up front, so a refusal leaves both untouched.
+        boolean clearing = Boolean.TRUE.equals(requestWrapper.getUnassign()) && requestWrapper.getAssignedTo() == null;
+        Long newAssignee = clearing ? null : requestWrapper.getAssignedTo();
+        boolean assigneeChanges = (clearing || newAssignee != null) && !java.util.Objects.equals(newAssignee, customer.getAssignedTo());
+        TenderEntity sourceTender = null;
+        if (assigneeChanges && customer.getSourceTenderId() != null) {
+            sourceTender = tenderRepo.findByIdForUpdate(customer.getSourceTenderId()).orElse(null);
+            if (sourceTender != null) {
+                if (!userScopeService.canActOn(userId, newAssignee)) {
+                    throw new CustomException("You are not allowed to assign to " + userScopeService.displayName(newAssignee));
+                }
+                if (!accessPolicy.canAccess(sourceTender.getCreatedBy(), sourceTender.getAssignedTo(), userId, userRole)) {
+                    throw new CustomException("You can edit this client but not its source tender, so the assignment was not changed");
+                }
+            }
+        }
 
         if (requestWrapper.getName()          != null) customer.setName(requestWrapper.getName());
         if (requestWrapper.getCompanyName()   != null) customer.setCompanyName(requestWrapper.getCompanyName());
@@ -238,9 +261,14 @@ public class CustomersService {
         if (requestWrapper.getState()         != null) customer.setState(requestWrapper.getState());
         if (requestWrapper.getPincode()       != null) customer.setPincode(requestWrapper.getPincode());
         if (requestWrapper.getStatus()        != null) customer.setStatus(requestWrapper.getStatus());
-        if (requestWrapper.getAssignedTo()    != null) customer.setAssignedTo(requestWrapper.getAssignedTo());
+        if (assigneeChanges) customer.setAssignedTo(newAssignee);
 
-        return convertToWrapper(customersRepo.save(customer));
+        CustomersEntity saved = customersRepo.save(customer);
+        if (sourceTender != null) {
+            sourceTender.setAssignedTo(newAssignee);
+            tenderRepo.save(sourceTender);
+        }
+        return convertToWrapper(saved);
     }
 
     // ── DELETE ───────────────────────────────────────────────────────────────
@@ -320,15 +348,7 @@ public class CustomersService {
     // ── Access helper ────────────────────────────────────────────────────────
 
     private boolean hasAccessToCustomer(CustomersEntity customer, Long userId, String userRole) {
-        int level = roleHierarchyService.getLevelOrder(userRole);
-        if (level <= 2 || isAccountsRole(userRole)) return true;
-        if ((customer.getAssignedTo() != null && customer.getAssignedTo().equals(userId)) ||
-            (customer.getCreatedBy()  != null && customer.getCreatedBy().equals(userId))) return true;
-        if (level == 3) {
-            List<Long> memberIds = resolveTeamMemberIds(userId);
-            return memberIds.contains(customer.getCreatedBy()) || memberIds.contains(customer.getAssignedTo());
-        }
-        return false;
+        return accessPolicy.canAccess(customer.getCreatedBy(), customer.getAssignedTo(), userId, userRole);
     }
 
     @Transactional(readOnly = true)
