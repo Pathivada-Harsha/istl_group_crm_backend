@@ -46,6 +46,8 @@ public class ProposalsController {
     private LeadHistoryService leadHistoryService;
     @Autowired
     private com.istlgroup.istl_group_crm_backend.service.SolarProposalDocService solarProposalDocService;
+    @Autowired
+    private com.istlgroup.istl_group_crm_backend.service.GenericProposalDocService genericProposalDocService;
     /**
      * Get all proposals with pagination
      */
@@ -332,6 +334,74 @@ public ResponseEntity<Map<String, Object>> createProposal(
         }
     }
 
+    // =========================================================================
+    // STANDARD PROPOSAL DOCUMENT — every lead the solar generator does not take.
+    // The deliverable is a PDF.
+    // =========================================================================
+
+    /** GET /proposals/generic/prefill?leadId=…&proposalId=… */
+    @GetMapping("/generic/prefill")
+    public ResponseEntity<Map<String, Object>> genericPrefill(
+            @RequestParam Long leadId,
+            @RequestParam(required = false) Long proposalId,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+
+        Map<String, Object> response = new HashMap<>();
+        try {
+            response.put("success", true);
+            response.put("data", genericProposalDocService.prefill(leadId, proposalId));
+            return ResponseEntity.ok(response);
+        } catch (CustomException e) {
+            response.put("success", false);
+            response.put("message", e.getMessage());
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Proposal prefill failed for lead {}", leadId, e);
+            response.put("success", false);
+            response.put("message", "Failed to prepare the proposal: " + e.getMessage());
+            return ResponseEntity.ok(response);
+        }
+    }
+
+    /** POST /proposals/generic/generate */
+    @PostMapping("/generic/generate")
+    public ResponseEntity<Map<String, Object>> generateGenericProposal(
+            @RequestBody com.istlgroup.istl_group_crm_backend.wrapperClasses.GenericProposalDocRequest request,
+            @ActingUserId Long userId,
+            @ActingUserRole String userRole) {
+
+        Map<String, Object> response = new HashMap<>();
+        try {
+            Map<String, Object> data = genericProposalDocService.generate(request, userId);
+            response.put("success", true);
+            response.put("data", data);
+            response.put("message", "Proposal document generated (v" + data.get("version") + ")");
+
+            if (request.getLeadId() != null) {
+                try {
+                    leadHistoryService.addHistory(
+                        request.getLeadId(), "PROPOSAL_CREATED", null, null,
+                        String.valueOf(data.get("proposalNo")),
+                        "Proposal document generated: " + data.get("proposalNo") + " v" + data.get("version"),
+                        userId);
+                } catch (Exception historyEx) {
+                    log.warn("Failed to add proposal history: {}", historyEx.getMessage());
+                }
+            }
+            return ResponseEntity.ok(response);
+        } catch (CustomException e) {
+            response.put("success", false);
+            response.put("message", e.getMessage());
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Proposal generation failed for lead {}", request.getLeadId(), e);
+            response.put("success", false);
+            response.put("message", "Failed to generate the proposal document: " + e.getMessage());
+            return ResponseEntity.ok(response);
+        }
+    }
+
     /** Every stored version of a proposal's generated document (no file bytes). */
     @GetMapping("/{id}/documents")
     public ResponseEntity<Map<String, Object>> listProposalDocuments(
@@ -394,8 +464,13 @@ public ResponseEntity<Map<String, Object>> createProposal(
             @ActingUserId Long userId,
             @ActingUserRole String userRole) {
         try {
-            proposalsService.getProposalById(id, userId, userRole); // permission check
-            var pdf = solarProposalDocService.pdf(id, version);
+            var proposal = proposalsService.getProposalById(id, userId, userRole); // permission check
+            // The two generators store different things: solar a .docx plus a cached PDF
+            // rendition, the standard one the PDF itself. Only this endpoint has to know.
+            var pdf = com.istlgroup.istl_group_crm_backend.service.SolarProposalDocService
+                        .isSolar(proposal.getGroupName(), proposal.getSubGroupName())
+                    ? solarProposalDocService.pdf(id, version)
+                    : genericProposalDocService.pdf(id, version);
             if (pdf == null || pdf.data() == null || pdf.data().length == 0) {
                 return ResponseEntity.status(HttpStatus.CONFLICT).build();
             }

@@ -408,8 +408,14 @@ public class OrderBookService {
 
             String description = str(payload.get("workDescription"));
             if (description.isEmpty()) {
-                String cap = str(payload.get("capacityLabel"));
-                description = (cap.isEmpty() ? "" : cap + " ") + "Solar PV Plant";
+                if ("GENERIC".equalsIgnoreCase(str(payload.get("docKind")))) {
+                    // Standard (non-solar) generator: nothing solar to name, use the proposal's subject.
+                    String title = str(payload.get("title"));
+                    description = title.isEmpty() ? "Project works as per proposal" : title;
+                } else {
+                    String cap = str(payload.get("capacityLabel"));
+                    description = (cap.isEmpty() ? "" : cap + " ") + "Solar PV Plant";
+                }
             }
 
             Map<String, Object> item = new HashMap<>();

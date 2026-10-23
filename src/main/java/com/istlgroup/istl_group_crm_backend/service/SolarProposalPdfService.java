@@ -30,7 +30,6 @@ import com.itextpdf.layout.properties.ListNumberingType;
 import com.itextpdf.layout.properties.TextAlignment;
 import com.itextpdf.layout.properties.UnitValue;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -59,19 +58,22 @@ import java.util.Map;
  * is generated from the Word skeleton so the two can't drift.
  */
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class SolarProposalPdfService {
 
     private final ProposalCopy copy;
 
+    public SolarProposalPdfService(ProposalCopy copy) {
+        this.copy = copy;
+    }
+
     /** Footer band, page-anchored in the skeleton's footer1.xml. */
-    private static final String FOOTER_NAME = "SESOLA POWER PROJECTS PRIVATE LIMITED";
-    private static final String FOOTER_ADDR =
+    static final String FOOTER_NAME = "SESOLA POWER PROJECTS PRIVATE LIMITED";
+    static final String FOOTER_ADDR =
             "8th Floor, Pranava Vaishnoi Business Park, Kothaguda Village, "
             + "Serilingampally Mandal, Ranga Reddy District, Telangana India 500084";
-    private static final String FOOTER_CONTACT =
-            "www.sesolaenergy.com | Email: info@sesolaenergy.com | M: +91 83400 20020";
+    static final String FOOTER_CONTACT =
+            "www.sesolaenergy.com | Email: info@sesolaenergy.com | M: +91 8340020020";
 
     /**
      * @param tokens  the same {@code {{TOKEN}} -> value} map the .docx filler uses
@@ -133,7 +135,7 @@ public class SolarProposalPdfService {
 
         HeaderFooterHandler(ProposalPdfTheme th) {
             this.th = th;
-            this.logo = ProposalPdfTheme.loadAsset("header-logo.jpg");
+            this.logo = ProposalPdfTheme.loadAsset("logo.png");
         }
 
         @Override
@@ -584,7 +586,7 @@ public class SolarProposalPdfService {
         byte[] sign = ProposalPdfTheme.loadAsset("signature.jpg");
         if (sign != null) {
             Image img = new Image(ImageDataFactory.create(sign));
-            img.scaleAbsolute(93.6f, 73.4f);
+            img.scaleToFit(93.6f, 73.4f);
             block.add(new Div().add(img).setMarginBottom(2));
         }
         block.add(th.strong(copy.get("signatory.name"), ProposalPdfTheme.AMOUNT_WORDS).setMargin(0));

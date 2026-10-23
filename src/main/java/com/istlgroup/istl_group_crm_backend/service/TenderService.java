@@ -115,7 +115,7 @@ public class TenderService {
             t.setAssignedTo(w.getAssignedTo());
         }
         TenderEntity saved = tenderRepo.save(t);
-        if ("Won".equals(saved.getStatus())) syncClientOnWin(saved);
+        onStatusChange(saved, null);
         saveChildren(saved.getId(), w);
         recordImport(saved.getId(), w, actorName);
         return toWrapper(tenderRepo.findById(saved.getId()).orElse(saved), true);
@@ -131,7 +131,7 @@ public class TenderService {
         else if (Boolean.TRUE.equals(w.getUnassign())) applyAssignment(t, null, userId, userRole);
         applyScalars(t, w);
         tenderRepo.save(t);
-        if ("Won".equals(t.getStatus()) && !"Won".equals(prevStatus)) syncClientOnWin(t);
+        onStatusChange(t, prevStatus);
         // whole-object save: replace all child collections
         deleteChildren(id);
         saveChildren(id, w);
@@ -178,18 +178,43 @@ public class TenderService {
         }
     }
 
-    // ── Won → client ─────────────────────────────────────────────────────
+    // ── Won ⇄ client lifecycle ───────────────────────────────────────────
+    private static final String WON = "Won";
+
     /**
-     * A tender moving to Won generates its client (shown on Clients Data), exactly once:
-     * the client carries source_tender_id (unique), and callers hold the tender's row lock,
-     * so repeated or concurrent Won requests reuse the existing client. Existing clients
-     * are never matched by company, email, GSTIN or phone: an independent client with the
-     * same details stays independent. A client that was deleted is not resurrected.
+     * The one place a tender's status change reaches its generated client. Callers hold the
+     * tender's row lock and run inside the save's transaction, so a failure rolls both back.
+     * <ul>
+     *   <li>to Won (from anything else): make sure exactly one active client exists;</li>
+     *   <li>from Won to anything else: take the client out of the active list, keeping it
+     *       (and its source_tender_id) so a later Won can bring the same record back.</li>
+     * </ul>
+     * The client is only ever found through customers.source_tender_id, never by name, email,
+     * GSTIN or phone, so independent clients are never reused, restored or hidden.
      */
-    private void syncClientOnWin(TenderEntity t) {
+    private void onStatusChange(TenderEntity t, String previousStatus) {
+        boolean nowWon = WON.equals(t.getStatus());
+        boolean wasWon = WON.equals(previousStatus);
+        if (nowWon && !wasWon) activateClient(t);
+        else if (!nowWon && wasWon) deactivateClient(t);
+    }
+
+    /**
+     * Ensure the tender's client is present and active in Clients Data:
+     * none yet (or it was removed for good) -> create it; deactivated or deleted from the
+     * Clients page (soft delete) -> restore the same record and refresh its details and
+     * assignee from the tender; already active -> reuse it, no duplicate.
+     */
+    private void activateClient(TenderEntity t) {
         CustomersEntity existing = customersRepo.findBySourceTenderId(t.getId()).orElse(null);
         if (existing != null) {
-            if (existing.getDeletedAt() == null && t.getAssignedTo() != null
+            if (existing.getDeletedAt() != null) {
+                existing.setDeletedAt(null);
+                copyTenderDetails(existing, t);
+                existing.setStatus("Active");
+                existing.setAssignedTo(t.getAssignedTo() != null ? t.getAssignedTo() : t.getCreatedBy());
+                customersRepo.save(existing);
+            } else if (t.getAssignedTo() != null
                     && !java.util.Objects.equals(existing.getAssignedTo(), t.getAssignedTo())) {
                 existing.setAssignedTo(t.getAssignedTo());
                 customersRepo.save(existing);
@@ -203,8 +228,34 @@ public class TenderService {
         }
         CustomersEntity c = new CustomersEntity();
         c.setCustomerCode("TEMP-" + java.util.UUID.randomUUID().toString().substring(0, 8));
-        c.setName(clip(company, 255));
-        c.setCompanyName(clip(company, 255));
+        copyTenderDetails(c, t);
+        c.setStatus("Active");
+        // Assigned to the tender's assignee (falling back to its creator), so the client is
+        // visible to the same people as the tender.
+        c.setAssignedTo(t.getAssignedTo() != null ? t.getAssignedTo() : t.getCreatedBy());
+        c.setCreatedBy(t.getCreatedBy());
+        c.setSourceTenderId(t.getId());
+        CustomersEntity saved = customersRepo.save(c);
+        saved.setCustomerCode(String.format("CUST-%d-%06d", LocalDateTime.now().getYear(), saved.getId()));
+        customersRepo.save(saved);
+    }
+
+    /** The tender stopped being Won: hide its client (soft delete) but keep the link. */
+    private void deactivateClient(TenderEntity t) {
+        customersRepo.findBySourceTenderId(t.getId())
+                .filter(c -> c.getDeletedAt() == null)
+                .ifPresent(c -> {
+                    c.setDeletedAt(LocalDateTime.now());
+                    customersRepo.save(c);
+                });
+    }
+
+    private void copyTenderDetails(CustomersEntity c, TenderEntity t) {
+        String company = firstNonBlank(t.getClientCompany(), t.getIssuingAuthority());
+        if (company != null) {
+            c.setName(clip(company, 255));
+            c.setCompanyName(clip(company, 255));
+        }
         c.setContactPerson(clip(t.getClientContactPerson(), 200));
         c.setEmail(clip(t.getClientContactEmail(), 255));
         c.setPhone(clip(t.getClientContactPhone(), 50));
@@ -215,15 +266,6 @@ public class TenderService {
         c.setState(clip(firstNonBlank(t.getClientState(), t.getState()), 100));
         c.setGroupName(clip(firstNonBlank(t.getGroupName(), "Others"), 100));
         c.setSubGroupName(clip(t.getSubGroupName(), 100));
-        c.setStatus("Active");
-        // Assigned to the tender's assignee (falling back to its creator), so the client is
-        // visible to the same people as the tender.
-        c.setAssignedTo(t.getAssignedTo() != null ? t.getAssignedTo() : t.getCreatedBy());
-        c.setCreatedBy(t.getCreatedBy());
-        c.setSourceTenderId(t.getId());
-        CustomersEntity saved = customersRepo.save(c);
-        saved.setCustomerCode(String.format("CUST-%d-%06d", LocalDateTime.now().getYear(), saved.getId()));
-        customersRepo.save(saved);
     }
 
     private static String firstNonBlank(String a, String b) {

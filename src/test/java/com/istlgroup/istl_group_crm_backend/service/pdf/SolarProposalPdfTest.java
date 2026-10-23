@@ -315,6 +315,7 @@ class SolarProposalPdfTest {
             String s = flat(para);
             if (s.isEmpty() || s.contains("{{")) continue;          // spacers and token-bearing lines
             if (s.length() < 12) continue;                          // table labels, handled separately
+            if (com.istlgroup.istl_group_crm_backend.service.docx.DocxSignatory.SKELETON_LINES.contains(s)) continue;   // rewritten per proposal
             if (!copyValues.contains(s) && !containedInAValue(copyValues, s)) missing.add(s);
         }
 
