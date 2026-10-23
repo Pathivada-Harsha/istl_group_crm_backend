@@ -205,10 +205,10 @@ class SolarProposalDocTest {
      */
     @Test
     void routesOnlySolarSubGroupsToTheGeneratedDocument() {
-        for (String sub : new String[] { "Solar_Rooftop", "Solar_ground_mounted", "Solar_carports", "Solar Wind" }) {
+        for (String sub : new String[] { "Solar_Rooftop", "Solar_ground_mounted", "Solar_carports", "Solar Wind", "Pm_kusum" }) {
             assertTrue(SolarProposalDocService.isSolar("EPC", sub), sub + " must use the solar document");
         }
-        for (String sub : new String[] { "Substations", "Pm_kusum", "CCMS", "ITMS", "MCMS", "", null }) {
+        for (String sub : new String[] { "Substations", "CCMS", "ITMS", "MCMS", "", null }) {
             assertFalse(SolarProposalDocService.isSolar("EPC", sub), sub + " must keep the generic proposal path");
         }
         assertFalse(SolarProposalDocService.isSolar("IoT", "CCMS"));

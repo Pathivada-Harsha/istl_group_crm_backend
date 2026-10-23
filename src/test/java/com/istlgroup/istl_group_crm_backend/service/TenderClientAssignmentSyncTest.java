@@ -215,6 +215,160 @@ class TenderClientAssignmentSyncTest {
         assertEquals(C, tenderOf(t).getAssignedTo());
     }
 
+    // ── Won ⇄ client lifecycle ───────────────────────────────────────────
+    List<CustomersEntity> active(Long tenderId) {
+        return generated(tenderId).stream().filter(c -> c.getDeletedAt() == null).toList();
+    }
+
+    void setStatus(TenderWrapper t, String status, Long assignee) throws CustomException {
+        tenderService.update(t.getId(), wrapper("Solar A", status, assignee), ADMIN, ADMIN_ROLE, "admin");
+    }
+
+    @Test
+    void fullLifecycleKeepsExactlyOneActiveClientWhileWonAndNoneOtherwise() throws Exception {
+        TenderWrapper t = tenderService.create(wrapper("Solar A", "Pending", A), ADMIN, "admin");
+        assertEquals(0, generated(t.getId()).size());
+
+        setStatus(t, "Won", A);
+        assertEquals(1, active(t.getId()).size());
+        Long clientId = active(t.getId()).get(0).getId();
+
+        setStatus(t, "Lost", A);
+        assertEquals(0, active(t.getId()).size(), "Lost hides the client");
+        assertEquals(1, generated(t.getId()).size(), "...but keeps it, still linked to the tender");
+
+        setStatus(t, "Won", A);
+        assertEquals(1, active(t.getId()).size());
+        assertEquals(clientId, active(t.getId()).get(0).getId(), "the same record comes back");
+
+        setStatus(t, "In Progress", A);
+        assertEquals(0, active(t.getId()).size());
+
+        setStatus(t, "Won", A);
+        assertEquals(1, active(t.getId()).size());
+        assertEquals(1, generated(t.getId()).size(), "never a second client for the tender");
+    }
+
+    @Test
+    void wonToPendingAlsoHidesTheClient() throws Exception {
+        TenderWrapper t = wonTender("Solar A", A);
+        setStatus(t, "Pending", A);
+        assertEquals(0, active(t.getId()).size());
+        assertNotNull(generated(t.getId()).get(0).getDeletedAt());
+    }
+
+    @Test
+    void savingAnAlreadyNonWonTenderDoesNotTouchTheHiddenClient() throws Exception {
+        TenderWrapper t = wonTender("Solar A", A);
+        setStatus(t, "Lost", A);
+        var deletedAt = generated(t.getId()).get(0).getDeletedAt();
+
+        setStatus(t, "Lost", A);   // unrelated save while Lost
+        assertEquals(deletedAt, generated(t.getId()).get(0).getDeletedAt());
+        assertEquals(0, active(t.getId()).size());
+    }
+
+    @Test
+    void aClientDeletedOnTheClientsPageComesBackWhenTheTenderIsWonAgain() throws Exception {
+        TenderWrapper t = wonTender("Solar A", A);
+        CustomersEntity client = active(t.getId()).get(0);
+
+        customersService.deleteCustomer(client.getId(), ADMIN, ADMIN_ROLE);   // existing soft delete
+        assertEquals(0, active(t.getId()).size());
+
+        setStatus(t, "Lost", A);
+        setStatus(t, "Won", A);
+
+        assertEquals(1, active(t.getId()).size());
+        assertEquals(client.getId(), active(t.getId()).get(0).getId());
+        assertNull(customers.get(client.getId()).getDeletedAt());
+    }
+
+    @Test
+    void aPermanentlyDeletedClientIsRecreatedForTheSameTender() throws Exception {
+        TenderWrapper t = wonTender("Solar A", A);
+        customers.remove(active(t.getId()).get(0).getId());          // row gone for good
+        assertEquals(0, generated(t.getId()).size());
+
+        setStatus(t, "Lost", A);
+        setStatus(t, "Won", A);
+
+        assertEquals(1, active(t.getId()).size());
+        assertEquals(t.getId(), active(t.getId()).get(0).getSourceTenderId());
+    }
+
+    @Test
+    void reactivationRefreshesDetailsAndTakesTheTendersCurrentAssignee() throws Exception {
+        TenderWrapper t = wonTender("Solar A", A);
+        setStatus(t, "Lost", A);
+        tenderService.assign(t.getId(), B, ADMIN, ADMIN_ROLE);   // hidden client is not synchronised yet
+
+        TenderWrapper again = wrapper("Solar A Renamed", "Won", B);
+        tenderService.update(t.getId(), again, ADMIN, ADMIN_ROLE, "admin");
+
+        CustomersEntity client = active(t.getId()).get(0);
+        assertEquals(B, client.getAssignedTo());
+        assertEquals("Solar A Renamed", client.getCompanyName());
+    }
+
+    @Test
+    void assignmentStillSyncsBothWaysAfterReactivationAndRecreation() throws Exception {
+        TenderWrapper t = wonTender("Solar A", A);
+        setStatus(t, "Lost", A);
+        setStatus(t, "Won", A);                                   // reactivated
+        tenderService.assign(t.getId(), B, ADMIN, ADMIN_ROLE);
+        assertEquals(B, active(t.getId()).get(0).getAssignedTo());
+        customersService.updateCustomer(active(t.getId()).get(0).getId(), assignment(C), ADMIN, ADMIN_ROLE);
+        assertEquals(C, tenderOf(t).getAssignedTo());
+
+        customers.remove(active(t.getId()).get(0).getId());       // now recreated
+        setStatus(t, "Lost", C);
+        setStatus(t, "Won", C);
+        tenderService.assign(t.getId(), B, ADMIN, ADMIN_ROLE);
+        assertEquals(B, active(t.getId()).get(0).getAssignedTo());
+        customersService.updateCustomer(active(t.getId()).get(0).getId(), assignment(A), ADMIN, ADMIN_ROLE);
+        assertEquals(A, tenderOf(t).getAssignedTo());
+    }
+
+    @Test
+    void aDeletedIndependentClientIsNeverRestoredOrRecreatedByAnUnrelatedTender() throws Exception {
+        CustomersEntity solo = independentClient("Solar A", A);
+        customersService.deleteCustomer(solo.getId(), ADMIN, ADMIN_ROLE);
+
+        TenderWrapper t = wonTender("Solar A", A);               // identical company / GSTIN / email / phone
+
+        assertNotNull(customers.get(solo.getId()).getDeletedAt(), "independent client stays deleted");
+        assertNull(solo.getSourceTenderId());
+        assertEquals(1, active(t.getId()).size());
+        assertNotEquals(solo.getId(), active(t.getId()).get(0).getId());
+
+        setStatus(t, "Lost", A);                                   // hiding the generated client
+        assertNotNull(customers.get(solo.getId()).getDeletedAt()); // ...never resurrects or alters the independent one
+    }
+
+    @Test
+    void leavingWonOnlyHidesThatTendersClient() throws Exception {
+        CustomersEntity lookalike = independentClient("Solar A", A);
+        TenderWrapper t1 = wonTender("Solar A", A);
+        TenderWrapper t2 = wonTender("Wind B", A);
+
+        setStatus(t1, "Lost", A);
+
+        assertEquals(0, active(t1.getId()).size());
+        assertEquals(1, active(t2.getId()).size());
+        assertNull(customers.get(lookalike.getId()).getDeletedAt());
+    }
+
+    @Test
+    void anOutsiderCannotChangeStatusSoTheClientIsNotHidden() throws Exception {
+        TenderWrapper t = wonTender("Solar A", A);
+
+        assertThrows(CustomException.class,
+                () -> tenderService.update(t.getId(), wrapper("Solar A", "Lost", A), OUTSIDER, STAFF_ROLE, "x"));
+
+        assertEquals(1, active(t.getId()).size());
+    }
+
     // ── unassign (empty Assign To) ───────────────────────────────────────
     @Test
     void clearingTheAssigneeOnTheTenderClearsItsClientToo() throws Exception {

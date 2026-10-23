@@ -24,6 +24,8 @@ public interface ProposalDocumentRepo extends JpaRepository<ProposalDocumentEnti
         Integer getVersion();
         String getFileName();
         Long getFileSize();
+        /** application/pdf for the standard generator, the .docx type for solar. */
+        String getContentType();
         LocalDateTime getGeneratedAt();
         String getGeneratedByName();
         /** Has a PDF already, or can be given one from the stored payload. */
@@ -33,7 +35,7 @@ public interface ProposalDocumentRepo extends JpaRepository<ProposalDocumentEnti
     // "payload IS NOT NULL" is answered from the row header — MySQL does not fetch
     // the off-page LONGTEXT to evaluate it, so this stays blob-free.
     @Query("SELECT d.id AS id, d.version AS version, d.fileName AS fileName, "
-         + "d.fileSize AS fileSize, d.generatedAt AS generatedAt, d.generatedByName AS generatedByName, "
+         + "d.fileSize AS fileSize, d.contentType AS contentType, d.generatedAt AS generatedAt, d.generatedByName AS generatedByName, "
          + "CASE WHEN d.pdfSize IS NOT NULL OR d.payload IS NOT NULL THEN TRUE ELSE FALSE END AS previewable "
          + "FROM ProposalDocumentEntity d WHERE d.proposalId = :proposalId ORDER BY d.version DESC")
     List<DocumentSummary> findSummaries(@Param("proposalId") Long proposalId);

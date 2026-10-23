@@ -207,7 +207,7 @@ public final class DocxTemplate {
 
     // ── Package I/O ──────────────────────────────────────────────────────────
 
-    private static Map<String, byte[]> read(byte[] docx) throws IOException {
+    static Map<String, byte[]> read(byte[] docx) throws IOException {
         Map<String, byte[]> parts = new LinkedHashMap<>();
         try (ZipInputStream zin = new ZipInputStream(new ByteArrayInputStream(docx))) {
             ZipEntry e;
@@ -223,7 +223,7 @@ public final class DocxTemplate {
         return parts;
     }
 
-    private static byte[] write(Map<String, byte[]> parts) throws IOException {
+    static byte[] write(Map<String, byte[]> parts) throws IOException {
         ByteArrayOutputStream bos = new ByteArrayOutputStream(parts.size() * 4096);
         try (ZipOutputStream zout = new ZipOutputStream(bos)) {
             // [Content_Types].xml first — some readers insist on it.

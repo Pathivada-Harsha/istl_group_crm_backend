@@ -39,7 +39,10 @@ import com.istlgroup.istl_group_crm_backend.repo.ProposalsRepo;
 import com.istlgroup.istl_group_crm_backend.repo.SiteVisitRepo;
 import com.istlgroup.istl_group_crm_backend.repo.UsersRepo;
 import com.istlgroup.istl_group_crm_backend.service.docx.AmountInWords;
+import com.istlgroup.istl_group_crm_backend.service.docx.DocxBranding;
+import com.istlgroup.istl_group_crm_backend.service.docx.DocxSignatory;
 import com.istlgroup.istl_group_crm_backend.service.docx.DocxTemplate;
+import com.istlgroup.istl_group_crm_backend.service.pdf.ProposalPdfTheme;
 import com.istlgroup.istl_group_crm_backend.util.CapacityUtil;
 import com.istlgroup.istl_group_crm_backend.wrapperClasses.SolarProposalDocRequest;
 
@@ -70,6 +73,8 @@ public class SolarProposalDocService {
      * the data, so the sub-group prefix is what decides the proposal path.
      */
     private static final String SOLAR_SUBGROUP_PREFIX = "solar";
+    /** PM-KUSUM is a solar scheme, so its sub-group takes the solar document too. */
+    private static final String PM_KUSUM_SUBGROUP = "pm_kusum";
     private static final String TEMPLATE = "proposal-templates/solar-proposal-template.docx";
     private static final String DOCX_MIME =
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -111,6 +116,7 @@ public class SolarProposalDocService {
     @Autowired private LeadScopeService leadScopeService;
     /** Renders the preview rendition from the same tokens as the .docx. */
     @Autowired private SolarProposalPdfService solarProposalPdfService;
+    @Autowired private com.istlgroup.istl_group_crm_backend.service.pdf.ProposalCopy proposalCopy;
 
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -172,7 +178,10 @@ public class SolarProposalDocService {
         out.put("coverSubtitle", capacityLabel + " Ongrid Rooftop Solar Plant");
         out.put("title", (nvl(lead.getName()) + " — " + capacityLabel + " Rooftop Solar Proposal").trim());
 
-        out.put("workDescription", capacityLabel + " Rooftop Solar PV Plant with DCR panels");
+        // DCR (domestic-content) panels are what the residential subsidy requires, so only
+        // those proposals say so; a non-subsidy proposal is just the plant.
+        out.put("workDescription", capacityLabel + " Rooftop Solar PV Plant"
+                + (subsidyEligible(propertyType) ? " with DCR panels" : ""));
         out.put("basePrice", basePrice);
         out.put("gstPercent", DEFAULT_GST_PERCENT);
         out.put("totalCost", basePrice == null ? null
@@ -229,7 +238,10 @@ public class SolarProposalDocService {
 
         if (previousPayload != null) {
             try {
-                out.put("previous", mapper.readValue(previousPayload, Map.class));
+                Map<?, ?> prev = mapper.readValue(previousPayload, Map.class);
+                // A standard-PDF payload (docKind GENERIC) is another generator's: its wording and
+                // fields must not prefill the solar review step.
+                if (!"GENERIC".equals(String.valueOf(prev.get("docKind")))) out.put("previous", prev);
             } catch (Exception e) {
                 log.warn("Could not parse previous proposal payload for lead {}: {}", leadId, e.getMessage());
             }
@@ -282,6 +294,7 @@ public class SolarProposalDocService {
         byte[] docx;
         try {
             docx = DocxTemplate.fill(template(), tokens, blocks, repeats);
+            docx = brand(docx);
         } catch (IOException e) {
             log.error("Failed to fill solar proposal template for lead {}", req.getLeadId(), e);
             throw new CustomException("Failed to build the proposal document: " + e.getMessage());
@@ -345,6 +358,24 @@ public class SolarProposalDocService {
         return out;
     }
 
+    /**
+     * Applies the running header logo, footer band and closing signature block to the
+     * filled skeleton - the same identity the PDF rendition draws. Single-tenant: the
+     * header is the bundled Sesola logo, the footer and signer are the fixed Sesola
+     * details shared with {@link SolarProposalPdfService} and solar-proposal.properties.
+     */
+    private byte[] brand(byte[] docx) throws IOException {
+        docx = DocxBranding.apply(docx, ProposalPdfTheme.loadAsset("logo.png"),
+                SolarProposalPdfService.FOOTER_NAME, SolarProposalPdfService.FOOTER_ADDR,
+                SolarProposalPdfService.FOOTER_CONTACT);
+        return DocxSignatory.apply(docx, SIGNING_COMPANY,
+                proposalCopy.get("signatory.name"), proposalCopy.get("signatory.phone"),
+                proposalCopy.get("signatory.title"), ProposalPdfTheme.loadAsset("signature.jpg"));
+    }
+
+    /** Printed as "For {SIGNING_COMPANY}" above the signature. */
+    private static final String SIGNING_COMPANY = "SESOLA POWER PROJECTS PVT. LTD.";
+
     /** Version list for a proposal (metadata only — never the file bytes). */
     public List<Map<String, Object>> versions(Long proposalId) {
         List<Map<String, Object>> out = new ArrayList<>();
@@ -354,6 +385,10 @@ public class SolarProposalDocService {
             m.put("version", d.getVersion());
             m.put("fileName", d.getFileName());
             m.put("fileSize", d.getFileSize());
+            // Serves both generators: solar stores a .docx with a separate PDF rendition,
+            // the standard generator stores the PDF itself. The UI reads this to decide
+            // whether to offer one download button or two.
+            m.put("contentType", d.getContentType());
             m.put("generatedAt", d.getGeneratedAt());
             m.put("generatedByName", d.getGeneratedByName());
             m.put("previewable", Boolean.TRUE.equals(d.getPreviewable()));
@@ -725,7 +760,7 @@ public class SolarProposalDocService {
     public static boolean isSolar(String groupName, String subGroupName) {
         String sub = subGroupName == null ? "" : subGroupName.trim().toLowerCase();
         String grp = groupName == null ? "" : groupName.trim();
-        return sub.startsWith(SOLAR_SUBGROUP_PREFIX) || "Solar".equalsIgnoreCase(grp);
+        return sub.startsWith(SOLAR_SUBGROUP_PREFIX) || sub.equals(PM_KUSUM_SUBGROUP) || "Solar".equalsIgnoreCase(grp);
     }
 
     private void requireSolar(LeadsEntity lead) throws CustomException {
